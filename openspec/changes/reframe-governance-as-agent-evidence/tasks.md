@@ -58,18 +58,18 @@ Run one test file with `npx vitest run <file>`. Each group is one small PR, in t
 
 ## 3. Certificates as before-stop evidence
 
-- [ ] 3.1 Edit `src/cli/commands/hook.ts` (`beforeStop`, line 494): add a helper that runs one
+- [x] 3.1 Edit `src/cli/commands/hook.ts` (`beforeStop`, line 494): add a helper that runs one
   source with its own 10 s limit and returns at most 3 `HookItem`s, or none on error or timeout.
   Start the sources together with `handleVerifyChange`. Base ref = the `baseline` argument. Test:
   `src/cli/commands/hook.test.ts` (a source that never resolves adds no item and the receipt has no
   "passed" text for it).
   Done when: the test file passes and the existing timeout test (lines 151-156) still passes.
-- [ ] 3.2 Same file: wire `handleCertifyPublicSurface` (`src/core/services/mcp-handlers/public-surface.ts:1211`).
+- [x] 3.2 Same file: wire `handleCertifyPublicSurface` (`src/core/services/mcp-handlers/public-surface.ts:1211`).
   Trigger: the session diff has a `.ts`, `.tsx`, `.js`, `.jsx` or `.py` file. Emit only findings
   classified `breaking`; the item text names the export and its consumers. Test: `hook.test.ts`
   (a removed exported function with one consumer → 1 item; a Markdown-only diff → the handler is not called).
   Done when: both cases pass.
-- [ ] 3.3 Same file: wire `handleCertifyServiceContract` (`src/core/services/mcp-handlers/service-contract.ts:700`;
+- [x] 3.3 Same file: wire `handleCertifyServiceContract` (`src/core/services/mcp-handlers/service-contract.ts:700`;
   trigger: the diff has a file that module's reader accepts as OpenAPI, protobuf or GraphQL; emit
   `breaking` and `dangerous` changes) and `handleChangeImpactCertificate`
   (`src/core/services/mcp-handlers/impact-certificate.ts:1031`; trigger: `impactCertificate.surfaces`
