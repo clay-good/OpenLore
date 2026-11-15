@@ -6,17 +6,17 @@ builders edit `src/`, `docs/`, `skills/`, `examples/`, `plugin/` later. Lines ar
 
 ## 1. First run creates no spec folder; a missing CLI is not assessed
 
-- [ ] 1.1 No `createOpenSpecStructure` at first run (`src/api/init.ts:80-88`, `cli/commands/init.ts:186-189`);
+- [x] 1.1 No `createOpenSpecStructure` at first run (`src/api/init.ts:80-88`, `cli/commands/init.ts:186-189`);
   drop the `'Creating openspec directory'` step and match (`install/index.ts:127-132, 166`) and the
   `--fresh-spec-directory` use (`analyze.ts:430`; flag stays parsed). Tests: both `init.test.ts`,
   `install.test.ts`, `cold-start-bootstrap.test.ts`. Done when: no new `openspec/`; an existing one is untouched.
-- [ ] 1.2 `generate` creates what it writes (`openspec-writer.ts:166-168`). Test: `src/api/generate.test.ts`.
+- [x] 1.2 `generate` creates what it writes (`openspec-writer.ts:166-168`). Test: `src/api/generate.test.ts`.
   Done when: with no `openspec/`, mock-provider generate creates `openspec/specs/`.
-- [ ] 1.3 `.gitignore`: `addToGitignore` / `ensureGitignored` (`gitignore-manager.ts:63-94`) write
+- [x] 1.3 `.gitignore`: `addToGitignore` / `ensureGitignored` (`gitignore-manager.ts:63-94`) write
   exactly `.openlore/` (no comment, no blank line) and skip when `git check-ignore -q .openlore/`
   succeeds; first-run output says it once (`src/api/init.ts:93`, `src/cli/commands/init.ts:215`).
   Test: `gitignore-manager.test.ts`. Done when: first run adds 1 line; a rerun or ignored repo adds 0.
-- [ ] 1.4 Missing `openspec` binary is `not-assessed` in `src/cli/commands/change-status.ts`:
+- [x] 1.4 Missing `openspec` binary is `not-assessed` in `src/cli/commands/change-status.ts`:
   `ValidationReceipt` gains `assessed?: false` and `reason?`; `validateWithOpenSpec` maps
   `ENOENT`/`EACCES`; verdict, `archivableCandidate` and text use it. Test: `change-status.test.ts`.
   Done when: with no `openspec` on `PATH`, JSON has `"assessed": false` + reason, text says `validates:

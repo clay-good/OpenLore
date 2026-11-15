@@ -6,6 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import {
   gitignoreExists,
   readGitignore,
@@ -110,14 +111,12 @@ describe('gitignore-manager', () => {
       expect(content).toContain('node_modules/');
     });
 
-    it('should add entry with comment', async () => {
+    it('adds exactly one line: no comment and no blank line', async () => {
       await writeFile(join(testDir, '.gitignore'), 'node_modules/\n');
 
-      await addToGitignore(testDir, '.openlore/', 'openlore analysis artifacts');
+      await addToGitignore(testDir, '.openlore/');
 
-      const content = await readFile(join(testDir, '.gitignore'), 'utf-8');
-      expect(content).toContain('# openlore analysis artifacts');
-      expect(content).toContain('.openlore/');
+      expect(await readFile(join(testDir, '.gitignore'), 'utf-8')).toBe('node_modules/\n.openlore/\n');
     });
 
     it('should return false if entry already exists', async () => {
@@ -148,12 +147,10 @@ describe('gitignore-manager', () => {
 
   describe('ensureGitignored', () => {
     it("returns 'created' and writes .gitignore when none exists (the fresh `git init` case)", async () => {
-      const result = await ensureGitignored(testDir, '.openlore/', 'openlore analysis artifacts');
+      const result = await ensureGitignored(testDir, '.openlore/');
       expect(result).toBe('created');
 
-      const content = await readFile(join(testDir, '.gitignore'), 'utf-8');
-      expect(content).toContain('# openlore analysis artifacts');
-      expect(content).toContain('.openlore/');
+      expect(await readFile(join(testDir, '.gitignore'), 'utf-8')).toBe('.openlore/\n');
     });
 
     it("returns 'appended' when adding to an existing .gitignore", async () => {
@@ -172,6 +169,21 @@ describe('gitignore-manager', () => {
 
       const result = await ensureGitignored(testDir, '.openlore/');
       expect(result).toBe('present');
+    });
+
+    it("returns 'present' and writes nothing when git already ignores the entry another way", async () => {
+      execFileSync('git', ['init', '-q'], { cwd: testDir });
+      await writeFile(join(testDir, '.git', 'info', 'exclude'), '.openlore/\n');
+
+      expect(await ensureGitignored(testDir, '.openlore/')).toBe('present');
+      await expect(readFile(join(testDir, '.gitignore'), 'utf-8')).rejects.toThrow();
+    });
+
+    it('a git repository not ignoring the entry gets the one line', async () => {
+      execFileSync('git', ['init', '-q'], { cwd: testDir });
+      expect(await ensureGitignored(testDir, '.openlore/')).toBe('created');
+      expect(await readFile(join(testDir, '.gitignore'), 'utf-8')).toBe('.openlore/\n');
+      expect(await ensureGitignored(testDir, '.openlore/')).toBe('present');
     });
 
     it('is idempotent across repeated calls', async () => {

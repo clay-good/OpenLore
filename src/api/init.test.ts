@@ -111,14 +111,14 @@ describe('openloreInit', () => {
       expect(result.configPath).toBe(custom);
     });
 
-    it('creates config and openspec structure', async () => {
+    it('creates config and no spec folder', async () => {
       const result = await openloreInit({ rootPath: ROOT });
 
       expect(result.created).toBe(true);
       expect(result.projectType).toBe('nodejs');
       expect(result.configPath).toBe('.openlore/config.json');
       expect(mockWriteOpenLoreConfig).toHaveBeenCalledOnce();
-      expect(mockCreateOpenSpecStructure).toHaveBeenCalledOnce();
+      expect(mockCreateOpenSpecStructure).not.toHaveBeenCalled();
     });
 
     it('delegates .openlore/ gitignore handling to ensureGitignored (which creates the file when absent)', async () => {
@@ -126,7 +126,7 @@ describe('openloreInit', () => {
 
       // The create-or-append/skip decision lives in ensureGitignored (covered by its
       // own tests); init just delegates so a fresh `git init` repo always gets ignored.
-      expect(mockEnsureGitignored).toHaveBeenCalledWith(ROOT, '.openlore/', expect.any(String));
+      expect(mockEnsureGitignored).toHaveBeenCalledWith(ROOT, '.openlore/');
     });
 
     it('skips createOpenSpecStructure when openspec dir already exists', async () => {

@@ -7,6 +7,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
+import { execFileGit } from '../../utils/git-exec.js';
 
 /**
  * Check if .gitignore exists
@@ -58,12 +59,12 @@ export async function isInGitignore(rootPath: string, entry: string): Promise<bo
 }
 
 /**
- * Add an entry to .gitignore
+ * Add exactly one line, `entry`, to .gitignore: no comment and no blank line (change:
+ * spec-framework-neutrality, task 1.3).
  */
 export async function addToGitignore(
   rootPath: string,
   entry: string,
-  comment?: string
 ): Promise<boolean> {
   const gitignorePath = join(rootPath, '.gitignore');
 
@@ -80,14 +81,6 @@ export async function addToGitignore(
     content += '\n';
   }
 
-  // Add comment if provided
-  if (comment) {
-    content += `\n# ${comment}\n`;
-  } else if (content.length > 0) {
-    content += '\n';
-  }
-
-  // Add the entry
   content += `${entry}\n`;
 
   // Write back
@@ -110,14 +103,26 @@ export async function addToGitignore(
 export async function ensureGitignored(
   rootPath: string,
   entry: string,
-  comment?: string
 ): Promise<'present' | 'appended' | 'created'> {
   const existed = await gitignoreExists(rootPath);
   if (existed && (await isInGitignore(rootPath, entry))) {
     return 'present';
   }
-  await addToGitignore(rootPath, entry, comment);
+  // Already ignored some other way (a parent pattern, .git/info/exclude, a global excludes file):
+  // writing the line again adds nothing.
+  if (await gitIgnores(rootPath, entry)) return 'present';
+  await addToGitignore(rootPath, entry);
   return existed ? 'appended' : 'created';
+}
+
+/** Whether git already ignores `entry` here. False outside a repository or when git fails. */
+async function gitIgnores(rootPath: string, entry: string): Promise<boolean> {
+  try {
+    await execFileGit('git', ['check-ignore', '-q', '--', entry], { cwd: rootPath });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
