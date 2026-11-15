@@ -380,6 +380,14 @@ describe('openlore status — hook health (change: hook-reliability, task 6.2)',
     expect(line).toBe('prompt-submitted 2 minutes ago, p95 0.9 s; after-tools just now, p95 0.4 s — 1 error(s), 2 overrun(s), 4 finding(s) shown (last 7 days)');
   });
 
+  it('with outcomes, counts each distinct finding and says what happened to it', () => {
+    const now = Date.parse('2026-11-14T12:00:00Z');
+    const line = formatHookHealth([
+      { moment: 'after-tools', runs: 2, lastRun: new Date(now - 30_000).toISOString(), p95Ms: 430, errors: 0, overruns: 0, shown: 3 },
+    ], now, { total: 3, fixed: 1, decided: 1, open: 0, notAssessed: 1 });
+    expect(line).toBe('after-tools just now, p95 0.4 s — 0 error(s), 0 overrun(s), 3 finding(s) shown: 1 fixed, 1 decided, 0 open, 1 not assessed (last 7 days)');
+  });
+
   it('--json carries hookHealth when runs were recorded, and omits it otherwise', async () => {
     const root = await mkdtemp(join(tmpdir(), 'openlore-status-health-'));
     const cwd = process.cwd();

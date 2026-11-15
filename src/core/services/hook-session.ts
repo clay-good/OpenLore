@@ -41,7 +41,18 @@ export interface ShownFinding {
   moment: string;
   shownAt: string;
   audiences: Audience[];
+  /** The check that produced it and the root-relative file it concerns, when known. */
+  check?: string;
+  file?: string;
+  /**
+   * What happened to it (design section 4): `fixed` when the same check ran again on its file after
+   * an agent edit and did not report it; `open` when the last stop receipt still reported it.
+   * Unset is not assessed. `decided` is joined from decisions when `openlore status` runs.
+   */
+  state?: FindingState;
 }
+
+export type FindingState = 'fixed' | 'open';
 
 /**
  * The proof a finding rests on. With a cited line, its whitespace-normalized text is the proof and
@@ -79,7 +90,12 @@ function readFindings(v: unknown): Record<string, ShownFinding> {
     const r = f as Record<string, unknown>;
     const audiences = Array.isArray(r.audiences) ? r.audiences.filter((a): a is Audience => a === 'agent' || a === 'user') : [];
     if (typeof r.code !== 'string' || typeof r.subject !== 'string' || !audiences.length) continue;
-    out[identity] = { code: r.code, subject: r.subject, moment: String(r.moment ?? ''), shownAt: String(r.shownAt ?? ''), audiences };
+    out[identity] = {
+      code: r.code, subject: r.subject, moment: String(r.moment ?? ''), shownAt: String(r.shownAt ?? ''), audiences,
+      ...(typeof r.check === 'string' ? { check: r.check } : {}),
+      ...(typeof r.file === 'string' ? { file: r.file } : {}),
+      ...(r.state === 'fixed' || r.state === 'open' ? { state: r.state } : {}),
+    };
   }
   return out;
 }
@@ -101,16 +117,46 @@ export function readSession(root: string, sessionId: string | undefined): Sessio
   }
 }
 
-/** Whether this finding was already shown to `audience` in the session. */
+/**
+ * Whether this finding was already shown to `audience` in the session. A finding marked fixed that
+ * is reported again counts as not shown: it came back.
+ */
 export function wasShown(rec: SessionRecord, identity: string, audience: Audience): boolean {
-  return rec.findings[identity]?.audiences.includes(audience) === true;
+  const f = rec.findings[identity];
+  return f?.audiences.includes(audience) === true && f.state !== 'fixed';
 }
 
-/** Record that a finding was shown to `audience` at `moment`. */
-export function markShown(rec: SessionRecord, identity: string, f: { code: string; subject: string }, moment: string, audience: Audience): void {
+/** Record that a finding was shown to `audience` at `moment` (a fixed finding that came back is open again). */
+export function markShown(rec: SessionRecord, identity: string, f: { code: string; subject: string; check?: string; file?: string }, moment: string, audience: Audience): void {
   const prior = rec.findings[identity];
-  if (prior) { if (!prior.audiences.includes(audience)) prior.audiences.push(audience); return; }
-  rec.findings[identity] = { code: f.code, subject: f.subject, moment, shownAt: new Date().toISOString(), audiences: [audience] };
+  if (prior) {
+    if (!prior.audiences.includes(audience)) prior.audiences.push(audience);
+    if (prior.state === 'fixed') delete prior.state;
+    return;
+  }
+  rec.findings[identity] = {
+    code: f.code, subject: f.subject, moment, shownAt: new Date().toISOString(), audiences: [audience],
+    ...(f.check ? { check: f.check } : {}), ...(f.file ? { file: f.file } : {}),
+  };
+}
+
+/**
+ * After `check` ran to completion on `files` (root-relative) following an agent edit: every finding
+ * it showed earlier on one of those files that it did not report now (`reported` identities) is
+ * fixed. A check that failed or timed out must not call this: it proves nothing.
+ */
+export function markFixed(rec: SessionRecord, check: string, files: readonly string[], reported: ReadonlySet<string>): void {
+  for (const [identity, f] of Object.entries(rec.findings)) {
+    if (f.check === check && f.file !== undefined && files.includes(f.file) && !reported.has(identity)) f.state = 'fixed';
+  }
+}
+
+/** The stop receipt still reports these: they are open (unless fixed later). */
+export function markOpen(rec: SessionRecord, reported: ReadonlySet<string>): void {
+  for (const identity of reported) {
+    const f = rec.findings[identity];
+    if (f && f.state !== 'fixed') f.state = 'open';
+  }
 }
 
 /**
@@ -125,7 +171,10 @@ export async function writeSession(root: string, sessionId: string | undefined, 
     const findings: Record<string, ShownFinding> = { ...now.findings };
     for (const [identity, f] of Object.entries(rec.findings)) {
       const prior = findings[identity];
-      findings[identity] = prior ? { ...prior, audiences: [...new Set([...prior.audiences, ...f.audiences])] } : f;
+      // This hook read the record when it started, so its view of the finding (state included) is
+      // the newer one; the audiences are the union. A state a parallel hook set meanwhile can be
+      // lost, which reads as not assessed, never as a false "fixed".
+      findings[identity] = prior ? { ...f, audiences: [...new Set([...prior.audiences, ...f.audiences])] } : f;
     }
     const kept = Object.entries(findings).slice(-MAX_FINDINGS);
     await atomicWriteFile(deliveredPath(root, sessionId), JSON.stringify({ startHead: now.startHead ?? rec.startHead, keys, findings: Object.fromEntries(kept) }));

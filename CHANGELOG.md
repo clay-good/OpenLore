@@ -28,6 +28,10 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **`openlore status` says what happened to each hook finding.** A finding the hooks showed is
+  counted as fixed (the same check ran again after an edit to its file and no longer reports it),
+  decided (a recorded decision cites its id, such as `f:1a2b3c4d`), open (the stop receipt still
+  lists it), or not assessed. Local data only, never sent.
 - **`openlore status` reports hook health.** Every hook run is recorded locally in
   `.openlore/session-ledger/hook-runs.jsonl`, and a new `Hook health` line (and `hookHealth` in
   `--json`) shows each moment's last run and p95, the errors and overruns, and the findings shown

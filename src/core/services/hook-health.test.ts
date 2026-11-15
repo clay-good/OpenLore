@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hookRunsPath, readHookHealth, recordHookRun } from './hook-health.js';
+import { hookRunsPath, readFindingOutcomes, readHookHealth, recordHookRun } from './hook-health.js';
 
 const dirs: string[] = [];
 const readOnly: string[] = [];
@@ -81,5 +81,36 @@ describe('readHookHealth', () => {
       { moment: 'prompt-submitted', runs: 1, lastRun: at(10_000), p95Ms: 400, errors: 1, overruns: 0, shown: 0 },
       { moment: 'after-tools', runs: 20, lastRun: at(30_000), p95Ms: 100, errors: 0, overruns: 1, shown: 19 },
     ]);
+  });
+});
+
+describe('readFindingOutcomes (task 7.2)', () => {
+  const ids = ['a', 'b', 'c', 'd', 'e'].map(ch => ch.repeat(64));
+  const writeRecord = (root: string, name: string, findings: Record<string, object>) => {
+    mkdirSync(join(root, '.openlore', 'session-ledger', 'hook-delivered'), { recursive: true });
+    writeFileSync(join(root, '.openlore', 'session-ledger', 'hook-delivered', `${name}.json`), JSON.stringify({ keys: [], findings }));
+  };
+  const f = (state?: string) => ({ code: 'c', subject: 's', moment: 'after-tools', shownAt: '', audiences: ['agent'], ...(state ? { state } : {}) });
+
+  it('counts each distinct finding once; the four counts sum to the total', async () => {
+    const root = fresh();
+    writeRecord(root, 'one', { [ids[0]]: f('fixed'), [ids[1]]: f('open'), [ids[2]]: f(), [ids[3]]: f('open') });
+    writeRecord(root, 'two', { [ids[2]]: f('open'), [ids[4]]: f() });
+    const { saveDecisionStore } = await import('../decisions/store.js');
+    await saveDecisionStore(root, {
+      version: '1', sessionId: 's', updatedAt: new Date().toISOString(),
+      decisions: [{ id: 'dec00001', status: 'approved', title: 'Keep the skip', rationale: `Flaky upstream; accepted as f:${ids[3].slice(0, 8)}.`, consequences: '', proposedRequirement: null, affectedDomains: [], affectedFiles: [] } as never],
+    });
+    const o = await readFindingOutcomes(root);
+    expect(o).toEqual({ total: 5, fixed: 1, decided: 1, open: 2, notAssessed: 1 });
+    expect(o.fixed + o.decided + o.open + o.notAssessed).toBe(o.total);
+  });
+
+  it('with no records, all zero; a corrupt record counts nothing', async () => {
+    const root = fresh();
+    expect(await readFindingOutcomes(root)).toEqual({ total: 0, fixed: 0, decided: 0, open: 0, notAssessed: 0 });
+    mkdirSync(join(root, '.openlore', 'session-ledger', 'hook-delivered'), { recursive: true });
+    writeFileSync(join(root, '.openlore', 'session-ledger', 'hook-delivered', 'bad.json'), '{"findings": {');
+    expect((await readFindingOutcomes(root)).total).toBe(0);
   });
 });

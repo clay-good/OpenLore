@@ -490,3 +490,76 @@ describe('the run report for hook health (change: hook-reliability, task 6.1)', 
     expect(report.root).toBeUndefined();
   });
 });
+
+describe('acted-on states (change: hook-reliability, task 7.1)', () => {
+  const TEST = "import { f } from './f';\nit('a', () => { expect(f()).toBe(1); });\nit('b', () => { expect(f()).toBe(2); });\n";
+  const record = (root: string) => JSON.parse(readFileSync(join(root, '.openlore/session-ledger/hook-delivered', `${createHash('sha256').update('s1').digest('hex').slice(0, 24)}.json`), 'utf8')) as { findings: Record<string, { code: string; state?: string; check?: string; file?: string }> };
+  const weakened = () => {
+    const root = repo({ 'src/f.ts': 'export function f() { return 1; }\n', 'src/f.test.ts': TEST });
+    write(root, 'src/f.test.ts', TEST.replace("it('b'", "it.skip('b'"));
+    return root;
+  };
+
+  it('show, edit away, re-run: fixed', async () => {
+    const root = weakened();
+    expect(context((await runHook('after-tools', payload(root, 'src/f.test.ts'))).stdout)!.additionalContext).toContain('`it.skip` was added');
+    const [shown] = Object.values(record(root).findings);
+    expect(shown).toMatchObject({ code: 'test-disabled', check: 'weakening', file: 'src/f.test.ts' });
+    expect(shown.state).toBeUndefined();
+    write(root, 'src/f.test.ts', TEST); // the agent re-enables the test
+    expect((await runHook('after-tools', payload(root, 'src/f.test.ts'))).stdout).toBe('');
+    expect(Object.values(record(root).findings)[0].state).toBe('fixed');
+  });
+
+  it('a fixed finding that comes back is shown again and is no longer fixed', async () => {
+    const root = weakened();
+    await runHook('after-tools', payload(root, 'src/f.test.ts'));
+    write(root, 'src/f.test.ts', TEST);
+    await runHook('after-tools', payload(root, 'src/f.test.ts'));
+    write(root, 'src/f.test.ts', TEST.replace("it('b'", "it.skip('b'"));
+    expect(context((await runHook('after-tools', payload(root, 'src/f.test.ts'))).stdout)!.additionalContext).toContain('`it.skip` was added');
+    expect(Object.values(record(root).findings)[0].state).toBeUndefined();
+  });
+
+  it('an edit to another file does not fix it', async () => {
+    const root = weakened();
+    await runHook('after-tools', payload(root, 'src/f.test.ts'));
+    await runHook('after-tools', payload(root, 'src/f.ts'));
+    expect(Object.values(record(root).findings)[0].state).toBeUndefined();
+  });
+
+  it('a check that timed out leaves the state unset', async () => {
+    const root = weakened();
+    await runHook('after-tools', payload(root, 'src/f.test.ts'));
+    write(root, 'src/f.test.ts', TEST);
+    expect(await runHook('after-tools', payload(root, 'src/f.test.ts'), { timeoutMs: 1 })).toEqual({ stdout: '', exitCode: 0 });
+    expect(Object.values(record(root).findings)[0].state).toBeUndefined();
+  });
+
+  it('show, stop: open', async () => {
+    const root = repo();
+    verify.result = { items: [{ subject: 'src/f.test.ts', check: 'check_weakening', severity: 'warning', nextAction: 're-enable it' }], gated: false };
+    await runHook('before-stop', payload(root));
+    expect(Object.values(record(root).findings)).toEqual([expect.objectContaining({ code: 'check_weakening', state: 'open' })]);
+  });
+});
+
+describe('one problem, one finding, at after-tools and at stop (task 7.2)', () => {
+  it('a stop item built from a phantom finding carries the after-tools id', async () => {
+    const root = repo({ 'src/f.ts': 'export function f() { return 1; }\n', 'src/g.ts': "import { f } from './f';\nexport const g = f;\n" });
+    write(root, 'src/g.ts', "import { f, missing } from './f';\nexport const g = [f, missing];\n");
+    const after = context((await runHook('after-tools', payload(root, 'src/g.ts'))).stdout)!.additionalContext;
+    const id = after.match(/\[f:([0-9a-f]{8})\]/)![1];
+    const message = after.split('\n')[1].replace(/^- /, '').replace(/ \[f:[0-9a-f]{8}\]$/, '');
+    // The finding as the after-tools hook recorded it (its real code and subject).
+    const rec = JSON.parse(readFileSync(join(root, '.openlore/session-ledger/hook-delivered', `${createHash('sha256').update('s1').digest('hex').slice(0, 24)}.json`), 'utf8')) as { findings: Record<string, { code: string; subject: string }> };
+    const shown = Object.values(rec.findings)[0];
+    verify.result = {
+      items: [{ subject: message, check: 'phantom_references', severity: 'error', nextAction: 'fix it' }],
+      findings: [{ code: shown.code, subject: shown.subject, message, location: { path: 'src/g.ts', line: 1 }, discriminator: 'src/g.ts:1' }],
+      gated: false,
+    };
+    const stop = (JSON.parse((await runHook('before-stop', payload(root))).stdout) as { systemMessage: string }).systemMessage;
+    expect(stop).toContain(`[f:${id}]`);
+  });
+});

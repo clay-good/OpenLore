@@ -6,11 +6,11 @@
  * 1 MB. Local only: nothing here is sent anywhere. Recording never throws and never changes what a
  * hook prints.
  */
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { OPENLORE_DIR } from '../../constants.js';
-import { LOOP_MOMENTS } from './hook-session.js';
+import { LOOP_MOMENTS, deliveredDir } from './hook-session.js';
 
 export type HookOutcome = 'ok' | 'error' | 'overrun';
 
@@ -103,4 +103,48 @@ export function readHookHealth(root: string, now = Date.now()): MomentHealth[] {
       overruns: runs.filter(r => r.outcome === 'overrun').length,
       shown: runs.reduce((n, r) => n + r.shown, 0),
     }));
+}
+
+/** What happened to the findings the hooks showed (design section 4); the four counts sum to `total`. */
+export interface FindingOutcomes { total: number; fixed: number; decided: number; open: number; notAssessed: number }
+
+/**
+ * Over the session records touched in the last 7 days: each distinct finding shown, counted once,
+ * as fixed, decided (a decision's title, rationale, or consequences cites its id, `f:1a2b3c4d`),
+ * open (still in the last stop receipt), or not assessed. Precedence in that order. Read-only.
+ */
+export async function readFindingOutcomes(root: string, now = Date.now()): Promise<FindingOutcomes> {
+  const out: FindingOutcomes = { total: 0, fixed: 0, decided: 0, open: 0, notAssessed: 0 };
+  const dir = deliveredDir(root);
+  let names: string[];
+  try { names = readdirSync(dir).filter(n => n.endsWith('.json')); } catch { return out; }
+  const findings = new Map<string, { state?: string }>();
+  for (const n of names) {
+    try {
+      const path = join(dir, n);
+      if (now - statSync(path).mtimeMs > WINDOW_MS) continue;
+      const rec = JSON.parse(readFileSync(path, 'utf8')) as { findings?: Record<string, { state?: unknown }> };
+      for (const [identity, f] of Object.entries(rec.findings ?? {})) {
+        if (!/^[0-9a-f]{64}$/.test(identity) || !f || typeof f !== 'object') continue;
+        const prior = findings.get(identity);
+        const state = typeof f.state === 'string' ? f.state : undefined;
+        // One finding in two sessions: its best outcome counts.
+        if (!prior || (state === 'fixed') || (state === 'open' && !prior.state)) findings.set(identity, { state });
+      }
+    } catch { /* an unreadable record counts nothing */ }
+  }
+  let decisionText = '';
+  try {
+    const { loadDecisionStore } = await import('../decisions/store.js');
+    const store = await loadDecisionStore(root, { readOnly: true });
+    decisionText = store.decisions.map(d => `${d.title}\n${d.rationale}\n${d.consequences}`).join('\n');
+  } catch { /* no decisions to join */ }
+  for (const [identity, f] of findings) {
+    out.total++;
+    if (f.state === 'fixed') out.fixed++;
+    else if (decisionText.includes(`f:${identity.slice(0, 8)}`)) out.decided++;
+    else if (f.state === 'open') out.open++;
+    else out.notAssessed++;
+  }
+  return out;
 }
