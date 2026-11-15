@@ -30,3 +30,15 @@ describe('dynamicImportNames', () => {
     expect(performance.now() - t).toBeLessThan(500);
   });
 });
+
+describe('objectLiteralSpan', () => {
+  it('spans an exported object literal, skipping braces in strings, templates and comments', async () => {
+    const { objectLiteralSpan } = await import('./test-dynamic-imports.js');
+    const src = "export const adapter: Adapter = {\n  name: '{',\n  // }\n  /* } */\n  async apply() { return `}${'x'}`; },\n};\nexport function after() {}\n";
+    const span = objectLiteralSpan(src, 'adapter')!;
+    expect(src.slice(span[0], span[1])).toMatch(/^\{[\s\S]*apply[\s\S]*\}$/);
+    expect(src.slice(span[1])).toBe(';\nexport function after() {}\n');
+    expect(objectLiteralSpan(src, 'missing')).toBeUndefined();
+    expect(objectLiteralSpan('const x = 1;\n', 'x')).toBeUndefined();
+  });
+});

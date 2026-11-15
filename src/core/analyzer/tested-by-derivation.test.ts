@@ -52,6 +52,22 @@ describe('tested_by derivation — relative paths (bug B)', () => {
     expect(testedBy('mul')).toContain('src/c.test.ts::*');
   });
 
+  it('an imported object literal links its methods; a renamed import links the original name', async () => {
+    const files = [
+      { path: 'src/adapter.ts', content: 'export const adapter = {\n  name: "x",\n  async apply(ctx) { return write(ctx); },\n  uninstall() { return 1; },\n};\nexport function outside() { return 2; }\nfunction write(c) { return c; }\n', language: 'TypeScript' },
+      { path: 'src/calc.ts', content: 'export function add(a: number, b: number) { return a + b; }\n', language: 'TypeScript' },
+      { path: 'src/adapter.test.ts', content: 'import { adapter } from "./adapter.js";\nit("applies", async () => { await adapter.apply({}); });\n', language: 'TypeScript' },
+      { path: 'src/calc.test.ts', content: 'import { add as plus } from "./calc.js";\nit("adds", () => { expect(plus(1, 2)).toBe(3); });\n', language: 'TypeScript' },
+    ];
+    const cg = serializeCallGraph(await new CallGraphBuilder().build(files));
+    const testedBy = (id: string) => cg.edges.filter(e => e.kind === 'tested_by' && e.callerId === id).map(e => e.calleeId);
+    const methodId = (name: string) => cg.nodes.find(n => n.filePath === 'src/adapter.ts' && n.name === name)!.id;
+    expect(testedBy(methodId('apply'))).toContain('src/adapter.test.ts::*');
+    expect(testedBy(methodId('uninstall'))).toContain('src/adapter.test.ts::*');
+    expect(testedBy(methodId('outside'))).not.toContain('src/adapter.test.ts::*');
+    expect(testedBy('src/calc.ts::add')).toContain('src/calc.test.ts::*');
+  });
+
   it('marks newly supported language conventions and derives tested_by edges', async () => {
     const files = [
       { path: 'lib/calc.rb', content: 'def add(a, b)\n  a + b\nend\n', language: 'Ruby' },
