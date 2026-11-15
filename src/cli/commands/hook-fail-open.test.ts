@@ -38,6 +38,7 @@ function repo(): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'olfailopen-')));
   dirs.push(root);
   mkdirSync(join(root, '.openlore'));
+  writeFileSync(join(root, '.openlore', 'config.json'), '{}');
   write(root, '.gitignore', '.openlore/\n');
   write(root, 'gen/order.pb.go', GENERATED);
   write(root, 'src/f.ts', 'export function f() { return 1; }\n');
@@ -265,8 +266,8 @@ describe('a broken store: the real checks run and every moment is silent or a we
   it('after-compact on a broken store states the git state, not the breakage', async () => {
     const runHook = await loadRunHook();
     const root = repo();
-    rmSync(join(root, '.openlore'), { recursive: true, force: true });
-    writeFileSync(join(root, '.openlore'), 'not a directory');
+    // The project is set up, but its store is broken: the analysis folder is a file.
+    writeFileSync(join(root, '.openlore', 'analysis'), 'not a directory');
     const r = await runHook('after-compact', payload('after-compact', root));
     const text = (JSON.parse(r.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext;
     expect(text).toContain('Uncommitted: 0 staged, 1 unstaged');

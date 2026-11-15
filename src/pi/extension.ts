@@ -85,6 +85,7 @@ import {
   specCorpusContentProvenance,
 } from '../core/services/served-content.js';
 import { safeJoin } from '../utils/path-confinement.js';
+import { isOpenloreProject, openloreProjectRoot } from '../utils/project-root.js';
 import { globalOpenLoreConfigPath, readConfigObject, readLayeredConfig, readLayeredConfigSync } from '../utils/config-layers.js';
 // Functional readiness for the footer status. `health.ts` is kept dependency-light on purpose so
 // importing it does not load the daemon's stack into the host; `extension-imports.test.ts` guards it.
@@ -2298,15 +2299,7 @@ function nodeRuntime(): string | undefined {
 
 /** Whether a file Pi touched lies in an OpenLore project (the hook's own root walk). */
 export function inOpenloreProject(cwd: string, file?: string): boolean {
-  const home = resolvePath(process.env.OPENLORE_HOME ?? homedir());
-  const walk = (start: string): boolean => {
-    for (let dir = start; ; dir = dirname(dir)) {
-      if (dir === home) return false;
-      if (existsSync(join(dir, OPENLORE_DIR))) return true;
-      if (existsSync(join(dir, '.git')) || dirname(dir) === dir) return false;
-    }
-  };
-  return walk(resolvePath(cwd)) || (!!file && walk(dirname(resolvePath(cwd, file))));
+  return openloreProjectRoot(cwd) !== undefined || (!!file && openloreProjectRoot(dirname(resolvePath(cwd, file))) !== undefined);
 }
 
 /**
@@ -2320,7 +2313,7 @@ export function piProjectRoot(cwd: string): string {
   const home = resolvePath(process.env.OPENLORE_HOME ?? homedir());
   const start = resolvePath(cwd);
   for (let dir = start; dir !== home; dir = dirname(dir)) {
-    if (existsSync(join(dir, OPENLORE_DIR, 'config.json')) || existsSync(join(dir, OPENLORE_ANALYSIS_REL_PATH))) return dir;
+    if (isOpenloreProject(dir)) return dir;
     if (existsSync(join(dir, '.git'))) return dir;
     if (dirname(dir) === dir) break;
   }

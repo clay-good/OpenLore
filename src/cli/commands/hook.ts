@@ -27,12 +27,12 @@
 import { Command } from 'commander';
 import { createHash } from 'node:crypto';
 import { sanitizeForTerminal, screenJsonText } from '../../utils/misc.js';
-import { homedir } from 'node:os';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { readStdin } from '../../utils/stdin.js';
 import { withLoggerOptions } from '../../utils/logger.js';
 import { OPENLORE_DIR } from '../../constants.js';
+import { openloreProjectRoot } from '../../utils/project-root.js';
 import { recordHookRun, type HookOutcome } from '../../core/services/hook-health.js';
 import { HOOK_MOMENTS, findingIdentity, markFixed, markOpen, markShown, readSession, wasShown, writeSession, type FindingProof, type HookMoment } from '../../core/services/hook-session.js';
 
@@ -671,20 +671,6 @@ async function beforeStop(root: string, baseline: string | undefined, sessionId?
 }
 
 /**
- * The nearest directory at or above `start` that has `.openlore`, within the same repository: the
- * walk stops at the repository's top (a `.git` entry) and never accepts the home directory, whose
- * `~/.openlore` is OpenLore's user-level store, not a project.
- */
-function openloreRoot(start: string): string | undefined {
-  const home = resolve(process.env.OPENLORE_HOME ?? homedir());
-  for (let dir = start; ; dir = dirname(dir)) {
-    if (dir === home) return undefined;
-    if (existsSync(join(dir, OPENLORE_DIR))) return dir;
-    if (existsSync(join(dir, '.git')) || dirname(dir) === dir) return undefined;
-  }
-}
-
-/**
  * `subagent-start`: the starting sub-agent's task-scoped briefing (its task as queued by
  * `before-subagent`) and the live peers on the footprint board. Not deduplicated: each sub-agent is
  * a fresh context.
@@ -794,7 +780,7 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
   // may have `cd`-ed into a subdirectory) that has `.openlore`. None: nothing to say.
   const start = resolve(payload.cwd ?? opts.cwd ?? process.cwd());
   // The working directory first; when it is above the project (a monorepo top), the edited file's.
-  const root = openloreRoot(start) ?? (payload.files[0] ? openloreRoot(dirname(resolve(start, payload.files[0]))) : undefined);
+  const root = openloreProjectRoot(start) ?? (payload.files[0] ? openloreProjectRoot(dirname(resolve(start, payload.files[0]))) : undefined);
   if (!root) return silent;
   // The user-scope wiring stands down where the repository wires this moment itself: one receipt,
   // and one hook-health record, per event (change: user-scope-loop-hooks).

@@ -88,6 +88,19 @@ describe('workingDirectoryFromInput', () => {
       expect(openloreProjectRoot(join(project, 'ui', 'src'))).toBe(project);
     });
 
+    it('a nested repository is not reported as its parent project, as the hooks agree', async () => {
+      const nested = join(project, 'vendor', 'lib');
+      await mkdir(join(nested, '.git'), { recursive: true });
+      expect(openloreProjectRoot(join(nested, 'src'))).toBeUndefined();
+      expect(workingDirectoryFromInput(input(nested, nested), '/f')).toBe(nested);
+    });
+
+    it('an analysis without a config is a project', async () => {
+      const analyzed = join(root, 'analyzed');
+      await mkdir(join(analyzed, '.openlore', 'analysis'), { recursive: true });
+      expect(openloreProjectRoot(join(analyzed, 'src'))).toBe(analyzed);
+    });
+
     it('never treats the user-level config as a project', async () => {
       // The user config lives at <home>/.openlore/config.json; point it at this tree's own.
       await mkdir(join(root, '.openlore'), { recursive: true });

@@ -424,7 +424,9 @@ or before-stop moment, so test runs recorded there are not yet stated at stop.
   more, for you. A fact cut by the size budget is stated on a later call. The prompt-submitted
   moment states its no-index line and its build note once per session too.
 - **Found from a subdirectory.** The hook uses the nearest directory at or above the session's
-  working directory that has `.openlore/`.
+  working directory whose `.openlore/` holds a `config.json` or an `analysis/`. The walk stops at
+  the repository's top (`.git`) and at the home directory. The status line and the Pi extension
+  use the same rule, so they report the project the hooks serve.
 - **Bounded.** Each receipt has a size budget (the most severe facts first, the rest counted) and a
   time limit, timed from when the command has loaded: 3 s for the prompt moment, then 3 s, 6 s,
   20 s, 30 s, 5 s, and 10 s for the moments in the table above; past it the hook prints nothing.
