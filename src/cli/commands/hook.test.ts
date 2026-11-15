@@ -436,3 +436,21 @@ describe('once per session (change: hook-reliability, group 4)', () => {
     expect(await say(root, 'after-tools')).toContain('missing');
   });
 });
+
+describe('time limits (change: hook-reliability, task 5.1)', () => {
+  it('every moment stops below its harness timeout, the prompt moment included', async () => {
+    const { TIMEOUT_MS } = await import('./hook.js');
+    const { MANAGED_HOOKS } = await import('../install/adapters/claude-code.js');
+    const { PROMPT_SUBMITTED_LIMIT_MS } = await import('./orient.js');
+    for (const def of MANAGED_HOOKS) {
+      if (!def.moment || !def.timeout) continue;
+      expect(TIMEOUT_MS[def.moment as keyof typeof TIMEOUT_MS], def.moment).toBeLessThan(def.timeout * 1000);
+    }
+    expect(TIMEOUT_MS).toMatchObject({ 'before-edit': 3_000, 'after-tools': 6_000, 'before-stop': 20_000 });
+    // The plugin's prompt hook sets the tightest harness timeout for the prompt moment.
+    const plugin = JSON.parse(readFileSync(join(__dirname, '../../../plugin/hooks/hooks.json'), 'utf8')) as { hooks: Record<string, Array<{ hooks: Array<{ timeout?: number }> }>> };
+    const promptTimeout = plugin.hooks.UserPromptSubmit[0].hooks[0].timeout!;
+    expect(PROMPT_SUBMITTED_LIMIT_MS).toBe(3_000);
+    expect(PROMPT_SUBMITTED_LIMIT_MS).toBeLessThan(promptTimeout * 1000);
+  });
+});

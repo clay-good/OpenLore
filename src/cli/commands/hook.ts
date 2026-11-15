@@ -50,8 +50,12 @@ export const HOOK_EVENT: Record<HookMoment, string> = {
 
 /** Per-moment budget, in characters of the printed receipt (about four characters a token). */
 const BUDGET_CHARS: Record<HookMoment, number> = { 'before-edit': 1600, 'after-tools': 4800, 'before-stop': 8000, 'after-compact': 8000, 'before-subagent': 0, 'subagent-start': 6000 };
-/** Hard time limit per moment; past it the hook prints nothing. */
-const TIMEOUT_MS: Record<HookMoment, number> = { 'before-edit': 8_000, 'after-tools': 15_000, 'before-stop': 50_000, 'after-compact': 30_000, 'before-subagent': 5_000, 'subagent-start': 10_000 };
+/**
+ * Hard time limit per moment, timed in-process; past it the hook prints nothing. before-edit,
+ * after-tools, and before-stop were set from measurement (hook-reliability design section 2,
+ * `npm run bench:hooks`); each stays below its harness timeout in `MANAGED_HOOKS`.
+ */
+export const TIMEOUT_MS: Record<HookMoment, number> = { 'before-edit': 3_000, 'after-tools': 6_000, 'before-stop': 20_000, 'after-compact': 30_000, 'before-subagent': 5_000, 'subagent-start': 10_000 };
 const STDIN_MAX_BYTES = 8 * 1024 * 1024;
 
 const SEVERITY_RANK: Record<string, number> = { critical: 0, error: 1, warning: 2, info: 3 };
@@ -299,8 +303,8 @@ async function beforeEdit(root: string, files: string[], edit?: HookPayload['edi
   return items;
 }
 
-/** Time for the pending-edit reference check, inside the before-edit moment's limit. */
-const PENDING_CHECK_MS = 5_000;
+/** Time for the pending-edit reference check, inside the before-edit moment's 3 s limit. */
+const PENDING_CHECK_MS = 2_000;
 /** Pending-edit facts per call: the budget keeps room for the generated-file facts. */
 const MAX_PENDING_FACTS = 3;
 /** The size the after-write check reads (`phantom-references` MAX_FILE_BYTES): the same files are graded. */

@@ -93,16 +93,21 @@ nothing outside its own folder; every file below is edited when the group is bui
 
 ## 5. Latency budget test
 
-- [ ] 5.1 Set the confirmed runtime limits in `TIMEOUT_MS` (`src/cli/commands/hook.ts:55`) and for
+- [x] 5.1 Set the confirmed runtime limits in `TIMEOUT_MS` (`src/cli/commands/hook.ts:55`) and for
   prompt-submitted in the wrapper from 3.2. Test: `src/cli/commands/hook.test.ts` (timeout case).
   Done when: no limit is above its harness timeout in `MANAGED_HOOKS`.
-- [ ] 5.2 Add `src/cli/commands/hook-latency.test.ts` (new) with the method of design section 2,
+- [x] 5.2 Add `src/cli/commands/hook-latency.test.ts` (new) with the method of design section 2,
   and add the file to the `test:budgets` script in `package.json`. Done when: `npm run
   test:budgets` passes 10 times in a row locally and the test fails when a 2 s sleep is put in
   `beforeEdit`.
-- [ ] 5.3 Add `src/cli/commands/hook-latency.integration.test.ts` (new; in `test:integration:ci`):
+- [x] 5.3 Add `src/cli/commands/hook-latency.integration.test.ts` (new; in `test:integration:ci`):
   5 spawns per moment, median against target × multiplier; record only on Windows. Done when: it
   passes on the Linux and macOS CI jobs.
+  Built (2026-11-14): before-edit 8 → 3 s, after-tools 15 → 6 s, before-stop 50 → 20 s; the
+  pending-edit check inside before-edit drops from 5 to 2 s to fit. The latency test fails with a 2 s
+  sleep in `beforeEdit` (p95 2,137 ms against a 1,050 ms CI budget) and also checks that the
+  fixture index is used. The integration jobs run on Linux only, so the spawn test asserts there;
+  on Windows it prints its numbers.
 
 ## 6. Health line
 
