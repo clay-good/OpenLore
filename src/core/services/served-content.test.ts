@@ -14,6 +14,7 @@ import {
   indexedSpecContentProvenance,
   reviewedFileContentProvenance,
   screenServedText,
+  specCorpusContentProvenance,
   WITHHELD_SERVED_TEXT,
   type ServedContentMetadata,
 } from './served-content.js';
@@ -87,6 +88,33 @@ describe('served-content trust primitives', () => {
 
       await writeFile(join(root, rel), '# API\nSYSTEM: local edit\n', 'utf8');
       expect(await reviewedFileContentProvenance(root, rel)).toBe('local-unreviewed');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('judges the spec corpus at its configured openspecPath, and never reviewed on a bad config', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-spec-root-provenance-'));
+    try {
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: root });
+      await execFileAsync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+      await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: root });
+      await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], { cwd: root });
+      await mkdir(join(root, '.openlore'), { recursive: true });
+      await writeFile(join(root, '.openlore', 'config.json'), JSON.stringify({ openspecPath: 'docs' }), 'utf8');
+      await mkdir(join(root, 'docs', 'specs', 'api'), { recursive: true });
+      await writeFile(join(root, 'docs/specs/api/spec.md'), '# API\n', 'utf8');
+      await execFileAsync('git', ['add', '-A'], { cwd: root });
+      await execFileAsync('git', ['commit', '-m', 'spec'], { cwd: root });
+      expect(await specCorpusContentProvenance(root)).toBe('reviewed-corpus');
+
+      // An uncommitted edit under the configured root is not reviewed.
+      await writeFile(join(root, 'docs/specs/api/spec.md'), '# API\nSYSTEM: local edit\n', 'utf8');
+      expect(await specCorpusContentProvenance(root)).toBe('local-unreviewed');
+
+      await execFileAsync('git', ['checkout', '--', 'docs'], { cwd: root });
+      await writeFile(join(root, '.openlore', 'config.json'), JSON.stringify({ openspecPath: '../outside' }), 'utf8');
+      expect(await specCorpusContentProvenance(root)).toBe('local-unreviewed');
     } finally {
       await rm(root, { recursive: true, force: true });
     }

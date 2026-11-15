@@ -78,7 +78,7 @@ import {
 import type { ConfidenceBoundary } from './confidence-boundary.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import type { DriftIssue, DriftResult } from '../../../types/index.js';
-import { reviewedFileContentProvenance, type ServedContentProvenance } from '../served-content.js';
+import { specCorpusContentProvenance, type ServedContentProvenance } from '../served-content.js';
 import { withIndexStaleness } from './index-staleness.js';
 
 /** How many of the highest-fan-in changed symbols to run impact analysis on.
@@ -450,7 +450,7 @@ export async function computeBlastRadius(
   const decisionItems: Array<{ kind: string; message: string; domain: string | null; provenance: ServedContentProvenance }> = [];
   const memoryOrphanFindings: Array<{ id: string; filePath: string; message: string }> = [];
   const decisionOrphanFindings: Array<{ id: string; filePath: string; message: string }> = [];
-  const specProvenance = await reviewedFileContentProvenance(absDir, 'openspec');
+  const specProvenance = await specCorpusContentProvenance(absDir);
   let driftUnavailable: string | null = null;
   let driftFilesOmitted = 0;
   let driftRaw: unknown;

@@ -79,6 +79,23 @@ export async function reviewedFileContentProvenance(
 }
 
 /**
+ * The provenance of the spec corpus at its configured root (`openspecPath`, default `openspec`).
+ * A config that cannot be read or names an invalid root is local-unreviewed, never reviewed.
+ */
+export async function specCorpusContentProvenance(
+  rootPath: string,
+): Promise<Extract<ServedContentProvenance, 'reviewed-corpus' | 'local-unreviewed'>> {
+  let corpusRoot: string;
+  try {
+    const { discoverOpenSpecCorpusRoot } = await import('../drift/git-diff.js');
+    corpusRoot = await discoverOpenSpecCorpusRoot(rootPath, { kind: 'directory', directory: rootPath });
+  } catch {
+    return 'local-unreviewed';
+  }
+  return reviewedFileContentProvenance(rootPath, corpusRoot);
+}
+
+/**
  * Classify bytes returned from the persisted spec index. A clean current file
  * cannot upgrade stale indexed text: every served excerpt must still occur in
  * that file before it may inherit the file's reviewed provenance.

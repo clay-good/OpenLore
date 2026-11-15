@@ -96,6 +96,11 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **Spec text under a configured `openspecPath` is labeled reviewed only when it is.** `orient`,
+  `blast_radius` and the Pi context checked git for a fixed `openspec/` folder. With
+  `openspecPath: "docs"`, an uncommitted edit under `docs/specs/` was served as `reviewed-corpus`.
+  They now check the configured folder, and an invalid config gives `local-unreviewed`.
+
 - **JavaScript functions are labeled JavaScript.** Functions in `.js`, `.mjs`, `.cjs` and `.jsx`
   files were stored with `language: "TypeScript"`, so per-language answers (language support,
   filters, summaries) counted them as TypeScript. Extraction itself is unchanged. (#724 follow-up)

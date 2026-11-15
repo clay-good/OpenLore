@@ -64,7 +64,7 @@ import {
   decisionContentProvenance,
   indexedSpecContentProvenance,
   readAnalysisContentProvenance,
-  reviewedFileContentProvenance,
+  specCorpusContentProvenance,
   type AnalysisContentProvenance,
   type ServedContentProvenance,
 } from '../served-content.js';
@@ -284,7 +284,7 @@ export async function handleOrient(
 
   const [analysisProvenance, specProvenance] = await Promise.all([
     readAnalysisContentProvenance(absDir),
-    reviewedFileContentProvenance(absDir, 'openspec'),
+    specCorpusContentProvenance(absDir),
   ]);
 
   // Resolve the active embedder (env → local provider → remote config); null is
