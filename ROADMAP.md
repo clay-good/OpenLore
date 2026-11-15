@@ -25,13 +25,14 @@
 
 ## Build next
 
-**[`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality)**, one PR per task
-group. Groups 1-3 are merged (#751, #753, #754): no spec folder at first run, honest "no spec
-source" answers, and optional spec config. Next: group 4, the spec-source interface with OpenSpec
-behind it.
+**Core accuracy first (owner, 2026-11-15):** the P0 items below that make the evidence agents receive
+wrong or noisy, one PR each, before more P1 work. Then [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality)
+task 4.3.
 
-`reframe-governance-as-agent-evidence` shipped (#747, #748, #749, #752) and is archived. Its
-benchmark task 2.1 is not doing (owner, 2026-11-15): `verify_change` stays out of `substrate`.
+Shipped since 3.6.0 for the same reason: the prompt briefing names only code the prompt names
+exactly (#758; replay with `npm run bench:briefing`), TypeScript grammar gaps no longer leave parse
+errors (#759), "no index" is said only when there is none (#760), and a user-scope install wires the
+edit-time hooks, guarded to OpenLore projects (#762).
 
 ## P0: 3.6.0 follow-ups (small fixes, any time)
 
@@ -42,10 +43,7 @@ benchmark task 2.1 is not doing (owner, 2026-11-15): `verify_change` stays out o
 | A Java field of an external type is still fanned out by name | Java resolution in `call-graph.ts` | #724 |
 | OpenAPI enum details render double-escaped | `src/core/services/mcp-handlers/service-contract.ts` | #724 |
 | CI runs 12 of 26 integration test files | `package.json` `test:integration:ci` | #724 |
-| Three `yaml` parses do not pass `YAML_QUIET` | `entry-point-adapters.ts:484,1104`, `contract/openapi.ts:177` | `fix-analyze-console-report-caps` |
 | Two tool input schemas have properties without descriptions; 15 descriptions exceed 800 characters | `explain_retrieval_miss`, `declare_footprint` in `src/cli/commands/mcp.ts` | `mcp-quality` spec |
-| References to removed planning files | `change-status.ts` (`STATUS.md`), `docs/reachability-dead-code.md`, `spec-corpus-lint.test.ts:172` (lists `validator` as removed) | this curation |
-| CHANGELOG: 3.6.0 omits fleet record expiry (#698); `[Unreleased]` says both that `new X()` is and is not a call edge | `CHANGELOG.md` | review |
 
 ## P1: the agent-evidence direction (in this order)
 
@@ -53,8 +51,8 @@ benchmark task 2.1 is not doing (owner, 2026-11-15): `verify_change` stays out o
 |---|--------|------------------------|-------|
 | 1 | [`ship-claude-code-plugin`](openspec/changes/ship-claude-code-plugin) ([PR #727](https://github.com/clay-good/OpenLore/pull/727), merged; dogfooding, the 3.7.0 pin, and the directory submission remain) | Hooks and tools arrive with one install and stay current | — |
 | 2 | `hook-reliability` (shipped; [archived](openspec/changes/archive/2026-11-15-hook-reliability)) | Hooks never slow or break a session, each finding is said once, and index progress goes to the status line, not the agent | — |
-| 3 | [`reframe-governance-as-agent-evidence`](openspec/changes/reframe-governance-as-agent-evidence) (shipped; archived) | `verify_change` joins the default set; one small plugin set; governance arrives as quiet findings with proof | its `plugin` preset lands before 1 uses it |
-| 4 | [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality) (groups 1-3 merged) | OpenSpec, Spec Kit and BMAD are detected; none is required; "no specs" is an honest state, never a zero | can start any time |
+| 3 | `reframe-governance-as-agent-evidence` (shipped; [archived](openspec/changes/archive/2026-11-15-reframe-governance-as-agent-evidence); task 2.1 not doing) | One small plugin set; governance arrives as quiet findings with proof and one action | — |
+| 4 | [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality) (groups 1-4.2 merged: #751, #753, #754, #756) | OpenSpec, Spec Kit and BMAD are detected; none is required; "no specs" is an honest state, never a zero | can start any time |
 | 5 | [`curate-product-surface`](openspec/changes/curate-product-surface) | Fewer, current skills and docs, so nothing stale misleads the agent | 1, 3 |
 
 ## P2: next, after P1 ships
@@ -154,7 +152,7 @@ Decided 2026-11-14 (owner's answers to the open questions):
 
 | Question | Decision | Where |
 |---|---|---|
-| Plugin tool set (ADR-0037) | `verify_change` joins `substrate`, gated by the benchmark; the `plugin` set is a subset of `substrate` with no spec-generation tool | `reframe-governance-as-agent-evidence` design 1 |
+| Plugin tool set (ADR-0037) | `verify_change` stays out of `substrate` (its benchmark is not doing); the `plugin` set is a subset of `substrate` except `verify_change`, with no spec-generation tool | `reframe-governance-as-agent-evidence` design 1 |
 | Spec frameworks | Detect OpenSpec, Spec Kit and BMAD; require none | `spec-framework-neutrality` |
 | No specs found | Spec numbers are `null` with reason `no-spec-source` and a `no spec source found` note, never 0 | `spec-framework-neutrality` design 3 |
 | Index-building message | Progress in the status line and `openlore status`; nothing in the agent's context; one start and one ready line only for users without OpenLore's status line | `hook-reliability` group 9 |

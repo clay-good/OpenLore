@@ -16,6 +16,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { YAML_QUIET } from '../yaml-diagnostics.js';
 import { LineCounter, parseDocument, isMap, isScalar, isSeq, isPair } from 'yaml';
 
 export const HTTP_METHODS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
@@ -174,7 +175,7 @@ export function readOpenApi(file: string, text: string): ContractDocument | { fi
   let js: unknown;
   try {
     // uniqueKeys: the library's duplicate-key check is quadratic in a map's size; `duplicateKey` is linear.
-    doc = parseDocument(text, { lineCounter: lc, merge: true, uniqueKeys: false });
+    doc = parseDocument(text, { lineCounter: lc, merge: true, uniqueKeys: false, ...YAML_QUIET });
     if (doc.errors.length) return looksLikeOpenApi(text) ? { file, error: doc.errors[0].message.split('\n')[0] } : undefined;
     js = doc.toJS({ maxAliasCount: 100 });
   } catch (e) {

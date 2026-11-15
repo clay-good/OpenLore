@@ -1,6 +1,6 @@
 /**
  * `openlore change-status` computes the evidence pass documented in
- * `openspec/changes/STATUS.md` (change: add-change-evidence-audit).
+ * a planning table such as a status document (change: add-change-evidence-audit).
  *
  * This command deliberately does not decide whether an implementation is correct
  * and never mutates the OpenSpec lifecycle. Validation and archiving remain owned
@@ -421,7 +421,7 @@ export function renderStatusTable(results: ChangeStatusResult[]): string {
       ...(result.assessmentError ? [`assessment error: ${inlineText(result.assessmentError)}`] : []),
       EVIDENCE_DISCLAIMER,
     ].join('; ');
-    // STATUS.md's human-owned table has two columns: Change | What it is. Keep
+    // A planning table (formerly STATUS.md) has two human-owned columns: Change | What it is. Keep
     // that shape so these body-only rows can be pasted without rewriting prose.
     return `| \`${markdownCell(result.name)}\` | ${markdownCell(`${result.verdict}; ${evidence}`)} |`;
   }).join('\n') + (results.length ? '\n' : '');
@@ -465,7 +465,7 @@ export const changeStatusCommand = new Command('change-status')
   .description('Compute open-change status from source markers, spec sync, and OpenSpec validation')
   .argument('[name]', 'Audit one open change (default: every open change)')
   .option('--json', 'Emit machine-readable evidence', false)
-  .option('--table', 'Emit STATUS.md table rows only', false)
+  .option('--table', 'Emit Markdown table rows (Change | Evidence) only, for a planning document', false)
   .action(async (name: string | undefined, options: { json?: boolean; table?: boolean }) => {
     process.exitCode = await runChangeStatusCli({ name, json: options.json, table: options.table });
   });
