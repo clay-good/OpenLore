@@ -394,6 +394,17 @@ or before-stop moment, so test runs recorded there are not yet stated at stop.
   20 s, 30 s, 5 s, and 10 s for the moments in the table above; past it the hook prints nothing.
   The limits come from measurement (`npm run bench:hooks`); `npm run test:budgets` fails when a
   moment's measured p95 passes its budget.
+- **Upgrade, move, and uninstall.** Each hook command checks that its runtime exists first:
+  `[ -f '<entry>' ] && [ -f '<node>' ] || exit 0; '<node>' '<entry>' hook <moment>` (the `npx` form
+  checks `command -v npx`). So a moved or removed install makes the hooks skip themselves instead of
+  failing on every event; run `openlore install` again to re-wire them. This needs a POSIX shell,
+  which Claude Code uses (Git Bash on Windows). The Codex hooks are not guarded. Re-running
+  `openlore install` after an upgrade leaves one group per hook and removes any group for a moment
+  the new version no longer has; uninstall removes those too and leaves your own hooks unchanged.
+  Uninstall keeps `.openlore/` and any skills `openlore setup` copied (they may be edited), and
+  names each with the command to remove it. `openlore doctor` warns about a hook whose runtime is
+  gone, and about an event that runs two different OpenLore commands for the same step (a second
+  checkout, or a group an older install wrote without its marker).
 - **Health, for you.** Each run that reaches the hook is recorded in
   `.openlore/session-ledger/hook-runs.jsonl` (moment, whole-process time, outcome, findings shown;
   local only, never sent). `openlore status` prints one `Hook health` line for the last 7 days: each

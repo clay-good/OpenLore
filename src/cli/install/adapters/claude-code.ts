@@ -17,7 +17,7 @@ import { mergeEntries, readMeta, removeManaged, isHandEdited, editJsonPreserving
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
-import { formatPlatformCommand, isOpenloreCliEntryPath, resolveOpenloreCommand, windowsCommandHazard } from '../../../utils/platform-command.js';
+import { formatGuardedHookCommand, formatPlatformCommand, isOpenloreCliEntryPath, resolveOpenloreCommand, windowsCommandHazard } from '../../../utils/platform-command.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 import { isGuardedWriteFailure, withGuardedConfigWrite } from '../guarded-config-write.js';
 
@@ -317,7 +317,8 @@ function managedHooks(
 ): ReadonlyArray<{ def: ManagedHook; command: string }> {
   return MANAGED_HOOKS.map(def => ({
     def,
-    command: formatPlatformCommand(resolveOpenloreCommand(def.args, platform, runtime), platform),
+    // Guarded: a hook whose runtime is gone exits 0 silently (change: hook-reliability, task 8.1).
+    command: formatGuardedHookCommand(resolveOpenloreCommand(def.args, platform, runtime), platform),
   }));
 }
 
@@ -362,6 +363,38 @@ function mergeOurHook(existing: unknown, command: string, def: ManagedHook): unk
   const arr = Array.isArray(existing) ? existing : [];
   const withoutOurs = arr.filter((e) => !isOurHookEntry(e, def));
   return [...withoutOurs, ourHookGroup(command, def)];
+}
+
+/** The moments this version wires; an `_openloreHook` group naming any other moment is retired. */
+const CURRENT_MOMENTS = new Set(MANAGED_HOOKS.flatMap(def => (def.moment ? [def.moment] : [])));
+
+/** An OpenLore loop-moment group for a moment this version no longer has (change: hook-reliability). */
+function isRetiredHookEntry(entry: unknown): boolean {
+  if (!entry || typeof entry !== 'object') return false;
+  const e = entry as Record<string, unknown>;
+  return e._openlore === true && typeof e._openloreHook === 'string' && !CURRENT_MOMENTS.has(e._openloreHook);
+}
+
+/**
+ * Remove every retired OpenLore group, on any event, from `hooks`, recording one edit per event it
+ * changes. The user's own groups, and current OpenLore groups, are kept as they are.
+ */
+function stripRetiredHooks(hooks: Record<string, unknown>, edits: JsonPathEdit[]): boolean {
+  let changed = false;
+  for (const [key, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    const kept = groups.filter(g => !isRetiredHookEntry(g));
+    if (kept.length === groups.length) continue;
+    changed = true;
+    if (kept.length === 0) {
+      delete hooks[key];
+      edits.push({ path: ['hooks', key], value: undefined });
+    } else {
+      hooks[key] = kept;
+      edits.push({ path: ['hooks', key], value: kept });
+    }
+  }
+  return changed;
 }
 
 /** Remove our marker-identified group from `existing`, leaving user-authored entries untouched. */
@@ -768,6 +801,9 @@ export const claudeCodeAdapter: Adapter = {
     // is never read for MCP), and set each marker-identified hook group. Everything else in the
     // user's settings.json is preserved byte-for-byte.
     const settingsEdits: JsonPathEdit[] = [];
+    // A group for a moment this version no longer has is removed on every install, so an upgrade
+    // never leaves an old moment running (change: hook-reliability, task 8.2).
+    stripRetiredHooks(nextHooks, settingsEdits);
     const commandHazard = hookCommandHazard(ctx.platform, ctx.platformCommandRuntime);
     if ('_openlore' in existing) settingsEdits.push({ path: ['_openlore'], value: undefined });
     const legacyMcp = existing.mcpServers as Record<string, unknown> | undefined;
@@ -822,7 +858,7 @@ export const claudeCodeAdapter: Adapter = {
     if (commandHazard) {
       for (const def of MANAGED_HOOKS) {
         const { key } = def;
-        const original = (nextHooks[key] ?? (base.hooks as Record<string, unknown>)?.[key]);
+        const original = nextHooks[key];
         if (!Array.isArray(original)) continue;
         const filtered = stripOurHook(original, def);
         if (filtered.length === original.length) continue;
@@ -847,7 +883,8 @@ export const claudeCodeAdapter: Adapter = {
         // agent touches, OpenLore or not, so they are wired per repository only.
         if (def.moment && ctx.scope === 'user') continue;
         // Several managed groups may share an event: merge into what this loop already built.
-        const merged = mergeOurHook(nextHooks[key] ?? (base.hooks as Record<string, unknown>)?.[key], command, def);
+        // `nextHooks` is a clone of the file's hooks, so a group removed above stays removed.
+        const merged = mergeOurHook(nextHooks[key], command, def);
         nextHooks[key] = merged;
         settingsEdits.push({ path: ['hooks', key], value: merged });
       }
@@ -1034,6 +1071,7 @@ export const claudeCodeAdapter: Adapter = {
     }
     const hooksObj = parsed.hooks as Record<string, unknown> | undefined;
     if (hooksObj) {
+      if (stripRetiredHooks(hooksObj, removalEdits)) changed = true;
       for (const def of MANAGED_HOOKS) {
         const { key } = def;
         if (!Array.isArray(hooksObj[key])) continue;

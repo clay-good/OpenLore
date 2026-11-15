@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from 'node:fs';
-import { win32 } from 'node:path';
+import { isAbsolute, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export interface PlatformCommand {
@@ -236,6 +236,33 @@ export function formatPlatformCommand(
   return parts
     .map((part) => SAFE_BARE_WORD.test(part) ? part : `"${part}"`)
     .join(' ');
+}
+
+/**
+ * A hook command that exits 0, silently, when its runtime is gone (change: hook-reliability,
+ * design section 5): a moved or removed install, or a removed Node, otherwise fails every hook
+ * event with `Cannot find module`, and nothing of OpenLore runs to say why. The guard lives in the
+ * command string because that is the only part left when the install is gone.
+ *
+ *   [ -f '<entry>' ] && [ -f '<node>' ] || exit 0; '<node>' '<entry>' hook <moment>
+ *
+ * `-f`, not `-x`, for Node: an executable-bit check on `node.exe` under Git Bash is not something
+ * to rely on, and a present file is what "the runtime exists" means here. The `npx` form is guarded
+ * by `command -v npx`. Any other form is returned unguarded. It needs a POSIX shell: Claude Code runs
+ * hook commands through one, on Windows through Git Bash.
+ */
+export function formatGuardedHookCommand(invocation: PlatformCommand, platform: NodeJS.Platform): string {
+  const command = formatPlatformCommand(invocation, platform);
+  const quote = (path: string) => formatPlatformCommand({ command: path, args: [] }, platform);
+  const [entry] = invocation.args;
+  const absolute = (p: string) => isAbsolute(p) || win32.isAbsolute(p);
+  if (absolute(invocation.command) && entry && absolute(entry) && isOpenloreCliEntryPath(entry)) {
+    return `[ -f ${quote(entry)} ] && [ -f ${quote(invocation.command)} ] || exit 0; ${command}`;
+  }
+  if (/^npx(\.cmd|\.exe)?$/i.test(win32.basename(invocation.command))) {
+    return `command -v npx >/dev/null 2>&1 || exit 0; ${command}`;
+  }
+  return command;
 }
 
 /**
