@@ -63,11 +63,14 @@ builders edit `src/`, `docs/`, `skills/`, `examples/`, `plugin/` later. Lines ar
   (`spec-mapper.ts:299-330`) and `detectExistingSpecDir` (`config-manager.ts:403-424`) at it. Tests:
   `openspec.test.ts` (new), beside. Done when: `SpecMap`/`loadSpecCorpus` output here is byte-equal
   before and after; a bare `specs/001-x/spec.md` with no `### Requirement:` is not OpenSpec.
-- [ ] 4.3 Move the other listers to the adapter, one commit per file: the sites that list
+- [x] 4.3 Move the other listers to the adapter, one commit per file: the sites that list
   `<root>/specs/<domain>/spec.md` (`analysis-indexes.ts`, `spec-vector-index.ts`,
   `digest-generator.ts`, `mcp-handlers/semantic.ts`, `mcp-handlers/orient.ts`, `doctor.ts`). Tests:
   beside. Done when: the unit suite passes with no snapshot change and `grep -n "readdir"` in those
   files finds no direct spec listing.
+  Built (2026-11-15): `readSpecFolderNames` (one level, links included) and `findNestedSpecFiles`
+  (depth-bounded) keep each caller's results; `doctor.ts` only checks the folder exists. Open: the
+  spec index and `list_spec_domains` follow a symlinked domain folder, the spec map does not.
 
 ## 5. Hard-coded `openspec` sites honor `openspecPath`
 

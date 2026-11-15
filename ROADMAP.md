@@ -27,7 +27,7 @@
 
 **Core accuracy first (owner, 2026-11-15):** the P0 items below that make the evidence agents receive
 wrong or noisy, one PR each, before more P1 work. Then [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality)
-task 4.3.
+group 5 (every `openspec/` site honors `openspecPath`).
 
 Shipped since 3.6.0 for the same reason: the prompt briefing names only code the prompt names
 exactly (#758; replay with `npm run bench:briefing`), TypeScript grammar gaps no longer leave parse
