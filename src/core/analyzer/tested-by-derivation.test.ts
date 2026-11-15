@@ -52,6 +52,34 @@ describe('tested_by derivation — relative paths (bug B)', () => {
     expect(testedBy('mul')).toContain('src/c.test.ts::*');
   });
 
+  it('an imported object literal links its methods; a renamed import links the original name', async () => {
+    const files = [
+      { path: 'src/adapter.ts', content: 'export const adapter = {\n  name: "x",\n  async apply(ctx) { return write(ctx); },\n  uninstall() { return 1; },\n};\nexport function outside() { return 2; }\nfunction write(c) { return c; }\n', language: 'TypeScript' },
+      { path: 'src/calc.ts', content: 'export function add(a: number, b: number) { return a + b; }\n', language: 'TypeScript' },
+      { path: 'src/adapter.test.ts', content: 'import { adapter } from "./adapter.js";\nit("applies", async () => { await adapter.apply({}); });\n', language: 'TypeScript' },
+      { path: 'src/calc.test.ts', content: 'import { add as plus } from "./calc.js";\nit("adds", () => { expect(plus(1, 2)).toBe(3); });\n', language: 'TypeScript' },
+    ];
+    const cg = serializeCallGraph(await new CallGraphBuilder().build(files));
+    const testedBy = (id: string) => cg.edges.filter(e => e.kind === 'tested_by' && e.callerId === id).map(e => e.calleeId);
+    const methodId = (name: string) => cg.nodes.find(n => n.filePath === 'src/adapter.ts' && n.name === name)!.id;
+    expect(testedBy(methodId('apply'))).toContain('src/adapter.test.ts::*');
+    expect(testedBy(methodId('uninstall'))).toContain('src/adapter.test.ts::*');
+    expect(testedBy(methodId('outside'))).not.toContain('src/adapter.test.ts::*');
+    expect(testedBy('src/calc.ts::add')).toContain('src/calc.test.ts::*');
+  });
+
+  it('an imported class links its methods', async () => {
+    // The methods are called inside anonymous `it` callbacks, which have no node.
+    const files = [
+      { path: 'src/watcher.ts', content: 'export class Watcher {\n  start() { return 1; }\n  stop() { return 2; }\n}\nexport function helper() { return 3; }\n', language: 'TypeScript' },
+      { path: 'src/watcher.test.ts', content: 'import { Watcher } from "./watcher.js";\nit("starts", () => { const w = new Watcher(); expect(w.start()).toBe(1); w.stop(); });\n', language: 'TypeScript' },
+    ];
+    const cg = serializeCallGraph(await new CallGraphBuilder().build(files));
+    const linked = cg.edges.filter(e => e.kind === 'tested_by' && e.calleeId === 'src/watcher.test.ts::*').map(e => e.callerId).sort();
+    expect(linked).toEqual(expect.arrayContaining(['src/watcher.ts::Watcher.start', 'src/watcher.ts::Watcher.stop']));
+    expect(linked).not.toContain('src/watcher.ts::helper');
+  });
+
   it('marks newly supported language conventions and derives tested_by edges', async () => {
     const files = [
       { path: 'lib/calc.rb', content: 'def add(a, b)\n  a + b\nend\n', language: 'Ruby' },

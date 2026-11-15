@@ -53,7 +53,7 @@ import { scanResolverMaps, hasInlineSdl, type ResolverMap } from './contract/gra
 import { isProjectedLanguage, isDeclarationEdgeKind } from './projected-language.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
-import { dynamicImportNames } from './test-dynamic-imports.js';
+import { dynamicImportNames, objectLiteralSpan } from './test-dynamic-imports.js';
 import { hasRustTestAttribute } from './rust-test-attributes.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
@@ -7016,6 +7016,37 @@ export class CallGraphBuilder {
     const allFilePaths = structuralFiles.map(f => f.path);
     const NAMED_IMPORT_RE = /^\s*import\s+(?:type\s+)?\{([^{}]+)\}\s+from\s+['"](\.[^'"]+)['"]/gm;
     const DEFAULT_IMPORT_RE = /^\s*import\s+(?:type\s+)?(\w+)\s+from\s+['"](\.[^'"]+)['"]/gm;
+    // Members of an imported object literal, per (file, name), computed once.
+    const nodesByFile = new Map<string, FunctionNode[]>();
+    const indexNodesByFile = () => {
+      if (nodesByFile.size > 0) return;
+      for (const n of allNodes.values()) {
+        if (n.isTest || n.isExternal) continue;
+        (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
+      }
+    };
+    const classMembers = (sourceFile: string, name: string): FunctionNode[] => {
+      indexNodesByFile();
+      return (nodesByFile.get(sourceFile) ?? []).filter(n => n.className === name);
+    };
+    const memberCache = new Map<string, FunctionNode[]>();
+    const objectLiteralMembers = (sourceFile: string, name: string): FunctionNode[] => {
+      const key = `${sourceFile}\0${name}`;
+      const cached = memberCache.get(key);
+      if (cached) return cached;
+      let members: FunctionNode[] = [];
+      const content = fileContents.get(sourceFile);
+      // A cheap precheck: most unmatched imports are types and constants, never `name = {`.
+      if (content !== undefined && content.includes(name) && content.includes('{')) {
+        const span = objectLiteralSpan(content, name);
+        if (span) {
+          indexNodesByFile();
+          members = (nodesByFile.get(sourceFile) ?? []).filter(n => n.startIndex > span[0] && n.endIndex <= span[1]);
+        }
+      }
+      memberCache.set(key, members);
+      return members;
+    };
     for (const file of structuralFiles) {
       if (!isTestFile(file.path)) continue;
       if (file.language !== 'TypeScript' && file.language !== 'JavaScript') continue;
@@ -7038,8 +7069,18 @@ export class CallGraphBuilder {
       };
       const testLabel = file.path.split('/').pop()!.replace(/\.[tj]sx?$/, '');
       const emitEdge = (name: string, sourceFile: string) => {
-        const candidates = trie.findBySimpleName(name)
+        let candidates = trie.findBySimpleName(name)
           .filter(n => n.filePath === sourceFile && !n.isTest && !n.isExternal);
+        if (candidates.length === 0) {
+          // An imported class: the test constructs it and calls its methods, often inside anonymous
+          // `it` callbacks that have no node, so no call edge reaches them.
+          candidates = classMembers(sourceFile, name);
+        }
+        if (candidates.length === 0) {
+          // An imported object literal (an adapter, a handler table): its methods are indexed by
+          // method name only, so the import names none of them. They lie inside its span.
+          candidates = objectLiteralMembers(sourceFile, name);
+        }
         for (const callee of candidates) {
           const pairKey = `${callee.id}\0${file.path}`;
           if (testedByPairs.has(pairKey)) continue;
@@ -7059,7 +7100,8 @@ export class CallGraphBuilder {
         const sourceFile = resolveSource(m[2]);
         if (!sourceFile) continue;
         for (const part of m[1].split(',')) {
-          const name = (part.match(/\bas\s+(\w+)/) ?? part.match(/(\w+)/))?.[1]?.trim();
+          // `foo as bar` imports `foo`: the source file defines the name before `as`, not the alias.
+          const name = part.trim().replace(/^type\s+/, '').match(/^(\w+)/)?.[1];
           if (name) emitEdge(name, sourceFile);
         }
       }

@@ -113,6 +113,17 @@ All notable changes to OpenLore are documented here. This project adheres to
   counts; a bare file name does not. On `bench:select-tests` (20 commits): 47 → 49 of 55 modified
   tests found, 82 → 83 test files selected on average.
 
+- **A test that imports an object literal, or renames an import, is linked to the code it tests.**
+
+- **A test that imports a class or an object literal, or renames an import, is linked to the code
+  it tests.** A test that imports `McpWatcher` and calls `start()` linked to none of its methods
+  (calls inside anonymous `it` callbacks have no caller node); every method of an imported class is
+  now linked.
+  `import { adapter } from './a.js'`, where `adapter` is `{ apply() {…} }`, linked nothing: the
+  index names those methods by method name only. The methods inside the literal are now linked.
+  `import { foo as bar }` looked up the alias `bar` in the source file, so every renamed import
+  was missed; it now looks up `foo`. On `bench:select-tests`, #762's `user-scope.test` is found.
+
 - **`blast_radius` lists every test file to run.** It returned the first 15 single tests, cut per
   test, so the files past them were only counted. On one change, `orient.test.ts` (it calls the
   changed `handleOrient`) was outside the 15 shown. `tests.files` now lists every selected test file,
