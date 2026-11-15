@@ -212,7 +212,8 @@ All notable changes to OpenLore are documented here. This project adheres to
 - **`find_dead_code` no longer rates closures, visitor methods or used constructors high-confidence
   dead.** A function defined inside a live function is a value it hands out (a callback, a returned
   visitor's `enter`/`leave`) whose caller is outside the graph; a constructor of a class with live
-  members has run, though `new X()` is not a call edge. Both are capped at `low` with the reason.
+  members has run even when no `new X()` edge reaches it (a class without an explicit constructor,
+  or a construction the binder cannot place). Both are capped at `low` with the reason.
 - **Every symbol-taking tool accepts a qualified symbol.** `EdgeStore.open` — the form the
   generated `CODEBASE.md` prints for a hub — was answered "not found" by `get_subgraph`,
   `analyze_impact`, `trace_execution_path`, `find_path`, `get_minimal_context`, `get_cluster` and
@@ -308,6 +309,9 @@ existing or opt-in presets; the default tool surface and your configuration are 
   symbols, with hazard-typed conflicts and duplicate-intent detection; **peer-change notices** fire
   when another agent touches what you read; and `plan_parallel_work` can plan against the live agents
   on the board. (#641, #646, #647, #648)
+- **Verification records expire on the same evidence as board entries:** a merged or deleted branch,
+  a removed worktree, or 30 minutes without being re-proven; `fleet_status` reports an ended record
+  as a count with its reason, never as a live verdict. (#698)
 
 ### Onboarding and the background
 

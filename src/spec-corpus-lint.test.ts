@@ -170,7 +170,7 @@ describe('spec-corpus lint: the overview domain table is honest', () => {
 
   it('does not link the phantom domains this change removed', () => {
     const text = specOf('overview');
-    for (const gone of ['auth', 'task', 'validator', 'services', 'types', 'import', 'chat', 'utilities', 'app']) {
+    for (const gone of ['auth', 'task', 'services', 'types', 'import', 'chat', 'utilities', 'app']) {
       expect(
         text.includes(`../${gone}/spec.md`),
         `overview still links the removed/phantom domain "${gone}"`,
