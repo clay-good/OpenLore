@@ -611,3 +611,28 @@ describe('proof and action on every finding (change: reframe-governance-as-agent
   });
 });
 
+describe('user-scope wiring stands down where the repository wires the moment (change: user-scope-loop-hooks)', () => {
+  const wire = (root: string, command: string) => write(root, '.claude/settings.json', JSON.stringify({
+    hooks: { PreToolUse: [{ matcher: 'Edit', _openlore: true, _openloreHook: 'before-edit', hooks: [{ type: 'command', command }] }] },
+  }));
+  const edit = (root: string) => JSON.stringify({ session_id: 'su', cwd: root, tool_name: 'Write', tool_input: { file_path: join(root, 'gen/order.pb.go') } });
+
+  it('a user-scope hook speaks where the repository does not wire the moment, and once (not twice) where it does', async () => {
+    const root = repo({ 'gen/order.pb.go': GENERATED });
+    expect(context((await runHook('before-edit', edit(root), { userScope: true })).stdout)?.additionalContext).toContain('generated');
+
+    const other = repo({ 'gen/order.pb.go': GENERATED });
+    wire(other, "'/usr/local/bin/node' '/opt/openlore/dist/cli/index.js' hook before-edit");
+    let reported = false;
+    expect((await runHook('before-edit', edit(other), { userScope: true, onRun: r => { reported = !!r.root; } })).stdout).toBe('');
+    expect(reported).toBe(false); // no hook-health record for the stood-down run
+    expect(context((await runHook('before-edit', edit(other))).stdout)?.additionalContext).toContain('generated');
+  });
+
+  it('another user-scope command in the repository settings does not make it stand down', async () => {
+    const root = repo({ 'gen/order.pb.go': GENERATED });
+    wire(root, "'/usr/local/bin/node' '/opt/openlore/dist/cli/index.js' hook before-edit --scope user");
+    expect(context((await runHook('before-edit', edit(root), { userScope: true })).stdout)?.additionalContext).toContain('generated');
+  });
+});
+

@@ -310,16 +310,26 @@ export const MANAGED_HOOKS: ReadonlyArray<ManagedHook> = [
   { key: 'SubagentStart', args: ['hook', 'subagent-start'], moment: 'subagent-start', timeout: 30 },
 ];
 
+/**
+ * The user-scope guard of a loop moment: outside a project with `.openlore/`, the hook exits before
+ * Node starts. The session-start and prompt hooks do not get it: they are what sets OpenLore up in
+ * a new repository or worktree (change: user-scope-loop-hooks).
+ */
+export const USER_SCOPE_PROJECT_GUARD = '[ -d "${CLAUDE_PROJECT_DIR:-.}/.openlore" ] || exit 0; ';
+
 /** The hook keys OpenLore manages, with commands resolved for the generating host. */
 function managedHooks(
   platform: NodeJS.Platform,
   runtime: ApplyContext['platformCommandRuntime'],
+  scope: 'repo' | 'user' = 'repo',
 ): ReadonlyArray<{ def: ManagedHook; command: string }> {
-  return MANAGED_HOOKS.map(def => ({
-    def,
+  return MANAGED_HOOKS.map(def => {
+    // The user-scope form stands down where a repository wires the same hook itself.
+    const args = scope === 'user' ? [...def.args, '--scope', 'user'] : def.args;
     // Guarded: a hook whose runtime is gone exits 0 silently (change: hook-reliability, task 8.1).
-    command: formatGuardedHookCommand(resolveOpenloreCommand(def.args, platform, runtime), platform),
-  }));
+    const command = formatGuardedHookCommand(resolveOpenloreCommand(args, platform, runtime), platform);
+    return { def, command: scope === 'user' && def.moment ? USER_SCOPE_PROJECT_GUARD + command : command };
+  });
 }
 
 /**
@@ -877,11 +887,11 @@ export const claudeCodeAdapter: Adapter = {
         + 'without that character to get the hooks.',
       );
     } else {
-      for (const { def, command } of managedHooks(ctx.platform, ctx.platformCommandRuntime)) {
+      for (const { def, command } of managedHooks(ctx.platform, ctx.platformCommandRuntime, ctx.scope === 'user' ? 'user' : 'repo')) {
         const { key } = def;
-        // Loop moments run on every edit. The user scope would run them in every repository the
-        // agent touches, OpenLore or not, so they are wired per repository only.
-        if (def.moment && ctx.scope === 'user') continue;
+        // The user scope wires the loop moments too: their guard exits at once outside a project
+        // with `.openlore/`, and `--scope user` stands down where the repository wires them itself
+        // (change: user-scope-loop-hooks).
         // Several managed groups may share an event: merge into what this loop already built.
         // `nextHooks` is a clone of the file's hooks, so a group removed above stays removed.
         const merged = mergeOurHook(nextHooks[key], command, def);
@@ -916,10 +926,10 @@ export const claudeCodeAdapter: Adapter = {
         // Never claim the hooks: on this host they are the one thing that was not written.
         ? `${layout.settings}: OpenLore hooks not wired — ${commandHazard}`
         : !had
-          ? `create ${layout.settings} with SessionStart + UserPromptSubmit hooks${includesOpenLoreStatusLine ? ' and OpenLore status line' : ''}${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''}`
+          ? `create ${layout.settings} with SessionStart, UserPromptSubmit and agent-loop hooks${includesOpenLoreStatusLine ? ' and OpenLore status line' : ''}${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''}`
           : !changed
             ? `${layout.settings}: already up to date`
-            : `update SessionStart + UserPromptSubmit hooks${includesOpenLoreStatusLine ? ' and OpenLore status line' : ''}${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''} in ${layout.settings}`,
+            : `update SessionStart, UserPromptSubmit and agent-loop hooks${includesOpenLoreStatusLine ? ' and OpenLore status line' : ''}${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''} in ${layout.settings}`,
       preview: !had
         ? previewCreate(settingsPath, after)
         : !changed

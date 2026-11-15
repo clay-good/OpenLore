@@ -29,7 +29,10 @@ const AGENT_DRIVEN_ENTRY_POINTS = [
   'core/services/cold-start-bootstrap.ts', // auto-initialization
 ];
 
-const READ_ONLY_INSTALL_MODULES = new Set(['cli/install/wiring-scope.ts']);
+// Each module here only READS configuration (no write, mkdir or rename): `hook-wiring-health.ts`
+// is how a user-scope hook checks whether the repository wires the same hook itself
+// (change: user-scope-loop-hooks).
+const READ_ONLY_INSTALL_MODULES = new Set(['cli/install/wiring-scope.ts', 'cli/install/hook-wiring-health.ts']);
 
 const SPECIFIER = /(?:import|export)[^'"]*?from\s*['"]([^'"]+)['"]|import\(\s*['"]([^'"]+)['"]\s*\)/g;
 
@@ -55,6 +58,13 @@ function importClosure(entry: string): Map<string, string | null> {
 }
 
 describe('only a human-run command writes user configuration', () => {
+  it('every module allowed as read-only still writes nothing', () => {
+    for (const file of READ_ONLY_INSTALL_MODULES) {
+      const source = readFileSync(join(SRC, file), 'utf8');
+      expect(source.match(/\b(?:writeFile|appendFile|mkdir|rename|rm|unlink|copyFile|createWriteStream)(?:Sync)?\b/g), file).toBeNull();
+    }
+  });
+
   it.each(AGENT_DRIVEN_ENTRY_POINTS)('%s cannot reach the install writers', (entry) => {
     expect(existsSync(join(SRC, entry)), `${entry} moved; update this guard`).toBe(true);
     const closure = importClosure(entry);

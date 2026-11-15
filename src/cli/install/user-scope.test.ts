@@ -51,8 +51,17 @@ describe('user-scope wiring', () => {
 
     const settings = await readJson(join(home, '.claude', 'settings.json'));
     const hooks = settings.hooks as Record<string, unknown[]>;
-    // Agent-loop moments run on every edit, so they are wired per repository, never user-wide.
-    expect(Object.keys(hooks).sort()).toEqual(['SessionStart', 'UserPromptSubmit']);
+    // Every hook is wired user-wide (change: user-scope-loop-hooks). Each user-scope command
+    // carries `--scope user` (it stands down where a repository wires the same hook), and the
+    // agent-loop moments also exit at once outside a project with `.openlore/`.
+    expect(Object.keys(hooks).sort()).toEqual(['PostToolUse', 'PostToolUseFailure', 'PreToolUse', 'SessionStart', 'Stop', 'SubagentStart', 'UserPromptSubmit']);
+    const commands = Object.values(hooks).flat().flatMap(g => ((g as { hooks?: Array<{ command: string }> }).hooks ?? []).map(h => h.command));
+    expect(commands.length).toBeGreaterThan(0);
+    for (const command of commands) expect(command, command).toContain('--scope user');
+    for (const command of commands) {
+      const loop = / hook [a-z-]+ --scope user/.test(command);
+      expect(command.startsWith('[ -d "${CLAUDE_PROJECT_DIR:-.}/.openlore" ] || exit 0; '), command).toBe(loop);
+    }
     const permissions = settings.permissions as { allow: string[] };
     // The user scope grants ONLY the read-only orientation command: a permission written
     // here applies in every repository the agent is ever pointed at, hostile ones
@@ -209,7 +218,6 @@ describe('user-scope wiring', () => {
     expect(forSettings[0].summary).toContain('Bash(openlore orient:*)');
     const preview = forSettings[0].preview ?? '';
     expect(preview).toContain('SessionStart');
-    expect(preview).toContain('Bash(openlore orient:*)');
   });
 });
 

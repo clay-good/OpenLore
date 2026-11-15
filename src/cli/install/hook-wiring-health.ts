@@ -13,7 +13,7 @@
  * duplicates. Read-only.
  */
 import { access, readFile } from 'node:fs/promises';
-import { constants as fsConstants } from 'node:fs';
+import { constants as fsConstants, readFileSync } from 'node:fs';
 import { isAbsolute, join, win32 } from 'node:path';
 import { isOpenloreCliEntryPath } from '../../utils/platform-command.js';
 
@@ -114,9 +114,43 @@ export async function assessHookWiring(files: readonly string[]): Promise<HookWi
   }
   const duplicates: HookWiringHealth['duplicates'] = [];
   for (const group of byStep.values()) {
-    if (new Set(group.map(h => h.command)).size > 1) duplicates.push({ event: group[0].event, step: group[0].step, hooks: group });
+    // A user-scope command stands down at run time when a repo-scope one runs the same step, so
+    // that pair is one step, not a duplicate (change: user-scope-loop-hooks).
+    const repoScoped = group.filter(h => !isUserScopeCommand(h.command));
+    const running = repoScoped.length ? repoScoped : group;
+    if (new Set(running.map(h => h.command)).size > 1) duplicates.push({ event: group[0].event, step: group[0].step, hooks: running });
   }
   return { hooks, missing, duplicates };
+}
+
+/** Whether a command is the user-scope form, which stands down for a repository's own wiring. */
+export function isUserScopeCommand(command: string): boolean {
+  const words = shellWords(command);
+  return words.some((w, i) => w === '--scope' && words[i + 1] === 'user');
+}
+
+/**
+ * True when the repository's own Claude settings (`.claude/settings.json` or
+ * `settings.local.json` in any of `dirs`) wire this OpenLore step with a repo-scope command. The
+ * user-scope command then does nothing, so a repository wired at both scopes gets each receipt
+ * once (change: user-scope-loop-hooks). Synchronous and cheap: it runs on every hook event.
+ */
+export function repoWiresStep(dirs: ReadonlyArray<string | undefined>, step: string): boolean {
+  for (const dir of new Set(dirs.filter((d): d is string => !!d))) {
+    for (const name of ['settings.json', 'settings.local.json']) {
+      let parsed: { hooks?: Record<string, unknown> };
+      try { parsed = JSON.parse(readFileSync(join(dir, '.claude', name), 'utf8')) as typeof parsed; } catch { continue; }
+      for (const groups of Object.values(parsed?.hooks ?? {})) {
+        for (const g of Array.isArray(groups) ? groups : []) {
+          for (const h of Array.isArray((g as { hooks?: unknown })?.hooks) ? (g as { hooks: unknown[] }).hooks : []) {
+            const command = (h as { command?: unknown })?.command;
+            if (typeof command === 'string' && openloreStep(command) === step && !isUserScopeCommand(command)) return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
 }
 
 /** The Claude Code settings files that can hold hooks for this repository. */

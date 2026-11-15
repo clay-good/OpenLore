@@ -771,7 +771,7 @@ export interface HookRunReport { root?: string; outcome: HookOutcome; shown: num
  */
 export async function runHook(
   moment: HookMoment, raw: string,
-  opts: { cwd?: string; timeoutMs?: number; onRun?: (report: HookRunReport) => void } = {},
+  opts: { cwd?: string; timeoutMs?: number; userScope?: boolean; onRun?: (report: HookRunReport) => void } = {},
 ): Promise<HookRunResult> {
   const report: HookRunReport = { outcome: 'ok', shown: 0 };
   // The last line of the fail-open contract: a check module that does not load, or a throw on any
@@ -787,7 +787,7 @@ export async function runHook(
   }
 }
 
-async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: string; timeoutMs?: number }, report: HookRunReport): Promise<HookRunResult> {
+async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: string; timeoutMs?: number; userScope?: boolean }, report: HookRunReport): Promise<HookRunResult> {
   const silent: HookRunResult = { stdout: '', exitCode: 0 };
   const payload = parseHookPayload(raw);
   // The OpenLore root: the nearest directory at or above the session's working directory (the agent
@@ -796,6 +796,12 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
   // The working directory first; when it is above the project (a monorepo top), the edited file's.
   const root = openloreRoot(start) ?? (payload.files[0] ? openloreRoot(dirname(resolve(start, payload.files[0]))) : undefined);
   if (!root) return silent;
+  // The user-scope wiring stands down where the repository wires this moment itself: one receipt,
+  // and one hook-health record, per event (change: user-scope-loop-hooks).
+  if (opts.userScope) {
+    const { repoWiresStep } = await import('../install/hook-wiring-health.js');
+    if (repoWiresStep([process.env.CLAUDE_PROJECT_DIR, root, start], `hook ${moment}`)) return silent;
+  }
   report.root = root;
   if (momentDisabled(root, moment)) return silent;
   if (moment === 'before-stop' && payload.stopHookActive) return silent;
@@ -890,12 +896,13 @@ export const hookCommand = new Command('hook')
   .description('Print the receipt for one moment of the agent loop (wired by `openlore install` into harness hooks)')
   .argument('<moment>', `one of: ${HOOK_MOMENTS.join(', ')}`)
   .option('--harness <name>', 'the harness that runs the hook (claude-code, codex); wired by install')
+  .option('--scope <scope>', 'the install scope that wired it; `user` stands down where the repository wires the moment itself')
   .addHelpText('after', `
 Reads the harness hook payload on stdin and prints at most one receipt as the event's
 additionalContext. Prints nothing when there is nothing new; always exits 0. Turn a moment off with
 "hooks": { "<moment>": false } in .openlore/config.json.
 `)
-  .action(async (moment: string, options: { harness?: string }) => {
+  .action(async (moment: string, options: { harness?: string; scope?: string }) => {
     if (!(HOOK_MOMENTS as readonly string[]).includes(moment)) process.exit(0);
     let raw = '';
     try { raw = await readStdin(process.stdin, 1500, STDIN_MAX_BYTES); } catch { /* no payload */ }
@@ -905,7 +912,7 @@ additionalContext. Prints nothing when there is nothing new; always exits 0. Tur
     process.stdout.write = (() => true) as typeof process.stdout.write;
     let r: HookRunResult;
     let report: HookRunReport | undefined;
-    try { r = await runHook(moment as HookMoment, raw, { onRun: rep => { report = rep; } }); } finally { process.stdout.write = write; }
+    try { r = await runHook(moment as HookMoment, raw, { userScope: options.scope === 'user', onRun: rep => { report = rep; } }); } finally { process.stdout.write = write; }
     // The hook's one stdout write is also its screening choke point: every moment's
     // additionalContext is repository-derived text headed straight into model context, and only
     // 'subagent-start' sanitized its own. The class only removes characters inside the JSON's

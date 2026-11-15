@@ -53,6 +53,8 @@ interface OrientCliOptions {
   proposalOnly?: boolean;
   backgroundBuild?: boolean;
   backgroundRepair?: boolean;
+  /** The install scope that wired this hook (`user` stands down for repo wiring). */
+  scope?: string;
 }
 
 // readStdin moved to ../../utils/stdin.js (dependency-light leaf) so latency-sensitive hooks can
@@ -399,6 +401,7 @@ export const orientCommand = new Command('orient')
   .option('--metrics', 'Report wall time and output size to stderr (opt-in; off by default)', false)
   .option('--inject', 'Emit a bounded, ignorable task-scoped orientation block for a pre-turn agent hook (reads the task from --task or stdin); always exits 0', false)
   .option('--proposal-only', 'Emit the concise OpenSpec proposal instruction only when the submitted prompt invokes propose; always exits 0', false)
+  .option('--scope <scope>', 'the install scope that wired this hook; `user` stands down where the repository wires the same hook itself')
   .addOption(new Option('--background-build').hideHelp())
   .addOption(new Option('--background-repair').hideHelp())
   .addHelpText(
@@ -435,6 +438,12 @@ prints a short session-start primer (used by the install SessionStart hook).
     }
 
     const root = resolve(directory);
+    // A user-scope hook stands down where the repository wires the same hook itself, so a
+    // repository wired at both scopes is briefed once (change: user-scope-loop-hooks).
+    if (opts.scope === 'user' && (opts.inject || !task)) {
+      const { repoWiresStep } = await import('../install/hook-wiring-health.js');
+      if (repoWiresStep([process.env.CLAUDE_PROJECT_DIR, root], opts.inject ? 'orient --inject' : 'orient --json')) return;
+    }
     // The prompt-submitted moment: off switch first (nothing runs, no build), then the whole
     // moment — index bootstrap and lookup — under its runtime limit (change: hook-reliability).
     if (opts.inject) {
