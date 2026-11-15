@@ -376,9 +376,10 @@ source referencing a retired target, a cycle in an acyclic edge, and an anchor w
 longer exists. Each finding SHALL name the source artifact, the edge kind, the reference exactly as
 written, and the reason it failed.
 
-Resolution and graph-shape failures SHALL default to the blocking enforcement class; liveness and
-anchor failures SHALL default to advisory. Every default SHALL remain overridable through the
-operator's enforcement policy, and the pass SHALL introduce no finding that the policy cannot name.
+Every corpus finding SHALL default to the advisory enforcement class. Resolution and graph-shape
+failures SHALL keep the severity `error`, so they stay visible as errors without blocking. Every
+default SHALL remain overridable through the operator's enforcement policy, which is the only way
+a corpus finding blocks, and the pass SHALL introduce no finding that the policy cannot name.
 The check SHALL be deterministic and offline: identical corpus bytes SHALL produce an identical,
 ordered finding list, with no model, embedding, or network call in the path. Adding an artifact
 type or reference kind without registering its edge SHALL fail a closure guard in CI.
@@ -433,11 +434,19 @@ source SHALL make the assessment unavailable rather than being treated as an emp
 
 #### Scenario: Findings are governable, never self-invented
 
-- **GIVEN** an operator enforcement policy that downgrades a corpus finding code to advisory
+- **GIVEN** an operator enforcement policy that sets a corpus finding code to blocking
 - **WHEN** the enforcement gate runs
-- **THEN** the finding is still reported and still annotates, but does not block
+- **THEN** the finding blocks, and every corpus finding the policy does not name is still reported
+  and still annotates, but does not block
 - **AND** the policy entry changes only that finding's class; it never creates or suppresses a
   finding the corpus did not produce
+
+#### Scenario: A graph error does not block without a policy
+
+- **GIVEN** a repository with no enforcement policy and a decision supersession cycle
+- **WHEN** the enforcement gate runs
+- **THEN** the `corpus-supersession-cycle` finding is reported with severity `error` and class
+  advisory, and the gate does not fail
 
 ### Requirement: UndeclaredCorpusReferencesAreSuggestedNeverWritten
 

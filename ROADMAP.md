@@ -30,9 +30,8 @@ group. Groups 1-3 are merged (#751, #753, #754): no spec folder at first run, ho
 source" answers, and optional spec config. Next: group 4, the spec-source interface with OpenSpec
 behind it.
 
-`reframe-governance-as-agent-evidence` is built (#747, #748, #749, #752) except task 2.1: the
-benchmark run that would add `verify_change` to the default `substrate` preset. That run needs
-Docker and paid Claude credentials, so it waits for the owner.
+`reframe-governance-as-agent-evidence` shipped (#747, #748, #749, #752) and is archived. Its
+benchmark task 2.1 is not doing (owner, 2026-11-15): `verify_change` stays out of `substrate`.
 
 ## P0: 3.6.0 follow-ups (small fixes, any time)
 
@@ -55,7 +54,7 @@ Docker and paid Claude credentials, so it waits for the owner.
 |---|--------|------------------------|-------|
 | 1 | [`ship-claude-code-plugin`](openspec/changes/ship-claude-code-plugin) ([PR #727](https://github.com/clay-good/OpenLore/pull/727), merged; dogfooding, the 3.7.0 pin, and the directory submission remain) | Hooks and tools arrive with one install and stay current | — |
 | 2 | `hook-reliability` (shipped; [archived](openspec/changes/archive/2026-11-15-hook-reliability)) | Hooks never slow or break a session, each finding is said once, and index progress goes to the status line, not the agent | — |
-| 3 | [`reframe-governance-as-agent-evidence`](openspec/changes/reframe-governance-as-agent-evidence) (built; task 2.1, the benchmark run, waits for the owner) | `verify_change` joins the default set; one small plugin set; governance arrives as quiet findings with proof | its `plugin` preset lands before 1 uses it |
+| 3 | [`reframe-governance-as-agent-evidence`](openspec/changes/reframe-governance-as-agent-evidence) (shipped; archived) | `verify_change` joins the default set; one small plugin set; governance arrives as quiet findings with proof | its `plugin` preset lands before 1 uses it |
 | 4 | [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality) (groups 1-3 merged) | OpenSpec, Spec Kit and BMAD are detected; none is required; "no specs" is an honest state, never a zero | can start any time |
 | 5 | [`curate-product-surface`](openspec/changes/curate-product-surface) | Fewer, current skills and docs, so nothing stale misleads the agent | 1, 3 |
 
