@@ -49,6 +49,40 @@ is at most the target. A runtime limit is lowered only when the measured p95 on 
 (6,550 functions) is at most one third of the new limit; if not, today's limit stays. Any other
 result goes to the owner before code changes.
 
+**Measured (task 1.1, 2026-11-14).** `npm run bench:hooks` (fixture) and
+`npm run bench:hooks -- --repo . --file src/utils/misc.ts` (this repository at 6af019f68), 30 runs per
+moment, 3 warm-up runs in-process, macOS arm64, Node 26.12.1. Each run has a new session, after one
+added function in the target file. "Spawned" is the built CLI as the harness runs it.
+
+| Moment | Fixture in-process p95 | Fixture spawned p95 | Repo in-process p95 | Repo spawned p50 / p95 |
+|---|---|---|---|---|
+| prompt-submitted | 36 ms | 643 ms | 103 ms | 941 / 2,448 ms |
+| before-edit | 59 ms | 380 ms | 35 ms | 301 / 306 ms |
+| after-tools, edit | 131 ms | 403 ms | 169 ms | 429 / 447 ms |
+| after-tools, shell command | 11 ms | 266 ms | 11 ms | 266 / 270 ms |
+| before-stop | 733 ms | 1,090 ms | 1,079 ms | 1,543 / 1,559 ms |
+
+Result of the rule:
+
+| Moment | p95 target | Runtime limit |
+|---|---|---|
+| prompt-submitted | 1,000 ms **confirmed** (643 ms) | none → 3 s, timed in-process **owner, 2026-11-14** (103 ms in-process; 2,448 ms whole-process) |
+| before-edit | 800 ms **confirmed** (380 ms) | 8 s → 3 s **confirmed** (306 ms ≤ 1 s) |
+| after-tools, edit | 1,500 ms **confirmed** (403 ms) | 15 s → 6 s **confirmed** (447 ms ≤ 2 s) |
+| after-tools, shell command | 600 ms **confirmed** (266 ms) | (shares the after-tools limit) |
+| before-stop | 5,000 ms **confirmed** (1,090 ms) | 50 s → 20 s **confirmed** (1,559 ms ≤ 6.7 s) |
+
+Limits of this measurement: the fixture edit hooks reported no finding (30 of 30 silent), so they time
+the no-finding path; the repository's before-stop printed a receipt. The prompt-submitted p95 on the
+repository is a tail (p50 941 ms, in-process 103 ms): cold start and index load, not the handler.
+The reframe evidence sources are not wired yet (reframe group 3 has not landed). Linux and Windows
+numbers come from task 5.3.
+
+Decided by the owner (2026-11-14): the prompt-submitted limit is 3 s, timed in-process. Every
+runtime limit starts its timer inside the process, after cold start and module load, so the rule
+compares a limit with the in-process p95 (103 ms here). The whole-process numbers bound the p95
+targets only.
+
 **How the test avoids flakiness.** A generated fixture of fixed size (200 files, 2,000 functions,
 one index build in `beforeAll`). The handler is timed in-process: 3 warm-up runs, then 30 runs,
 assert p95 ≤ (target − 450 ms cold-start share) × multiplier. The multiplier is 1.5 locally and 3
