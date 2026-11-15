@@ -251,7 +251,7 @@ describe('contract', () => {
       surfaces: [{ name: 'client', severity: 'critical', resolvedSymbols: 3, unresolvedMembers: [] }],
       newlyOpenedPaths: [{ surface: 'client', surfaceSeverity: 'critical', openingEdge: { from: 'A', to: 'B' }, path: ['A', 'B', 'send'], pathIds: ['a::A', 'b::B', 'b::send'], reaches: 'send' }],
       impact: { highestRiskLevel: 'high', maxAffectedCallers: 4, hubsTouched: [], layersCrossed: [], governingDecisions: [], governingDecisionProvenance: [], topSymbols: [], analyzedSymbolCount: 1 },
-      tests: { count: 2, toRun: [], soundness: {} },
+      tests: { count: 2, toRun: [], files: [], soundness: {} },
       specs: { willGoStale: 1, items: [] },
       lease: { anchors: [{ nodeId: 'src/a.ts::A', filePath: 'src/a.ts', contentHash: 'abc' }] },
       findings: [], highestSurfaceSeverity: 'critical', posture: 'advisory', caveats: [], headline: 'x',

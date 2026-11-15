@@ -96,6 +96,12 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **`blast_radius` lists every test file to run.** It returned the first 15 single tests, cut per
+  test, so the files past them were only counted. On one change, `orient.test.ts` (it calls the
+  changed `handleOrient`) was outside the 15 shown. `tests.files` now lists every selected test file,
+  most confident first (up to 200, disclosed in `capped`); `verify_change` carries it, and the CLI
+  prints the files.
+
 - **Spec text under a configured `openspecPath` is labeled reviewed only when it is.** `orient`,
   `blast_radius` and the Pi context checked git for a fixed `openspec/` folder. With
   `openspecPath: "docs"`, an uncommitted edit under `docs/specs/` was served as `reviewed-corpus`.

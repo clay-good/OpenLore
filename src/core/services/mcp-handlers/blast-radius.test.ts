@@ -247,6 +247,21 @@ describe('computeBlastRadius', () => {
     expect(() => assertConclusionShape('blast_radius', b)).not.toThrow();
   });
 
+  it('lists every selected test file, while the single-test list stays cut at 15', async () => {
+    // 20 tests in 18 files: two files hold two tests each, ranked as select_tests returns them.
+    const selectedTests = Array.from({ length: 20 }, (_, i) => ({
+      test: `t${i}`, file: `src/f${Math.min(i, 17)}.test.ts`, confidence: i < 10 ? 'high' : 'medium',
+    }));
+    vi.mocked(handleSelectTests).mockResolvedValueOnce({ selectedTests, soundness: { posture: 'over-approximate', caveats: [] } } as never);
+
+    const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
+
+    expect(b.tests.count).toBe(20);
+    expect(b.tests.toRun).toHaveLength(15);
+    expect(b.tests.files).toEqual(Array.from({ length: 18 }, (_, i) => `src/f${i}.test.ts`));
+    expect(() => assertConclusionShape('blast_radius', b)).not.toThrow();
+  });
+
   it('forwards test-selection bounds and widening caveats unmodified', async () => {
     const soundness = {
       posture: 'over-approximate',

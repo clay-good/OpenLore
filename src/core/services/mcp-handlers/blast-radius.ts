@@ -86,6 +86,8 @@ import { withIndexStaleness } from './index-staleness.js';
  * bounding the work keeps a pre-commit hook fast. Truncation is reported, never
  * silent (mcp-quality: no-silent-truncation). */
 const DEFAULT_MAX_SYMBOLS = 12;
+/** Test files listed in `tests.files`; more are counted in `capped`, never dropped silently. */
+const MAX_TEST_FILES = 200;
 
 export interface BlastRadiusInput {
   directory: string;
@@ -181,6 +183,11 @@ export interface BlastRadiusBriefing {
   tests: {
     count: number;
     toRun: Array<{ test: string; file: string; confidence: string }>;
+    /**
+     * Every test file the selection names, most confident first: what to pass to the test runner.
+     * `toRun` lists single tests and is cut at 15; this list is cut only at {@link MAX_TEST_FILES}.
+     */
+    files: string[];
     soundness: unknown;
     /** Unmodified reachability-cap receipt from select_tests. */
     truncatedAtDepth?: number;
@@ -408,6 +415,7 @@ export async function computeBlastRadius(
   // ── 3. Tests to run (reuse select_tests over the same diff) ─────────────────
   let testCount = 0;
   let testToRun: Array<{ test: string; file: string; confidence: string }> = [];
+  let testFiles: string[] = [];
   let testSoundness: unknown;
   let testsTruncatedAtDepth: number | undefined;
   let testsUnavailable: string | null = null;
@@ -430,6 +438,8 @@ export async function computeBlastRadius(
     const tests = sel.selectedTests ?? [];
     testCount = tests.length;
     testToRun = tests.slice(0, 15);
+    // select_tests ranks by confidence, then file: the first sighting of a file is its best rank.
+    testFiles = [...new Set(tests.map(t => t.file))];
     testSoundness = sel.soundness;
     testsTruncatedAtDepth = sel.truncatedAtDepth;
     federationResult = sel.federation;
@@ -594,6 +604,7 @@ export async function computeBlastRadius(
   // impact.analyzedSymbolCount) remain authoritative and uncapped.
   const capped: string[] = [];
   if (testToRun.length < testCount) capped.push(`tests.toRun (${testToRun.length}/${testCount})`);
+  if (testFiles.length > MAX_TEST_FILES) capped.push(`tests.files (${MAX_TEST_FILES}/${testFiles.length})`);
   if (memWillDrift.length > 20) capped.push(`memory.willDrift (20/${memWillDrift.length})`);
   if (specItems.length > 20) capped.push(`specs.items (20/${specItems.length})`);
   if (decisionItems.length > 20) capped.push(`decisions.items (20/${decisionItems.length})`);
@@ -673,6 +684,7 @@ export async function computeBlastRadius(
     tests: {
       count: testCount,
       toRun: testToRun,
+      files: testFiles.slice(0, MAX_TEST_FILES),
       soundness: testSoundness,
       ...(testsTruncatedAtDepth !== undefined ? { truncatedAtDepth: testsTruncatedAtDepth } : {}),
       ...(testsUnavailable ? { unavailable: testsUnavailable } : {}),
