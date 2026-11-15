@@ -53,10 +53,12 @@ builders edit `src/`, `docs/`, `skills/`, `examples/`, `plugin/` later. Lines ar
 
 ## 4. The interface, with OpenSpec behind it (no behavior change)
 
-- [ ] 4.1 New `src/core/spec-sources/types.ts` and `index.ts`: `SpecSource`, `SpecItem`,
+- [x] 4.1 New `src/core/spec-sources/types.ts` and `index.ts`: `SpecSource`, `SpecItem`,
   `detectSpecSources`, `listSpecItems`, the fixed order. Test: `index.test.ts` (new). Done when: with
-  zero adapters it returns `found: []` and the 6 ids in `lookedFor`.
-- [ ] 4.2 New OpenSpec adapter `spec-sources/openspec.ts` wrapping `loadSpecCorpus`
+  zero adapters it returns `found: []` and the 6 ids in `lookedFor`. Built (2026-11-15) with
+  `lookedFor` = the registered adapters only (`[]` with zero adapters), so it never names a source
+  that was not checked; a test binds `SPEC_SOURCES_LOOKED_FOR` to the registry.
+- [x] 4.2 New OpenSpec adapter `spec-sources/openspec.ts` wrapping `loadSpecCorpus`
   (`spec-link-service.ts:116`) and one shared heading parser; point `buildSpecMap`
   (`spec-mapper.ts:299-330`) and `detectExistingSpecDir` (`config-manager.ts:403-424`) at it. Tests:
   `openspec.test.ts` (new), beside. Done when: `SpecMap`/`loadSpecCorpus` output here is byte-equal

@@ -43,7 +43,7 @@ describe('config-manager', () => {
 
     it('detects specs under docs/specs/ and reports the root', async () => {
       await mkdir(join(testDir, 'docs', 'specs', 'auth'), { recursive: true });
-      await writeFile(join(testDir, 'docs', 'specs', 'auth', 'spec.md'), '# auth\n');
+      await writeFile(join(testDir, 'docs', 'specs', 'auth', 'spec.md'), '# auth\n\n### Requirement: Login\n');
       const found = await detectExistingSpecDir(testDir);
       expect(found).toEqual({ root: 'docs', specsRel: 'docs/specs', count: 1 });
     });
@@ -64,9 +64,15 @@ describe('config-manager', () => {
 
     it('detects a bare specs/ dir as root "."', async () => {
       await mkdir(join(testDir, 'specs'), { recursive: true });
-      await writeFile(join(testDir, 'specs', 'overview.md'), '# o\n');
+      await writeFile(join(testDir, 'specs', 'overview.md'), '# o\n\n### Requirement: O\n');
       const found = await detectExistingSpecDir(testDir);
       expect(found).toEqual({ root: '.', specsRel: 'specs', count: 1 });
+    });
+
+    it('does not take docs/specs or specs/ with no requirement heading for OpenSpec (spec-framework-neutrality 4.2)', async () => {
+      await mkdir(join(testDir, 'specs', '001-login'), { recursive: true });
+      await writeFile(join(testDir, 'specs', '001-login', 'spec.md'), '# Login\n\n- **FR-001**: System MUST log users in.\n');
+      expect(await detectExistingSpecDir(testDir)).toBeNull();
     });
   });
 

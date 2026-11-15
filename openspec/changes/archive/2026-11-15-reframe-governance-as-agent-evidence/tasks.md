@@ -31,13 +31,11 @@ Run one test file with `npx vitest run <file>`. Each group is one small PR, in t
 
 ## 2. The `plugin` preset
 
-- [ ] 2.1 Run the default-surface benchmark (`DefaultSurfaceDecisionsRideTheBenchmarkProtocol`)
-  for `substrate` with and without `verify_change`; record the result with `openlore decisions
-  record`. If it regresses, skip the `substrate` edit in 2.2 and keep the rest (design section 1).
-  Done when: the decision names the run and the verdict.
-  Status (2026-11-15): not run yet. A conforming run needs Docker and paid Claude credentials,
-  which the build machine lacks. Per design section 1, `plugin` shipped without the `substrate`
-  edit; the subset test allows `verify_change` as the one exception until this run passes.
+- [x] 2.1 Not doing (owner decision, 2026-11-15). The benchmark run that would add `verify_change`
+  to `substrate` is dropped: effort goes to the accuracy of the intelligence agents receive instead.
+  `substrate` stays at 15 tools; `verify_change` is in the `plugin`, `verify` and `full` presets.
+  Per design section 1, the subset test keeps `verify_change` as the one plugin tool not in `substrate`.
+
 - [x] 2.2 Edit `src/cli/commands/mcp.ts`: add `verify_change` to `substrate` (if 2.1 passed; not yet); add
   `plugin` to `TOOL_PRESETS` (line 2620) with the 11 tools in `design.md` section 2; update the
   `substrate` budget and add a `plugin` entry to `STANDING_CONTEXT_BUDGETS` with the measured

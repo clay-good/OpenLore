@@ -4,7 +4,8 @@
  * Handles reading/writing .openlore/config.json and openspec/config.yaml
  */
 
-import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { detectOpenSpecRoot } from '../spec-sources/openspec.js';
 import { YAML_QUIET } from '../analyzer/yaml-diagnostics.js';
 import { dirname, join, resolve } from 'node:path';
 import YAML from 'yaml';
@@ -401,27 +402,10 @@ export interface DetectedSpecDir {
  * when nothing is found.
  */
 export async function detectExistingSpecDir(rootPath: string): Promise<DetectedSpecDir | null> {
-  // root (relative) → specs live at `<root>/specs`. '.' covers a bare `specs/`.
-  const candidateRoots = ['openspec', 'docs', '.'];
-  for (const root of candidateRoots) {
-    const specsRel = root === '.' ? 'specs' : `${root}/specs`;
-    const specsDir = join(rootPath, specsRel);
-    let count = 0;
-    try {
-      const stack = [specsDir];
-      while (stack.length) {
-        const dir = stack.pop()!;
-        for (const d of await readdir(dir, { withFileTypes: true })) {
-          if (d.isDirectory()) stack.push(join(dir, d.name));
-          else if (d.name.endsWith('.md')) count++;
-        }
-      }
-    } catch {
-      continue; // specs dir doesn't exist — try the next candidate
-    }
-    if (count > 0) return { root, specsRel, count };
-  }
-  return null;
+  // The OpenSpec source owns detection: a bare `specs/` or `docs/specs` with no
+  // `### Requirement:` heading is not OpenSpec (it is Spec Kit's layout), so it is not
+  // pointed at (change: spec-framework-neutrality, task 4.2).
+  return detectOpenSpecRoot(rootPath);
 }
 
 /**
