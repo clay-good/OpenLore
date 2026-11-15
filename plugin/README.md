@@ -25,6 +25,11 @@ monorepo).
 does not auto-update third-party marketplaces unless you do this. A new version installs its new
 runtime on first use and removes the old one.
 
+**Build progress.** A plugin cannot set your status line, so build progress is not shown by
+default. To see it (`OpenLore: indexing 45% (1,310/2,900 files)`), install the `openlore` CLI and
+set `"statusLine": { "type": "command", "command": "openlore statusline" }` in
+`~/.claude/settings.json`. The agent is never told about a build.
+
 ## What the agent gets
 
 | Moment | Hook | What the agent sees |

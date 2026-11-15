@@ -371,12 +371,43 @@ export async function extractFilesForPass1<T>(
   isEmptyResult: (value: T | undefined) => boolean,
   opts: ExtractionLaneOptions = {},
 ): Promise<{ outcomes: Array<ExtractOutcome<T>>; disclosure: ExtractionLaneDisclosure }> {
+  progressListener?.start(files.length);
+  try {
+    return await extractFilesForPass1Lanes(files, serialExtract, isEmptyResult, opts);
+  } finally {
+    progressListener?.end();
+  }
+}
+
+/** What a Pass-1 progress listener is told: the files to extract, each one done, the end. */
+export interface Pass1ProgressListener { start(filesTotal: number): void; fileDone(): void; end(): void }
+
+let progressListener: Pass1ProgressListener | undefined;
+
+/**
+ * Set (or clear) the one Pass-1 progress listener. Only `openlore analyze` sets it, to show the
+ * index build's progress to the user (change: hook-reliability, group 9). Graphs that read-only
+ * tools build at other commits are not the index build, so they report nothing, and this module
+ * writes nothing.
+ */
+export function setPass1ProgressListener(listener: Pass1ProgressListener | undefined): void {
+  progressListener = listener;
+}
+
+async function extractFilesForPass1Lanes<T>(
+  files: ExtractionFile[],
+  serialExtract: (file: ExtractionFile) => Promise<T | undefined>,
+  isEmptyResult: (value: T | undefined) => boolean,
+  opts: ExtractionLaneOptions,
+): Promise<{ outcomes: Array<ExtractOutcome<T>>; disclosure: ExtractionLaneDisclosure }> {
   const serial = async (reason: SerialLaneReason): Promise<{
     outcomes: Array<ExtractOutcome<T>>;
     disclosure: ExtractionLaneDisclosure;
   }> => {
     const outcomes: Array<ExtractOutcome<T>> = [];
     const slow: Array<{ path: string; ms: number }> = [];
+    // A pool that started no worker counted nothing; the serial lane counts from zero.
+    progressListener?.start(files.length);
     for (const file of files) outcomes.push(await runSerial(file, serialExtract, slow));
     return {
       outcomes,
@@ -457,6 +488,7 @@ async function runSerial<T>(
   } finally {
     const ms = Date.now() - startedAt;
     if (slow && ms >= SLOW_FILE_DISCLOSURE_MS) slow.push({ path: file.path, ms });
+    progressListener?.fileDone();
   }
 }
 
@@ -769,6 +801,7 @@ async function runPooled<T>(
           continue;
         }
         slots[index] = outcome;
+        progressListener?.fileDone();
       }
     } finally {
       if (!dead) {

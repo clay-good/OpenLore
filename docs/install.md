@@ -78,6 +78,24 @@ If `statusLine` is already set, install keeps it and prints a hint instead; call
 the OpenLore status line, and uninstall removes only that one (identified by
 `--installed-by-openlore`).
 
+**While an index builds,** the status line shows its progress instead, for example
+`OpenLore: indexing 45% (1,310/2,900 files)`, then the phase name (`indexing: linking`,
+`indexing: writing the index`). `openlore status` shows the same line with its start time. When no
+build runs, nothing extra is shown. The agent is told nothing about a build: answers served during
+one already say they are partial. The progress record is `.openlore/build-progress.json`, written
+at most once a second and removed when the build ends; one whose process is gone, or that has not
+moved for 2 minutes, is ignored.
+
+**With the Claude Code plugin,** OpenLore cannot set your status line (plugins have no way to). To
+see build progress, wire it yourself in `~/.claude/settings.json`:
+
+```json
+{ "statusLine": { "type": "command", "command": "openlore statusline" } }
+```
+
+This needs the `openlore` CLI on your `PATH` (`npm install -g openlore`). Without it, a plugin user
+sees no progress; the briefings start once the build finishes.
+
 Claude Code documents custom shell-command status lines and ANSI color output in its
 [status-line guide](https://code.claude.com/docs/en/statusline). Codex CLI's
 [`/statusline` command](https://learn.chatgpt.com/docs/developer-commands#configure-footer-items-with-statusline)

@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import { LOOP_MOMENTS } from '../../core/services/hook-session.js';
+import { formatBuildProgress, readBuildProgress, type BuildProgress } from '../../core/services/build-progress.js';
 import { readFindingOutcomes, readHookHealth, type FindingOutcomes, type MomentHealth } from '../../core/services/hook-health.js';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
@@ -56,6 +57,8 @@ export type KeywordCause = 'no-provider-configured' | 'configured-provider-unrea
 
 export interface IndexStatus {
   indexPresent: boolean;
+  /** An index build or repair running now, from `.openlore/build-progress.json` (change: hook-reliability, group 9). */
+  building?: BuildProgress;
   /** The mode a query would actually be served right now. */
   retrievalMode: RetrievalMode | null;
   /** Set only when the served mode is a keyword one. */
@@ -254,10 +257,12 @@ export async function collectIndexStatus(rootPath: string): Promise<IndexStatus>
   try { config = await readOpenLoreConfig(rootPath); } catch { configUnreadable = true; }
 
   const receipt = await readIndexReceipt(analysisDir);
+  const building = readBuildProgress(rootPath);
   const base = {
     degraded: receipt?.degraded ?? [],
     ...(receipt?.embedFailure ? { embedFailure: receipt.embedFailure } : {}),
     ...(configUnreadable ? { configUnreadable: true as const } : {}),
+    ...(building ? { building } : {}),
   };
 
   if (!VectorIndex.exists(analysisDir)) {
@@ -406,7 +411,12 @@ Read-only: this never builds, rebuilds, or locks the index.
     // to forge OpenLore's own output with terminal control sequences.
     if (!status.indexPresent) {
       console.log(`  ${c.yellow('No search index')} in ${OPENLORE_DIR}/${OPENLORE_ANALYSIS_SUBDIR}`);
-      console.log(`  ${c.dim('→ Run "openlore analyze" to build one')}`);
+      // A first build in flight: say so, not "run analyze" (change: hook-reliability, group 9).
+      if (status.building) {
+        console.log(`  ${label('Index build')} ${safe(`${formatBuildProgress(status.building)}, started ${formatAge(Date.now() - Date.parse(status.building.startedAt))}`)}`);
+      } else {
+        console.log(`  ${c.dim('→ Run "openlore analyze" to build one')}`);
+      }
       if (status.governance) printGovernance(status.governance, c);
       console.log('');
       return;
@@ -427,6 +437,9 @@ Read-only: this never builds, rebuilds, or locks the index.
     // Relative, like every other line in this panel. A raw UTC ISO stamp read as TOMORROW's
     // date for anyone west of UTC in the evening (change: fix-self-inflicted-spec-warning).
     console.log(`  ${label('Index built')} ${status.builtAt ? safe(describeBuiltAt(status.builtAt)) : c.dim('unknown')}`);
+    if (status.building) {
+      console.log(`  ${label('Index build')} ${safe(`${formatBuildProgress(status.building)}, started ${formatAge(Date.now() - Date.parse(status.building.startedAt))}`)}`);
+    }
 
     const staleCount = status.staleFiles.length;
     const staleText = status.staleFilesUnknown

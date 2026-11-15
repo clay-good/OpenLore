@@ -111,12 +111,18 @@ export async function injectOutput(
     const noGraph = pointerLineFor('no-graph');
     if (out.startsWith(noGraph)) {
       const rest = out.slice(noGraph.length).trim();
-      // The no-index line and the build note are notices: each is stated once per harness
-      // session (change: hook-reliability, task 4.3). A later prompt keeps only the rest.
-      const notice = silentWithoutIndex ? undefined : buildNote ? 'index-build' : 'no-index';
-      const head = notice && await firstTimeThisSession(directory, sessionId, notice)
-        ? (buildNote ? `[OpenLore] ${safe(buildNote)}` : noGraph)
-        : '';
+      // A build in flight is the user's to watch (the status line and `openlore status` show its
+      // progress), not the agent's: the agent gets nothing about it, and tool answers served
+      // meanwhile already say they are partial (change: hook-reliability, task 9.4). With no build
+      // possible, the no-index line is stated once per harness session (task 4.3).
+      //
+      // No user-only line either. Task 9.1 asked the Claude Code hooks docs to confirm that a
+      // hook's `systemMessage` reaches the user and NOT the model. Checked 2026-11-14 at
+      // https://code.claude.com/docs/en/hooks: it is "shown to the user", and UserPromptSubmit
+      // accepts it, but the docs do not say it stays out of the model's context. Unconfirmed, so
+      // per 9.1 the line is dropped and the status line is the only progress channel.
+      const notice = silentWithoutIndex || buildNote ? undefined : 'no-index';
+      const head = notice && await firstTimeThisSession(directory, sessionId, notice) ? noGraph : '';
       out = [head, rest].filter(Boolean).join('\n\n');
     }
     // Screened on the way out, whole-block: the framed part is already screened by
