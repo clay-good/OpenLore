@@ -37,6 +37,13 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Changed
 
+- **A user-scope install now wires the agent-loop hooks too.** `openlore install --scope user`
+  gives every repository and git worktree the before-edit, after-tools, before-stop and sub-agent
+  receipts, not only the prompt briefing. Each command exits before Node starts in a project
+  without `.openlore/`, and every user-scope hook stands down where the repository wires the same
+  hook itself, which also ends the double prompt briefing a user-scope plus repo-scope install
+  gave. Re-run `openlore install --scope user` to get it; nothing changes until you do.
+
 - **The prompt briefing is given only for code the prompt names exactly.** `orient --inject` (the
   `UserPromptSubmit` hook) now looks only at `backticked` names, file paths and identifier-shaped
   words in your own words (pasted content excluded), and shows only what those resolve to exactly,

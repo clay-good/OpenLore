@@ -457,8 +457,11 @@ or before-stop moment, so test runs recorded there are not yet stated at stop.
   (see [pre-commit hooks](#pre-commit-hooks)) makes a finding code `blocking`, the `before-stop`
   hook blocks the stop and lists those findings for the agent. It does not block twice
   in a row.
-- **Repository scope only.** The moments run on every edit, so a user-scope install does not wire
-  them (they would run in every repository). Run `openlore install` in the repository to get them.
+- **User scope too.** `openlore install --scope user` wires the moments for every repository and
+  worktree. Each command first checks for `.openlore/` in the project and exits before Node starts
+  when there is none, so a repository that does not use OpenLore pays nothing. Where a repository
+  wires a moment itself (`.claude/settings.json` or `settings.local.json`), the user-scope command
+  stands down, so each event gets one receipt; `openlore doctor` does not call that pair a duplicate.
 - **Edits after the last test run.** A shell command that is a test run — a runner in command
   position from a closed list (`vitest`, `jest`, `pytest`, `go test`, `cargo test`, `npm test`,
   `make test`, …) or a test script the repository declares in `package.json` (`test`, `test:*`,
