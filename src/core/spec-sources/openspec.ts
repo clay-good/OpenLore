@@ -37,7 +37,35 @@ export async function readSpecDomainEntries(specsDir: string): Promise<SpecDomai
   return out;
 }
 
-const REQUIREMENT_HEADING = /^###\s+Requirement:\s*(.+)/;
+/**
+ * Every entry name in a specs folder, in `readdir` order, files and links included. For the listers
+ * that check `<name>/spec.md` themselves; throws when the folder cannot be listed.
+ */
+export async function readSpecFolderNames(specsDir: string): Promise<string[]> {
+  return readdir(specsDir);
+}
+
+/**
+ * Every `spec.md` at or below `dir`, at most `maxDepth` folders down, skipping dot-folders, in
+ * `readdir` order. A folder that cannot be listed adds nothing.
+ */
+export async function findNestedSpecFiles(dir: string, maxDepth: number, depth = 0): Promise<string[]> {
+  if (depth > maxDepth) return [];
+  let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name === 'spec.md') found.push(join(dir, entry.name));
+    else if (entry.isDirectory() && !entry.name.startsWith('.')) found.push(...await findNestedSpecFiles(join(dir, entry.name), maxDepth, depth + 1));
+  }
+  return found;
+}
+
+const REQUIREMENT_HEADING =/^###\s+Requirement:\s*(.+)/;
 const SCENARIO_HEADING = /^####\s+Scenario:\s*(.+)/;
 
 /** Requirements and scenarios of one spec, by heading, outside code fences. */
