@@ -561,7 +561,7 @@ async function afterCompact(root: string, timeoutMs: number): Promise<HookRunRes
   try {
     const work = withLoggerOptions({ quiet: true }, async () => {
       const { handleGetHandoffBriefing, renderHandoff } = await import('../../core/services/mcp-handlers/handoff.js');
-      return renderHandoff(await handleGetHandoffBriefing({ directory: root }));
+      return renderHandoff(await handleGetHandoffBriefing({ directory: root }), { boundaries: 'summary' });
     });
     const text = await Promise.race([work, timeout]);
     if (text === 'timeout' || !text) return { stdout: '', exitCode: 0 };
@@ -605,8 +605,14 @@ export interface HookRunResult { stdout: string; exitCode: 0 }
  * parses exactly one object.
  */
 export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: string; timeoutMs?: number } = {}): Promise<HookRunResult> {
-  const r = await runHookUnscreened(moment, raw, opts);
-  return r.stdout ? { ...r, stdout: screenJsonText(r.stdout) } : r;
+  // The last line of the fail-open contract: a check module that does not load, or a throw on any
+  // path outside a moment's own guard, still ends in silence (change: hook-reliability).
+  try {
+    const r = await runHookUnscreened(moment, raw, opts);
+    return r.stdout ? { ...r, stdout: screenJsonText(r.stdout) } : r;
+  } catch {
+    return { stdout: '', exitCode: 0 };
+  }
 }
 
 async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: string; timeoutMs?: number } = {}): Promise<HookRunResult> {
@@ -628,7 +634,7 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
       let timer: NodeJS.Timeout | undefined;
       // Bounded: a held queue lock must never stall the parent's Agent call.
       const limit = new Promise<void>(r => { timer = setTimeout(r, opts.timeoutMs ?? TIMEOUT_MS[moment]); timer.unref?.(); });
-      await Promise.race([withLoggerOptions({ quiet: true }, () => queueSubagentTask(root, { sessionId: payload.sessionId, agentType: payload.subagentType, prompt: payload.agentPrompt! })).catch(() => undefined), limit]);
+      await Promise.race([withLoggerOptions({ quiet: true }, async () => queueSubagentTask(root, { sessionId: payload.sessionId, agentType: payload.subagentType, prompt: payload.agentPrompt! })).catch(() => undefined), limit]);
       if (timer) clearTimeout(timer);
     }
     return silent; // only queues: the parent's tool call gets no output
@@ -641,7 +647,7 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
   if (moment === 'after-tools' && payload.command !== undefined && !files.length) {
     if (payload.sessionId) {
       const { recordShellCommand } = await import('../../core/services/test-run-ledger.js');
-      await withLoggerOptions({ quiet: true }, () => recordShellCommand(root, payload.sessionId!, payload.command!, payload.exit, payload.interrupted === true)).catch(() => undefined);
+      await withLoggerOptions({ quiet: true }, async () => recordShellCommand(root, payload.sessionId!, payload.command!, payload.exit, payload.interrupted === true)).catch(() => undefined);
     }
     return silent;
   }

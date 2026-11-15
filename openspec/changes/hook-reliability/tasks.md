@@ -16,15 +16,22 @@ nothing outside its own folder; every file below is edited when the group is bui
 
 ## 2. Fail-open contract tests
 
-- [ ] 2.1 Add `src/cli/commands/hook-fail-open.test.ts` (new). For every moment in `HOOK_MOMENTS`
+- [x] 2.1 Add `src/cli/commands/hook-fail-open.test.ts` (new). For every moment in `HOOK_MOMENTS`
   (`before-edit`, `after-tools`, `before-stop`, `after-compact`, `before-subagent`, `subagent-start`): a check module that throws (`vi.doMock`), `timeoutMs: 1`, no `.openlore/`,
   `.openlore` as a file, corrupt `config.json`, corrupt session record, no index, a truncated index
   file, a read-only `.openlore/`, empty stdin, non-JSON stdin. Edit `src/cli/commands/hook.ts` only
   where a case fails. Done when: every case returns `{ stdout: '', exitCode: 0 }` and the file
   passes with `npx vitest run src/cli/commands/hook-fail-open.test.ts`.
-- [ ] 2.2 Spawn test `src/cli/commands/hook-fail-open.integration.test.ts` (new; add it to
+- [x] 2.2 Spawn test `src/cli/commands/hook-fail-open.integration.test.ts` (new; add it to
   `test:integration:ci` in `package.json`): run the built CLI for each moment in a directory with a
   corrupt `.openlore/`. Done when: exit code 0, stdout empty, stderr empty for every moment.
+  Built (2026-11-14): stderr is empty for every moment. Two moments may still speak, never about the
+  store: `after-compact` states the git state of the change (its boundary notes are now one summary
+  line, with no raw cause), and `before-stop` tells the user what it saw of the session (edits, test
+  runs). Holes found and fixed: a check module that failed to load on the shell-command and
+  sub-agent paths rejected `runHook`; a sync throw in the sub-agent queue escaped its `.catch`; the
+  handoff pasted raw error text and temporary paths; the sub-agent briefing said "run `openlore
+  analyze`" when the index was unusable.
 
 ## 3. Prompt-submitted moment under the contract
 

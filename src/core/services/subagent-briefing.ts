@@ -114,6 +114,11 @@ export async function subagentBriefing(root: string, prompt: string | undefined,
   if (prompt) {
     const { buildInjection } = await import('../../cli/commands/orient-inject.js');
     block = (await buildInjection(root, prompt).catch(() => '')).trim();
+    // No usable index: a hook says nothing about it (change: hook-reliability). The pointer line
+    // goes; a proposal instruction after it stays.
+    const { pointerLineFor } = await import('../../cli/commands/orient-inject-render.js');
+    const noGraph = pointerLineFor('no-graph');
+    if (block.startsWith(noGraph)) block = block.slice(noGraph.length).trim();
     // The peers are short and whole; the task block takes what is left, cut at a line.
     const room = budgetChars - (peerBlock ? peerBlock.length + 2 : 0);
     if (block.length > room) {
