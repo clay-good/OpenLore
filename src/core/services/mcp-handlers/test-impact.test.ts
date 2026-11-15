@@ -567,6 +567,18 @@ describe('select_tests safeguard tiers', () => {
     expect(none.selectedTests).toEqual([]);
   });
 
+  it('a guard that names the file relative to its source root is selected; a bare file name is not', async () => {
+    // user-config-write-guard and output-hygiene list `cli/commands/orient.ts`, not `src/cli/...`.
+    await mkdir(join(dir, 'src'), { recursive: true });
+    await writeFile(join(dir, 'src/other.test.ts'), "const ENTRY = ['cli/commands/orient.ts'];\nconst NAME = 'hook.ts';\n");
+    changed([{ path: 'src/cli/commands/orient.ts', status: 'modified', isTest: false }]);
+    const r = await handleSelectTests({ directory: dir, diffRef: 'HEAD' }) as Result;
+    expect(r.selectedTests.map(t => [t.file, t.reason])).toEqual([['src/other.test.ts', SELECTION_REASON.namesPath('src/cli/commands/orient.ts')]]);
+
+    changed([{ path: 'src/cli/commands/hook.ts', status: 'modified', isTest: false }]);
+    expect((await handleSelectTests({ directory: dir, diffRef: 'HEAD' }) as Result).selectedTests).toEqual([]);
+  });
+
   it('selects a new test file whole when the analysis has not indexed it yet', async () => {
     await touch('src/brand-new.test.ts');
     changed([{ path: 'src/brand-new.test.ts', status: 'added' }]);

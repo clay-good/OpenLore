@@ -865,13 +865,20 @@ async function testsNamingPaths(
   for (const n of cg.nodes) if (n.isTest && !n.isExternal) testFiles.add(normalizeRelative(n.filePath));
   for (const e of cg.edges) if (e.kind === 'tested_by' && e.calleeId.includes('::')) testFiles.add(normalizeRelative(e.calleeId.split('::')[0]));
   const sorted = [...testFiles].sort();
+  // A guard often names files relative to its source root (`'cli/commands/orient.ts'` for
+  // `src/cli/commands/orient.ts`): every trailing part of at least two segments counts too.
+  const spellings: Array<[spelling: string, path: string]> = [];
+  for (const p of paths) {
+    const parts = p.split('/');
+    for (let i = 0; i <= parts.length - 2; i++) spellings.push([parts.slice(i).join('/'), p]);
+  }
   const { readFileConfined } = await import('../../../utils/path-confinement.js');
   const files: Array<{ file: string; path: string }> = [];
   for (const file of sorted.slice(0, MAX_PATH_SCAN_TEST_FILES)) {
     let text: string;
     try { text = await readFileConfined(absDir, file, MAX_PATH_SCAN_BYTES); } catch { continue; }
-    const named = paths.find(p => text.includes(`'${p}'`) || text.includes(`"${p}"`) || text.includes(`\`${p}\``));
-    if (named) files.push({ file, path: named });
+    const named = spellings.find(([spelling]) => text.includes(`'${spelling}'`) || text.includes(`"${spelling}"`) || text.includes(`\`${spelling}\``));
+    if (named) files.push({ file, path: named[1] });
   }
   return { files, omitted: Math.max(0, sorted.length - MAX_PATH_SCAN_TEST_FILES) };
 }

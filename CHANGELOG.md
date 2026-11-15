@@ -107,6 +107,12 @@ All notable changes to OpenLore are documented here. This project adheres to
   file's other functions are selected at low confidence, with the same-file reason. On the
   `bench:select-tests` replay this found the one test #771 had to change, at one extra file.
 
+- **`select_tests` finds guard tests that name a file relative to its source root.** Guards such as
+  the user-config write guard list `'cli/commands/orient.ts'`, not `'src/cli/commands/orient.ts'`, so
+  the path rule missed them. Any trailing part of a changed path with at least two segments now
+  counts; a bare file name does not. On `bench:select-tests` (20 commits): 47 → 49 of 55 modified
+  tests found, 82 → 83 test files selected on average.
+
 - **`blast_radius` lists every test file to run.** It returned the first 15 single tests, cut per
   test, so the files past them were only counted. On one change, `orient.test.ts` (it calls the
   changed `handleOrient`) was outside the 15 shown. `tests.files` now lists every selected test file,
