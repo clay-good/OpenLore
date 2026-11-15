@@ -14,7 +14,7 @@ vi.mock('../../core/services/mcp-handlers/verify-change.js', async () => {
   };
 });
 
-import { runHook, parseHookPayload, repoPath, renderReceipt } from './hook.js';
+import { runHook, parseHookPayload, repoPath, renderReceipt, hasProof } from './hook.js';
 
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
@@ -563,3 +563,51 @@ describe('one problem, one finding, at after-tools and at stop (task 7.2)', () =
     expect(stop).toContain(`[f:${id}]`);
   });
 });
+
+describe('proof and action on every finding (change: reframe-governance-as-agent-evidence, group 4)', () => {
+  it('prints action and proof as labeled data, and the cited line only when the text does not quote it', () => {
+    const quoted = renderReceipt('after-tools', [{ key: 'a', severity: 'error', text: "src/a.ts imports './y', which is missing", next: 'fix the path', action: 'fix', proof: { path: 'src/a.ts', lineText: "import x from './y';" } }])!;
+    expect(quoted).toContain("(next action: fix the path; action: fix; proof: src/a.ts: import x from './y';)");
+    const already = renderReceipt('after-tools', [{ key: 'b', severity: 'error', text: "import x from './y'; does not resolve", action: 'fix', proof: { path: 'src/a.ts', lineText: "import x from './y';" } }])!;
+    expect(already).toContain('(action: fix; proof: src/a.ts)');
+    const receiptOnly = renderReceipt('before-stop', [{ key: 'c', severity: 'warning', text: 't', action: 'decide', proof: { discriminator: 'verify_change:blast_radius' } }])!;
+    expect(receiptOnly).toContain('- t (action: decide)');
+  });
+
+  it('the not-observed disclosure carries no action', async () => {
+    const root = repo({ 'src/f.ts': 'export const f = 1;\n' });
+    write(root, 'src/f.ts', 'export const f = 2;\n');
+    await runHook('after-tools', payload(root, 'src/f.ts'));
+    verify.result = { items: [], findings: [] };
+    const text = (JSON.parse((await runHook('before-stop', payload(root))).stdout || '{"systemMessage":""}') as { systemMessage: string }).systemMessage;
+    expect(text).toContain('Test runs are not observed');
+    expect(text).not.toMatch(/not stated\. \(action/);
+  });
+
+  it('a finding with no proof is not a finding', () => {
+    expect(hasProof({ key: 'k', severity: 'error', text: 't' })).toBe(false);
+    expect(hasProof({ key: 'k', severity: 'error', text: 't', proof: {} })).toBe(false);
+    expect(hasProof({ key: 'k', severity: 'error', text: 't', proof: { path: 'a.ts' } })).toBe(true);
+    expect(hasProof({ key: 'k', severity: 'error', text: 't', proof: { discriminator: 'd' } })).toBe(true);
+  });
+
+  it('after-tools: a phantom import is a fix with the cited file as proof, stated once per session', async () => {
+    const root = repo({ 'src/f.ts': 'export const f = 1;\n' });
+    write(root, 'src/g.ts', "import { f, missing } from './f';\nexport const g = [f, missing];\n");
+    const first = context((await runHook('after-tools', payload(root, 'src/g.ts'))).stdout)!.additionalContext;
+    expect(first).toMatch(/missing.*action: fix; proof: src\/g\.ts/);
+    expect((await runHook('after-tools', payload(root, 'src/g.ts'))).stdout).toBe('');
+  });
+
+  it('before-stop: each verify_change line carries its action', async () => {
+    const root = repo();
+    verify.result = { items: [
+      { subject: '2 changed symbol(s), up to 9 affected caller(s)', check: 'blast_radius', severity: 'warning', nextAction: 'Review callers.' },
+      { subject: 'removed helper (src/a.ts)', check: 'structural_diff', severity: 'error', nextAction: 'Confirm no caller still references it.' },
+    ], findings: [] };
+    const text = (JSON.parse((await runHook('before-stop', payload(root))).stdout) as { systemMessage: string }).systemMessage;
+    expect(text).toContain('[blast_radius] (next action: Review callers.; action: decide)');
+    expect(text).toContain('[structural_diff] (next action: Confirm no caller still references it.; action: fix)');
+  });
+});
+

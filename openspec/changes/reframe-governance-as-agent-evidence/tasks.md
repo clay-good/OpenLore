@@ -79,7 +79,7 @@ Run one test file with `npx vitest run <file>`. Each group is one small PR, in t
 
 ## 4. Proof and action on every hook finding
 
-- [ ] 4.1 Edit `src/cli/commands/hook.ts`: add `action?: 'fix' | 'decide' | 'raise'` to
+- [x] 4.1 Edit `src/cli/commands/hook.ts`: add `action?: 'fix' | 'decide' | 'raise'` to
   `HookItem`; use the `code`, `subject` and `proof` fields from hook-reliability task 4.2; set
   `proof` and `action` where each item is built (before-edit, after-tools, before-stop, the 3 new
   sources); print them as labeled data next to `next`; drop an item from before-edit, after-tools
@@ -88,7 +88,7 @@ Run one test file with `npx vitest run <file>`. Each group is one small PR, in t
   first). Test: `src/cli/commands/hook.test.ts` (each moment's item has proof and one
   action; an item with no proof is not printed; a second run in the same session prints nothing).
   Done when: the test file passes and the budget tests (lines 57-61, 294) still pass.
-- [ ] 4.2 Check the other harnesses carry the same text: `src/cli/install/adapters/codex.ts` and
+- [x] 4.2 Check the other harnesses carry the same text: `src/cli/install/adapters/codex.ts` and
   `runLoopMomentChild` in `src/pi/extension.ts:2347` both run `openlore hook <moment>`, so no edit
   is expected. Test: `src/cli/install/adapters/codex.test.ts`, `src/pi/extension.test.ts`.
   Done when: both files pass with no source change, or the change needed is listed in the PR.
