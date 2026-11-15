@@ -82,7 +82,7 @@ Run one test file with `npx vitest run <file>`. Each group is one small PR, in t
 
 ## 4. Proof and action on every hook finding
 
-- [ ] 4.1 Edit `src/cli/commands/hook.ts`: add `action?: 'fix' | 'decide' | 'raise'` to
+- [x] 4.1 Edit `src/cli/commands/hook.ts`: add `action?: 'fix' | 'decide' | 'raise'` to
   `HookItem`; use the `code`, `subject` and `proof` fields from hook-reliability task 4.2; set
   `proof` and `action` where each item is built (before-edit, after-tools, before-stop, the 3 new
   sources); print them as labeled data next to `next`; drop an item from before-edit, after-tools
@@ -91,22 +91,22 @@ Run one test file with `npx vitest run <file>`. Each group is one small PR, in t
   first). Test: `src/cli/commands/hook.test.ts` (each moment's item has proof and one
   action; an item with no proof is not printed; a second run in the same session prints nothing).
   Done when: the test file passes and the budget tests (lines 57-61, 294) still pass.
-- [ ] 4.2 Check the other harnesses carry the same text: `src/cli/install/adapters/codex.ts` and
+- [x] 4.2 Check the other harnesses carry the same text: `src/cli/install/adapters/codex.ts` and
   `runLoopMomentChild` in `src/pi/extension.ts:2347` both run `openlore hook <moment>`, so no edit
   is expected. Test: `src/cli/install/adapters/codex.test.ts`, `src/pi/extension.test.ts`.
   Done when: both files pass with no source change, or the change needed is listed in the PR.
 
 ## 5. Docs and guards
 
-- [ ] 5.1 Run the MCP↔Pi parity guard: `npx vitest run src/pi/extension.test.ts`. `NAV_TOOLS` and
+- [x] 5.1 Run the MCP↔Pi parity guard: `npx vitest run src/pi/extension.test.ts`. `NAV_TOOLS` and
   `PI_EXCLUDED_CONCLUSION_TOOLS` in `src/pi/extension.ts` must have no diff in this change.
   Done when: the file passes and `git diff --stat src/pi/extension.ts` shows only lines from 4.2, if any.
-- [ ] 5.2 New-user docs: remove `enforcement.policy` from `README.md` (line 204) and from the
+- [x] 5.2 New-user docs: remove `enforcement.policy` from `README.md` (line 204) and from the
   install path in `docs/install.md` (lines 260-267, 383); keep one link to
   `docs/configuration.md#enforcement-policy`, which stays the reference. In `docs/install.md` and
   `docs/configuration.md` (hook table near line 344) describe the four moments, the three actions,
   and the three before-stop evidence sources with their triggers.
   Done when: `grep -c "enforcement.policy" README.md` is 0 and `npx vitest run src/doc-claim-sync.test.ts src/honesty-contract.test.ts` passes.
-- [ ] 5.3 Run `npm run build`, `npx eslint src`, and `npx vitest run src`. Run
+- [x] 5.3 Run `npm run build`, `npx eslint src`, and `npx vitest run src`. Run
   `openspec validate reframe-governance-as-agent-evidence`.
   Done when: all 4 commands exit 0.
