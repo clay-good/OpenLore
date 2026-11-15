@@ -19,6 +19,8 @@ import {
 import { mkdir, readFile, open as openFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
+import { openBuildProgress, reportBuildPhase, reportFileDone } from '../../core/services/build-progress.js';
+import { setPass1ProgressListener } from '../../core/analyzer/extraction-pool.js';
 import { formatDuration, formatAge, getAnalysisAge } from '../../utils/command-helpers.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
@@ -719,6 +721,11 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       }
 
       let result;
+      // Build progress for the user's status line (change: hook-reliability, group 9). Removed
+      // on exit, whatever the path; a killed build is read as not building by its dead pid.
+      const closeProgress = openBuildProgress(rootPath);
+      setPass1ProgressListener({ start: total => reportBuildPhase('parsing', total), fileDone: reportFileDone, end: () => reportBuildPhase('linking') });
+      process.once('exit', () => { setPass1ProgressListener(undefined); closeProgress(); });
       try {
         result = await runAnalysis(rootPath, outputPath, {
           maxFiles: opts.maxFiles,
@@ -732,6 +739,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       } finally {
         await ownership.release();
       }
+      reportBuildPhase('writing the index');
 
       // ========================================================================
       // PHASE 4: DISPLAY RESULTS

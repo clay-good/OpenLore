@@ -28,6 +28,11 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **Index build progress for you, silence for the agent.** While an index builds, `openlore
+  statusline` and `openlore status` show `indexing 45% (1,310/2,900 files)`, then the phase name.
+  The prompt hook no longer puts a build note into the agent's context while a build runs. During a
+  first build, `openlore status` shows the build instead of "run openlore analyze". Plugin users can
+  wire `openlore statusline` themselves (see `docs/install.md`).
 - **Hooks survive a moved or removed install, and upgrades leave no stale hook.** Each hook
   command `openlore install` writes now checks that its runtime exists and exits 0 silently when it
   does not, instead of failing with `Cannot find module` on every event. Install and uninstall

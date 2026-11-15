@@ -37,11 +37,12 @@ describe('no-index notices, once per session', () => {
     expect(await injectOutput(root, undefined)).toBe(NO_GRAPH);
   });
 
-  it('the build note too', async () => {
-    prompt('s1');
-    expect(await injectOutput(root, undefined, 'An index build is running.')).toBe('[OpenLore] An index build is running.');
+  it('a build in flight is never stated to the agent (task 9.4)', async () => {
     prompt('s1');
     expect(await injectOutput(root, undefined, 'An index build is running.')).toBe('');
+    // ... and does not use up the session's one no-index line.
+    prompt('s1');
+    expect(await injectOutput(root, undefined)).toBe(NO_GRAPH);
   });
 
   it('without a session id, every prompt says it (nothing is deduplicated)', async () => {

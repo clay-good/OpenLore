@@ -5,6 +5,7 @@
  * to the process cwd for manual use.
  */
 
+import { formatBuildProgress } from '../../core/services/build-progress.js';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { Command } from 'commander';
@@ -33,6 +34,9 @@ export function statusLabel(
 }
 
 function indexLabel(status: IndexStatus): { color: StatusColor; text: string } {
+  // A build in flight is the one thing worth showing: progress for the user, never the agent
+  // (change: hook-reliability, group 9).
+  if (status.building) return { color: 'yellow', text: `OpenLore: ${formatBuildProgress(status.building)}` };
   if (!status.indexPresent) return { color: 'yellow', text: 'OpenLore: no index' };
   if (status.degraded.length > 0) return { color: 'red', text: 'OpenLore: index degraded' };
   if (status.configUnreadable || status.embedFailure) {

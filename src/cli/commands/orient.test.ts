@@ -272,12 +272,15 @@ describe('orient command', () => {
       expect(JSON.parse(output()).message).toContain('a build is already running');
     });
 
-    it('--inject reports the build in place of the "run analyze" pointer', async () => {
-      mockStartBuild.mockReturnValue({ state: 'started' });
-      mockHandleOrient.mockResolvedValue({ ...notReady });
-      await orientCommand.parseAsync(['--inject', '--task', 'fix the auth flow bug'], { from: 'user' });
-      expect(output()).toContain('[OpenLore] No index existed for this repository yet');
-      expect(output()).not.toBe(pointerLineFor('no-graph'));
+    it('--inject says nothing to the agent while a build runs: no build note, no "run analyze" pointer (hook-reliability 9.4)', async () => {
+      for (const state of ['started', 'running'] as const) {
+        consoleSpy.mockClear();
+        mockStartBuild.mockReturnValue({ state });
+        mockHandleOrient.mockResolvedValue({ ...notReady });
+        await orientCommand.parseAsync(['--inject', '--task', 'fix the auth flow bug'], { from: 'user' });
+        expect(output()).toBe('');
+        expect(mockStartBuild).toHaveBeenCalled();
+      }
     });
 
     it('--inject says nothing outside a git work tree with no index and no build', async () => {
