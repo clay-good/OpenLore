@@ -6,7 +6,7 @@
  * 1 MB. Local only: nothing here is sent anywhere. Recording never throws and never changes what a
  * hook prints.
  */
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { OPENLORE_DIR } from '../../constants.js';
@@ -121,9 +121,16 @@ export async function readFindingOutcomes(root: string, now = Date.now()): Promi
   const findings = new Map<string, { state?: string }>();
   for (const n of names) {
     try {
-      const path = join(dir, n);
-      if (now - statSync(path).mtimeMs > WINDOW_MS) continue;
-      const rec = JSON.parse(readFileSync(path, 'utf8')) as { findings?: Record<string, { state?: unknown }> };
+      // One descriptor for the age check and the read: no check-then-use on the path.
+      const fd = openSync(join(dir, n), 'r');
+      let text: string;
+      try {
+        if (now - fstatSync(fd).mtimeMs > WINDOW_MS) continue;
+        text = readFileSync(fd, 'utf8');
+      } finally {
+        closeSync(fd);
+      }
+      const rec = JSON.parse(text) as { findings?: Record<string, { state?: unknown }> };
       for (const [identity, f] of Object.entries(rec.findings ?? {})) {
         if (!/^[0-9a-f]{64}$/.test(identity) || !f || typeof f !== 'object') continue;
         const prior = findings.get(identity);
