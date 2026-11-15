@@ -148,29 +148,36 @@ nothing outside its own folder; every file below is edited when the group is bui
 
 ## 8. Upgrade and uninstall
 
-- [ ] 8.1 Guarded command: add the runtime guard to the hook command form in
+- [x] 8.1 Guarded command: add the runtime guard to the hook command form in
   `src/utils/platform-command.ts` (used by `managedHooks`, `src/cli/install/adapters/claude-code.ts:313-321`,
   and by `src/cli/install/adapters/codex.ts`). Test: `src/utils/platform-command.test.ts`,
   `src/utils/platform-command.posix-oracle.test.ts`, `src/cli/install/adapters/codex.test.ts`.
   Done when: running the written command with its entry file deleted gives exit 0 and no output
   under `sh` and Git Bash; a Codex group is still recognized by `LOOP_COMMAND`. If Codex does not
   run hook commands through a shell, leave its form unguarded and say so in `docs/install.md`.
-- [ ] 8.2 Retired moments: in `src/cli/install/adapters/claude-code.ts`, install and uninstall also
+- [x] 8.2 Retired moments: in `src/cli/install/adapters/claude-code.ts`, install and uninstall also
   remove any `_openlore` group whose `_openloreHook` is not a current moment (lines 822-852,
   1033-1050). Test: `src/cli/install/install.test.ts`. Done when: a settings file with a
   `_openloreHook: "old-moment"` group has none after install and after uninstall; install twice
   gives one group per `MANAGED_HOOKS` entry; the user's own hooks are byte-identical.
-- [ ] 8.3 Doctor: report a hook command whose launcher file does not exist, with the fix
+- [x] 8.3 Doctor: report a hook command whose launcher file does not exist, with the fix
   `openlore install`, in `src/cli/commands/doctor.ts` (next to the MCP launcher check, 767-780).
   Test: `src/cli/commands/doctor.test.ts`. Done when: a `.claude/settings.json` hook that names a
   missing entry path gives a warning that names the path.
-- [ ] 8.4 Uninstall summary: name the skills copied by `openlore setup` as kept, with the removal
+- [x] 8.4 Uninstall summary: name the skills copied by `openlore setup` as kept, with the removal
   command, in `src/cli/install/index.ts` (817-827). Test: `src/cli/install/install.test.ts`
   ("--uninstall names the retained .openlore data"). Done when: the summary lists `.openlore/` and
   each existing copied-skill directory, and deletes neither.
-- [ ] 8.5 Docs: `docs/install.md` (upgrade, uninstall, what is kept, the guard and its shell
+- [x] 8.5 Docs: `docs/install.md` (upgrade, uninstall, what is kept, the guard and its shell
   limit). Tell `ship-claude-code-plugin` the final command form. Test: `src/doc-claim-sync.test.ts`. Done when: the page
   states what uninstall removes and keeps.
+  Built (2026-11-14): the guard tests the entry and Node with `-f` (not `-x`: an executable-bit
+  check on `node.exe` under Git Bash is not reliable), and is proven against a real `bash` on
+  every CI OS (Git Bash on Windows). Codex hooks stay unguarded (not shown to run through a shell).
+  Doctor also reports an event that runs two distinct OpenLore commands for one step, grouped by
+  command (Claude Code runs an identical string once); found on the owner's own machine, where a
+  second checkout and an unmarked older group both ran the prompt hook. The plugin's hooks use its
+  launcher, so its command form is unchanged.
 
 ## 9. Progress for the user, silence for the agent
 

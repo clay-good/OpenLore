@@ -9,9 +9,11 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { Command } from 'commander';
 import { logger } from '../../utils/logger.js';
+import { buildManifest } from '../commands/setup.js';
 import { FULL_PRESET, FULL_PRESET_ALIAS, LEAN_DEFAULT_PRESET } from '../../constants.js';
 import { detect, ALL_AGENTS, type AgentName, type DetectedSurface } from './detect.js';
 import type { Adapter, ApplyContext, ApplyResult, InstallScope, PlannedChange } from './adapters/types.js';
@@ -605,7 +607,7 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   // complete.", then a "Wired surface" line claiming the guidance matches a preset no MCP
   // registration had been written for, and then "Install did not complete". Three conclusions,
   // two of them wrong (change: fix-install-conflict-verdict).
-  printSummary(allChanges, allWarnings, !!opts.dryRun, !!opts.uninstall, conflict);
+  printSummary(allChanges, allWarnings, !!opts.dryRun, !!opts.uninstall, conflict, cwd);
   if (conflict) {
     logger.error(
       'Install did not complete — the file(s) named above were left exactly as they are.'
@@ -774,6 +776,8 @@ function printSummary(
   uninstall: boolean,
   /** A refusal happened: the run is reported as incomplete, never as complete. */
   conflict = false,
+  /** The repository, to name the skills `openlore setup` copied into it. */
+  cwd?: string,
 ): void {
   const verb = dryRun ? 'would' : 'did';
   for (const c of changes) {
@@ -819,6 +823,16 @@ function printSummary(
       'The ".openlore/" directory remains (index, decisions, and memories). From the repository '
       + 'root, remove it with `rm -rf -- ./.openlore/` if you no longer need that data.'
     );
+    // Skills `openlore setup` copied may have been edited: kept, named, never deleted
+    // (change: hook-reliability, task 8.4).
+    const skills = cwd ? copiedSetupPaths(cwd) : [];
+    if (skills.length) {
+      logger.info(
+        'Kept skills',
+        `Copied by "openlore setup", possibly edited since: ${skills.join(', ')}. From the repository `
+        + `root, remove them with \`rm -rf -- ${skills.map(p => `./${p}`).join(' ')}\` if you no longer need them.`,
+      );
+    }
     logger.info(
       'Also left in place',
       'Any "openspec/" directory (your specs and changes), and the ".openlore/" line added to '
@@ -826,6 +840,24 @@ function printSummary(
       + '`git status` may still show .gitignore as modified.'
     );
   }
+}
+
+/**
+ * The paths `openlore setup` copied into this repository that still exist, relative to it: a skill's
+ * directory, or a copied file. Read-only.
+ */
+export function copiedSetupPaths(cwd: string): string[] {
+  const out = new Set<string>();
+  for (const entries of Object.values(buildManifest(cwd))) {
+    for (const { dest } of entries) {
+      const rel = relative(cwd, dest);
+      if (!rel || rel.startsWith('..') || isAbsolute(rel)) continue;
+      const parts = rel.split(sep);
+      const path = parts[0] === '_bmad' ? join(parts[0], parts[1] ?? '') : basename(dest) === 'SKILL.md' ? dirname(rel) : rel;
+      if (existsSync(join(cwd, path))) out.add(path.split(sep).join('/'));
+    }
+  }
+  return [...out].sort();
 }
 
 /** Render install's value-proof epilogue only after checking the built graph. */

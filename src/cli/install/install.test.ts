@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, writeFile, readFile, mkdir, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { formatProveGuidance, runInstall } from './index.js';
-import { formatPlatformCommand, resolveOpenloreCommand } from '../../utils/platform-command.js';
+import { formatGuardedHookCommand, resolveOpenloreCommand } from '../../utils/platform-command.js';
 import { logger } from '../../utils/logger.js';
 
 async function exists(p: string): Promise<boolean> {
@@ -26,7 +26,7 @@ async function exists(p: string): Promise<boolean> {
  * failed on the platform the change was FOR.
  */
 function expectedHook(args: readonly string[]): string {
-  return formatPlatformCommand(resolveOpenloreCommand(args), process.platform);
+  return formatGuardedHookCommand(resolveOpenloreCommand(args), process.platform);
 }
 
 function expectedWiring(args: readonly string[]): { command: string; args: string[] } {
@@ -368,6 +368,42 @@ describe('openlore install (end-to-end)', () => {
     }
   });
 
+  it('--uninstall names each skill openlore setup copied as kept, with its removal command, and deletes none (8.4)', async () => {
+    const { buildManifest } = await import('../commands/setup.js');
+    const skill = buildManifest(dir).claude[0].dest;
+    const workflow = buildManifest(dir).cline[0].dest;
+    for (const f of [skill, workflow]) {
+      await mkdir(dirname(f), { recursive: true });
+      await writeFile(f, '# edited by the user\n');
+    }
+    await runInstall({ cwd: dir, agent: 'agents-md', analyze: false });
+    const info = vi.spyOn(logger, 'info');
+    try {
+      await runInstall({ cwd: dir, agent: 'agents-md', uninstall: true });
+      const kept = String(info.mock.calls.find(([title]) => title === 'Kept skills')?.[1]);
+      const skillDir = relative(dir, dirname(skill)).split(sep).join('/');
+      const workflowFile = relative(dir, workflow).split(sep).join('/');
+      expect(kept).toContain(skillDir);
+      expect(kept).toContain(workflowFile);
+      expect(kept).toContain(`rm -rf -- ./${skillDir}`);
+      expect(await exists(skill)).toBe(true);
+      expect(await exists(workflow)).toBe(true);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('--uninstall says nothing about skills when setup copied none', async () => {
+    await runInstall({ cwd: dir, agent: 'agents-md', analyze: false });
+    const info = vi.spyOn(logger, 'info');
+    try {
+      await runInstall({ cwd: dir, agent: 'agents-md', uninstall: true });
+      expect(info.mock.calls.find(([title]) => title === 'Kept skills')).toBeUndefined();
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it('gates the install prove epilogue for sparse and dense graph measurements', () => {
     const sparse = formatProveGuidance({
       eligibleFunctions: 0,
@@ -507,6 +543,36 @@ describe('openlore install (end-to-end)', () => {
     await runInstall({ cwd: dir, agent: 'claude-code', uninstall: true });
     const after = JSON.parse(await readFile(join(dir, '.claude/settings.json'), 'utf8'));
     expect(after.hooks).toEqual({ PostToolUse: [checkEdit] });
+  });
+
+  it('install and uninstall remove a group for a moment this version no longer has (hook-reliability 8.2)', async () => {
+    await writeFile(join(dir, 'CLAUDE.md'), '# project\n');
+    await mkdir(join(dir, '.claude'), { recursive: true });
+    const userHook = { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo mine' }] };
+    const retired = { matcher: '', _openlore: true, _openloreHook: 'old-moment', hooks: [{ type: 'command', command: 'openlore hook old-moment' }] };
+    const retiredAlone = { matcher: '', _openlore: true, _openloreHook: 'gone-moment', hooks: [{ type: 'command', command: 'openlore hook gone-moment' }] };
+    const original = JSON.stringify({ hooks: { PostToolUse: [userHook, retired], Notification: [retiredAlone] } }, null, 2);
+    await writeFile(join(dir, '.claude/settings.json'), original, 'utf8');
+
+    expect(await runInstall({ cwd: dir, agent: 'claude-code', analyze: false })).toBe(0);
+    await runInstall({ cwd: dir, agent: 'claude-code', analyze: false }); // twice: still one group each
+    const settings = JSON.parse(await readFile(join(dir, '.claude/settings.json'), 'utf8')) as { hooks: Record<string, Array<Record<string, unknown>>> };
+    const all = Object.values(settings.hooks).flat();
+    expect(all.filter(g => g._openloreHook === 'old-moment' || g._openloreHook === 'gone-moment')).toEqual([]);
+    expect(settings.hooks.Notification).toBeUndefined();
+    expect(settings.hooks.PostToolUse[0]).toEqual(userHook);
+    // Exactly one OpenLore group per managed hook.
+    const ours = Object.entries(settings.hooks).flatMap(([event, groups]) => groups
+      .filter(g => g._openlore === true)
+      .map(g => `${event}:${String(g._openloreHook ?? 'plain')}@${JSON.stringify((g.hooks as Array<{ command: string }>)[0].command)}`));
+    expect(new Set(ours).size).toBe(ours.length);
+
+    // Uninstall from a file that again carries a retired group leaves only the user's hook.
+    settings.hooks.PostToolUse.push(retired);
+    await writeFile(join(dir, '.claude/settings.json'), JSON.stringify(settings, null, 2), 'utf8');
+    await runInstall({ cwd: dir, agent: 'claude-code', uninstall: true });
+    const after = JSON.parse(await readFile(join(dir, '.claude/settings.json'), 'utf8')) as { hooks: Record<string, unknown> };
+    expect(after.hooks).toEqual({ PostToolUse: [userHook] });
   });
 
   it('cursor install writes .cursor/mcp.json with mcpServers.openlore', async () => {

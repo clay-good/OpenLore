@@ -787,6 +787,49 @@ async function checkMcpWiring(rootPath: string): Promise<CheckResult | null> {
   return null;
 }
 
+/**
+ * Agent-loop hooks in Claude Code settings (change: hook-reliability, task 8.3): a hook whose
+ * runtime file is gone, and an event that runs two different OpenLore commands for one step.
+ * Null when no OpenLore hook is wired.
+ */
+export async function checkAgentHooks(rootPath: string, home: string): Promise<CheckResult | null> {
+  const { assessHookWiring, claudeSettingsFiles } = await import('../install/hook-wiring-health.js');
+  const health = await assessHookWiring(claudeSettingsFiles(rootPath, home));
+  if (!health.hooks.length) return null;
+  const problems: string[] = [];
+  if (health.missing.length) {
+    const paths = [...new Set(health.missing.map(m => m.path))];
+    // A guarded command (install writes one since hook-reliability) skips itself; an older,
+    // unguarded one fails on every event. Say which, so the message is true.
+    const guarded = (command: string) => /^\s*(\[ -f |command -v npx )/.test(command);
+    const hooks = [...new Set(health.missing.map(m => m.hook))];
+    const failing = hooks.filter(h => !guarded(h.command)).length;
+    const effect = failing === hooks.length
+      ? 'so they fail on every event'
+      : failing === 0
+        ? 'so they do nothing: each skips itself'
+        : `so ${failing} fail on every event and ${hooks.length - failing} skip themselves`;
+    problems.push(`${hooks.length} hook command(s) name a runtime that no longer exists (${paths.join(', ')}), ${effect}`);
+  }
+  for (const d of health.duplicates) {
+    // Claude Code runs an identical command once: group the entries by command.
+    const byCommand = new Map<string, string[]>();
+    for (const h of d.hooks) byCommand.set(h.command, [...(byCommand.get(h.command) ?? []), `${h.file}${h.marked ? '' : ' [not marked by openlore install]'}`]);
+    problems.push(`${d.event} runs \`${d.step}\` ${byCommand.size} times, once per distinct command: ${[...byCommand].map(([command, files]) => `${command} (in ${files.join(', ')})`).join('; ')}`);
+  }
+  if (!problems.length) {
+    return { name: 'Agent hooks', status: 'ok', detail: `${health.hooks.length} OpenLore hook command(s) wired; each runtime exists and no step runs twice` };
+  }
+  return {
+    name: 'Agent hooks',
+    status: 'warn',
+    detail: problems.join('. '),
+    fix: health.missing.length && !health.duplicates.length
+      ? "Run 'openlore install' to re-wire the hooks to this install"
+      : "Run 'openlore install' here, then remove the extra OpenLore hook entries from the files named above; keep one per step",
+  };
+}
+
 /** Every distinct `openlore` the PATH resolves to, first match first. */
 async function openloreInstallsOnPath(pathValue: string, platform: NodeJS.Platform): Promise<string[]> {
   const names = platform === 'win32' ? ['openlore.cmd', 'openlore.exe'] : ['openlore'];
@@ -1282,7 +1325,7 @@ Checks performed:
     }
 
     const home = process.env.OPENLORE_HOME || homedir();
-    const [staticChecks, mcpCheck, installCheck, userScopeCheck, llmCheck, embeddingCheck, retrievalModeCheck] = await Promise.all([
+    const [staticChecks, mcpCheck, installCheck, userScopeCheck, llmCheck, embeddingCheck, retrievalModeCheck, agentHooksCheck] = await Promise.all([
       Promise.all([
         checkNodeVersion(),
         checkGit(rootPath),
@@ -1304,6 +1347,7 @@ Checks performed:
       checkLLMConnection(rootPath),
       checkEmbeddingConnection(rootPath),
       checkRetrievalMode(rootPath),
+      checkAgentHooks(rootPath, home),
     ]);
 
     const unredactedChecks = [
@@ -1311,6 +1355,7 @@ Checks performed:
       ...(mcpCheck ? [mcpCheck] : []),
       installCheck,
       ...(userScopeCheck ? [userScopeCheck] : []),
+      ...(agentHooksCheck ? [agentHooksCheck] : []),
       llmCheck,
       ...(embeddingCheck ? [embeddingCheck] : []),
       retrievalModeCheck,

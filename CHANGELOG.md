@@ -28,6 +28,12 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **Hooks survive a moved or removed install, and upgrades leave no stale hook.** Each hook
+  command `openlore install` writes now checks that its runtime exists and exits 0 silently when it
+  does not, instead of failing with `Cannot find module` on every event. Install and uninstall
+  remove any hook group for a moment the current version no longer has. Uninstall names the skills
+  `openlore setup` copied as kept. `openlore doctor` reports a hook whose runtime is gone, and an
+  event that runs two different OpenLore commands for the same step.
 - **`openlore status` says what happened to each hook finding.** A finding the hooks showed is
   counted as fixed (the same check ran again after an edit to its file and no longer reports it),
   decided (a recorded decision cites its id, such as `f:1a2b3c4d`), open (the stop receipt still
