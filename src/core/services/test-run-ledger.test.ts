@@ -17,6 +17,7 @@ function repo(): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'olruns-')));
   dirs.push(root);
   mkdirSync(join(root, '.openlore'));
+  writeFileSync(join(root, '.openlore', 'config.json'), '{}');
   write(root, '.gitignore', '.openlore/\n');
   write(root, 'src/config.ts', CONFIG);
   write(root, 'src/other.ts', 'export function other() {\n  return 1;\n}\n');
