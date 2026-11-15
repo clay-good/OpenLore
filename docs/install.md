@@ -390,7 +390,10 @@ or before-stop moment, so test runs recorded there are not yet stated at stop.
 - **Found from a subdirectory.** The hook uses the nearest directory at or above the session's
   working directory that has `.openlore/`.
 - **Bounded.** Each receipt has a size budget (the most severe facts first, the rest counted) and a
-  time limit (8 s, 15 s, 50 s, 30 s, 5 s, 10 s); past it the hook prints nothing.
+  time limit, timed from when the command has loaded: 3 s for the prompt moment, then 3 s, 6 s,
+  20 s, 30 s, 5 s, and 10 s for the moments in the table above; past it the hook prints nothing.
+  The limits come from measurement (`npm run bench:hooks`); `npm run test:budgets` fails when a
+  moment's measured p95 passes its budget.
 - **Silent on failure.** A check that throws or does not load, a passed time limit, a missing,
   corrupt, or read-only `.openlore/`, a missing or unusable index, and an unreadable payload all end
   the same way: exit 0, nothing printed. The prompt-submitted moment (`openlore orient --inject`,

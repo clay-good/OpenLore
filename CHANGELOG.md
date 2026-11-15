@@ -28,6 +28,10 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **Tighter hook time limits, now tested.** From measurement: before-edit stops at 3 s (was 8 s),
+  after-edit at 6 s (was 15 s), and before-stop at 20 s (was 50 s). `npm run test:budgets` now times
+  each moment on a fixed 2,000-function fixture and fails when a p95 passes its budget, and CI
+  spawns the built CLI to check the whole-process median.
 - **Each hook finding is stated once per session, and carries an id.** A finding is identified by
   its code, its subject, and the text of the line it cites (not the line number), and is printed
   with an id such as `[f:1a2b3c4d]`. Lines added above it no longer repeat it; a change to the
