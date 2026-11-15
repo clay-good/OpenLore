@@ -119,6 +119,10 @@ All notable changes to OpenLore are documented here. This project adheres to
   applies to the next file event. A directory an edit newly includes is picked up at the next
   watcher start. (#717 follow-up)
 
+- **OpenAPI enum changes read as their values, not as escaped JSON.** `certify_service_contract`,
+  `blast_radius` and the hook briefings printed an enum type as `string{["\"open\"","\"shipped\""]}`;
+  they now print `string enum "open" | "shipped"`, and a format as `string (date)`.
+
 - **TypeScript files that use `import('x').T` types, `typeof import(…)`, `using` as a variable, or
   `export type *` no longer parse with errors.** The bundled grammar cannot parse these; a
   length-preserving, parse-only mask now hides them from it. On this repository: files with parse

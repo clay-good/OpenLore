@@ -89,6 +89,7 @@ export async function contractsForFiles(root: string, files: readonly string[], 
   const inScope = new Set(files);
   const { normalizeUrl } = await import('../../analyzer/http-route-parser.js');
   const { HTTP_METHODS } = await import('../../analyzer/contract/openapi.js');
+  const { displayType } = await import('./contract-diff.js');
   const concrete = new Set<string>(HTTP_METHODS.map(m => m.toUpperCase()));
   // A route file outside the scope joins it when it names a function in scope: inline handlers
   // (`router.post('/', (req, res) => svc.createTask(…))`) are not call-graph nodes, so the call
@@ -144,8 +145,8 @@ export async function contractsForFiles(root: string, files: readonly string[], 
           spec: emittedText(`${doc.file}:${op.line}`),
           route: { file: emittedText(r.file), method: emittedText(r.method), path: emittedText(r.path) },
           ...(op.deprecated ? { deprecated: true as const } : {}),
-          requiredParams: required(op.params.filter(p => p.required).map(p => `${p.name} (${p.in}${p.type ? `, ${p.type}` : ''})`)),
-          requiredBody: required((op.body?.properties ?? []).filter(p => p.required).map(p => `${p.name}${p.type ? ` (${p.type})` : ''}`)),
+          requiredParams: required(op.params.filter(p => p.required).map(p => `${p.name} (${p.in}${p.type ? `, ${displayType(p.type)}` : ''})`)),
+          requiredBody: required((op.body?.properties ?? []).filter(p => p.required).map(p => `${p.name}${p.type ? ` (${displayType(p.type)})` : ''}`)),
         });
       }
     }
