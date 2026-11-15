@@ -17,7 +17,8 @@
 
 import { readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
+import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 import { confinedAtomicWriteFile } from '../../utils/path-confinement.js';
 import { frameServedContent } from '../services/served-content.js';
 import type { LLMContext, RepoStructure } from './artifact-generator.js';
@@ -45,6 +46,8 @@ interface DigestOptions {
   maxCoupledFiles?: number;
   /** Reconciled analyzer-owned domains; never inferred again by this consumer. */
   repoStructure?: RepoStructure;
+  /** The configured spec root (`openspecPath`); default `openspec`. */
+  openspecPath?: string;
 }
 
 // ============================================================================
@@ -299,7 +302,9 @@ export async function generateCodebaseDigest(
     }
 
     // ── Spec domains ──────────────────────────────────────────────────────────
-    const specsDir = join(rootPath, 'openspec', 'specs');
+    const specRoot = resolveOpenspecDir(rootPath, opts.openspecPath);
+    const specsPrefix = `${relative(rootPath, specRoot).replaceAll('\\', '/')}/specs`.replace(/^\//, '');
+    const specsDir = join(specRoot, 'specs');
     if (existsSync(specsDir)) {
       try {
         const entries = await readdir(specsDir);
@@ -313,7 +318,7 @@ export async function generateCodebaseDigest(
           lines.push('OpenSpec domains available for this project. Use `search_specs` or `get_spec` to query them.');
           lines.push('');
           for (const d of domains) {
-            lines.push(`- \`${repoText(d)}\` — \`openspec/specs/${repoText(d)}/spec.md\``);
+            lines.push(`- \`${repoText(d)}\` — \`${repoText(specsPrefix)}/${repoText(d)}/spec.md\``);
           }
           lines.push('');
         }

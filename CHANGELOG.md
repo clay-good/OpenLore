@@ -101,6 +101,14 @@ All notable changes to OpenLore are documented here. This project adheres to
   `openspecPath: "docs"`, an uncommitted edit under `docs/specs/` was served as `reviewed-corpus`.
   They now check the configured folder, and an invalid config gives `local-unreviewed`.
 
+- **Spec search results can be labeled reviewed again, and spec paths follow `openspecPath`.**
+  `search_specs` and `orient`'s spec matches required the indexed text to appear in the spec file,
+  but the index adds its own `[spec:<domain>] <title>` line, so every result in every repository was
+  `local-unreviewed`. The check now skips that line; an uncommitted edit still gives
+  `local-unreviewed`. These results, `search_unified` and `CODEBASE.md` also used
+  `openspec/specs/…` paths when `openspecPath` points elsewhere: `CODEBASE.md` listed no spec
+  domains for a `docs/specs` corpus.
+
 - **JavaScript functions are labeled JavaScript.** Functions in `.js`, `.mjs`, `.cjs` and `.jsx`
   files were stored with `language: "TypeScript"`, so per-language answers (language support,
   filters, summaries) counted them as TypeScript. Extraction itself is unchanged. (#724 follow-up)

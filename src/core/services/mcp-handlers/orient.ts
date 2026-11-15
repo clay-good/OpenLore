@@ -49,6 +49,7 @@ import {
   compositeScore,
   buildReason,
 } from './semantic.js';
+import { configuredSpecRoot, specFileRel } from './spec-paths.js';
 import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type GraphFreshnessView, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
@@ -260,6 +261,7 @@ export async function handleOrient(
   const { VectorIndex } = await import('../../analyzer/vector-index.js');
   const { embedderMode, resolveEmbedder, servedRetrievalMode, isKeywordRetrievalMode } = await import('../../analyzer/embedder.js');
   const { SpecVectorIndex } = await import('../../analyzer/spec-vector-index.js');
+  const { specRowProse } = await import('../../analyzer/spec-row-text.js');
 
   const hasCodeIndex = VectorIndex.exists(outputDir);
   const hasSpecIndex = SpecVectorIndex.exists(outputDir);
@@ -554,6 +556,7 @@ export async function handleOrient(
         limit: 3,
         vocabularyExpansion,
       });
+      const specRootRel = (await configuredSpecRoot(absDir)).relative;
       matchingSpecs = await Promise.all(specResults.map(async r => ({
         domain: r.record.domain,
         section: r.record.section,
@@ -564,8 +567,8 @@ export async function handleOrient(
         text: r.record.text.slice(0, 300) + (r.record.text.length > 300 ? '…' : ''),
         provenance: await indexedSpecContentProvenance(
           absDir,
-          `openspec/specs/${r.record.domain}/spec.md`,
-          [r.record.title, r.record.text],
+          specFileRel(specRootRel, r.record.domain),
+          [r.record.title, specRowProse(r.record.domain, r.record.title, r.record.text)],
         ),
       })));
     } catch {
