@@ -400,6 +400,15 @@ export function resolveCurrentFunctionSpan(
   return { startIndex: selected.startIndex, endIndex: selected.endIndex };
 }
 
+/**
+ * Two reads of the same syntax node. The native binding caches node objects WEAKLY, so after a
+ * garbage collection a second read of a node can return a different object: `===` between two reads
+ * depends on GC timing. Compare the node id instead (stable for the life of the tree).
+ */
+function sameNode(a: Node | null | undefined, b: Node | null | undefined): boolean {
+  return !!a && !!b && a.id === b.id;
+}
+
 const MAX_TRAVERSAL_DEPTH = 512;
 const MAX_TRAVERSAL_NODES = 250_000;
 
@@ -1096,7 +1105,7 @@ export function extractGoErrorFacts(
   if (allRecoveryDefers.length > recoveryDefers.length) boundaries.add('panic recovery inside conditional or nested control flow is not proven unconditional');
 
   const walk = (node: Node, nested: boolean): void => {
-    const isNested = node !== fnNode && (node.type === 'function_declaration' || node.type === 'method_declaration' || node.type === 'func_literal');
+    const isNested = !sameNode(node, fnNode) && (node.type === 'function_declaration' || node.type === 'method_declaration' || node.type === 'func_literal');
     if (nested || isNested) return;
     if (node.type === 'call_expression') {
       const name = callName(node);
@@ -1227,8 +1236,8 @@ export function extractGoErrorFacts(
     const panics = literalPanics(body);
     if (panics.length !== 1) return null;
     let parent = panics[0].parent;
-    while (parent && parent.parent !== body) parent = parent.parent;
-    return parent?.parent === body ? panics[0] : null;
+    while (parent && !sameNode(parent.parent, body)) parent = parent.parent;
+    return sameNode(parent?.parent, body) ? panics[0] : null;
   };
   const panicDefers = topLevelDefers.filter(d => literalBody(d) && literalPanics(literalBody(d)!).length > 0);
   if (panicDefers.length > 0) {
@@ -1287,7 +1296,7 @@ export function extractGoErrorFacts(
   }
   const inspectDeferredAndAsyncLiterals = (node: Node): void => {
     if (node.type === 'defer_statement') {
-      if (!topLevelDefers.includes(node)) {
+      if (!topLevelDefers.some(d => sameNode(d, node))) {
         const body = literalBody(node);
         if (body && literalPanics(body).length > 0) boundaries.add(`panic in conditional or nested defer at line ${node.startPosition.row + 1} is not proven registered`);
       }
@@ -1299,7 +1308,7 @@ export function extractGoErrorFacts(
       if (body && containsCallNamed(body, 'panic')) boundaries.add(`panic in goroutine literal at line ${node.startPosition.row + 1} is asynchronous and does not propagate on the caller stack`);
       return;
     }
-    if (node !== fnNode && (node.type === 'function_declaration' || node.type === 'method_declaration' || node.type === 'func_literal')) return;
+    if (!sameNode(node, fnNode) && (node.type === 'function_declaration' || node.type === 'method_declaration' || node.type === 'func_literal')) return;
     for (const child of node.namedChildren) inspectDeferredAndAsyncLiterals(child);
   };
   inspectDeferredAndAsyncLiterals(fnNode);
