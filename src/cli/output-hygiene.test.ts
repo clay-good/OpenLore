@@ -191,6 +191,7 @@ const ALLOWED_RAW_INTERPOLATIONS: Record<string, readonly string[]> = {
     "label('Wiring scope')",
     "label('Session ledger')",
     "label('Loop hooks')",
+    "label('Hook health')",
     // A fixed WiringScope literal, never repository text.
     'wiringText',
     "label('Retrieval mode')",

@@ -33,6 +33,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { readStdin } from '../../utils/stdin.js';
 import { withLoggerOptions } from '../../utils/logger.js';
 import { OPENLORE_DIR } from '../../constants.js';
+import { recordHookRun, type HookOutcome } from '../../core/services/hook-health.js';
 import { HOOK_MOMENTS, findingIdentity, markShown, readSession, wasShown, writeSession, type FindingProof, type HookMoment } from '../../core/services/hook-session.js';
 
 export { HOOK_MOMENTS, type HookMoment };
@@ -529,7 +530,7 @@ function openloreRoot(start: string): string | undefined {
  * `before-subagent`) and the live peers on the footprint board. Not deduplicated: each sub-agent is
  * a fresh context.
  */
-async function subagentStart(root: string, payload: HookPayload, timeoutMs: number): Promise<HookRunResult> {
+async function subagentStart(root: string, payload: HookPayload, timeoutMs: number, report: HookRunReport): Promise<HookRunResult> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<'timeout'>(r => { timer = setTimeout(() => r('timeout'), timeoutMs); timer.unref?.(); });
   try {
@@ -539,10 +540,12 @@ async function subagentStart(root: string, payload: HookPayload, timeoutMs: numb
       return subagentBriefing(root, prompt, BUDGET_CHARS['subagent-start']);
     });
     const text = await Promise.race([work, timeout]);
+    if (text === 'timeout') report.outcome = 'overrun';
     if (text === 'timeout' || !text) return { stdout: '', exitCode: 0 };
     const capped = sanitizeForTerminal(text, { keepNewlines: true }).slice(0, BUDGET_CHARS['subagent-start']).replace(/[\uD800-\uDBFF]$/, '');
     return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: capped } }), exitCode: 0 };
   } catch {
+    report.outcome = 'error';
     return { stdout: '', exitCode: 0 };
   } finally {
     if (timer) clearTimeout(timer);
@@ -553,7 +556,7 @@ async function subagentStart(root: string, payload: HookPayload, timeoutMs: numb
  * `after-compact`: the handoff briefing, so the agent resumes from the computed state of its change
  * rather than the compaction summary alone. Stated after every compaction (not deduplicated).
  */
-async function afterCompact(root: string, timeoutMs: number): Promise<HookRunResult> {
+async function afterCompact(root: string, timeoutMs: number, report: HookRunReport): Promise<HookRunResult> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<'timeout'>(r => { timer = setTimeout(() => r('timeout'), timeoutMs); timer.unref?.(); });
   try {
@@ -562,9 +565,11 @@ async function afterCompact(root: string, timeoutMs: number): Promise<HookRunRes
       return renderHandoff(await handleGetHandoffBriefing({ directory: root }), { boundaries: 'summary' });
     });
     const text = await Promise.race([work, timeout]);
+    if (text === 'timeout') report.outcome = 'overrun';
     if (text === 'timeout' || !text) return { stdout: '', exitCode: 0 };
     return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text.slice(0, BUDGET_CHARS['after-compact']).replace(/[\uD800-\uDBFF]$/, '') } }), exitCode: 0 };
   } catch {
+    report.outcome = 'error';
     return { stdout: '', exitCode: 0 };
   } finally {
     if (timer) clearTimeout(timer);
@@ -591,6 +596,9 @@ function momentDisabled(root: string, moment: HookMoment): boolean {
 
 export interface HookRunResult { stdout: string; exitCode: 0 }
 
+/** What one run did, for the hook-health record (change: hook-reliability, task 6.1). */
+export interface HookRunReport { root?: string; outcome: HookOutcome; shown: number }
+
 /**
  * Run one moment over a payload, then SCREEN the result.
  *
@@ -602,18 +610,25 @@ export interface HookRunResult { stdout: string; exitCode: 0 }
  * own. The class only removes characters inside the JSON's string literals, so the harness still
  * parses exactly one object.
  */
-export async function runHook(moment: HookMoment, raw: string, opts: { cwd?: string; timeoutMs?: number } = {}): Promise<HookRunResult> {
+export async function runHook(
+  moment: HookMoment, raw: string,
+  opts: { cwd?: string; timeoutMs?: number; onRun?: (report: HookRunReport) => void } = {},
+): Promise<HookRunResult> {
+  const report: HookRunReport = { outcome: 'ok', shown: 0 };
   // The last line of the fail-open contract: a check module that does not load, or a throw on any
   // path outside a moment's own guard, still ends in silence (change: hook-reliability).
   try {
-    const r = await runHookUnscreened(moment, raw, opts);
+    const r = await runHookUnscreened(moment, raw, opts, report);
     return r.stdout ? { ...r, stdout: screenJsonText(r.stdout) } : r;
   } catch {
+    report.outcome = 'error';
     return { stdout: '', exitCode: 0 };
+  } finally {
+    opts.onRun?.(report);
   }
 }
 
-async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: string; timeoutMs?: number } = {}): Promise<HookRunResult> {
+async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: string; timeoutMs?: number }, report: HookRunReport): Promise<HookRunResult> {
   const silent: HookRunResult = { stdout: '', exitCode: 0 };
   const payload = parseHookPayload(raw);
   // The OpenLore root: the nearest directory at or above the session's working directory (the agent
@@ -622,9 +637,10 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
   // The working directory first; when it is above the project (a monorepo top), the edited file's.
   const root = openloreRoot(start) ?? (payload.files[0] ? openloreRoot(dirname(resolve(start, payload.files[0]))) : undefined);
   if (!root) return silent;
+  report.root = root;
   if (momentDisabled(root, moment)) return silent;
   if (moment === 'before-stop' && payload.stopHookActive) return silent;
-  if (moment === 'after-compact') return afterCompact(root, opts.timeoutMs ?? TIMEOUT_MS[moment]);
+  if (moment === 'after-compact') return afterCompact(root, opts.timeoutMs ?? TIMEOUT_MS[moment], report);
   if (moment === 'before-subagent') {
     // Nothing reads the queue when sub-agent briefings or task injection are off: nothing is stored.
     if ((payload.toolName === 'Agent' || payload.toolName === 'Task') && payload.agentPrompt && !momentDisabled(root, 'subagent-start') && !injectionOff(root)) {
@@ -637,7 +653,7 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
     }
     return silent; // only queues: the parent's tool call gets no output
   }
-  if (moment === 'subagent-start') return subagentStart(root, payload, opts.timeoutMs ?? TIMEOUT_MS[moment]);
+  if (moment === 'subagent-start') return subagentStart(root, payload, opts.timeoutMs ?? TIMEOUT_MS[moment], report);
   // A relative path is the harness's, from its working directory (Codex patches), not the root's.
   const files = payload.files.map(f => repoPath(root, resolve(start, f))).filter((f): f is string => !!f);
   // A shell command (after-tools sees them too): count it and record a test run, nothing else, so a
@@ -673,7 +689,7 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
       return beforeStop(root, baseline, payload.sessionId);
     });
     const done = await Promise.race([work, timeout]);
-    if (done === 'timeout') return silent;
+    if (done === 'timeout') { report.outcome = 'overrun'; return silent; }
     if ('block' in done && done.block) {
       return { stdout: JSON.stringify({ decision: 'block', reason: done.block }), exitCode: 0 };
     }
@@ -685,6 +701,7 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
       .filter(i => !wasShown(session, i.identity, audience));
     const { text, shown } = renderShown(moment, fresh);
     if (!text) { await writeSession(root, payload.sessionId, session); return silent; }
+    report.shown = shown.length;
     for (const i of shown as Array<HookItem & { identity: string }>) {
       session.keys.add(i.key);
       markShown(session, i.identity, { code: i.code ?? i.key, subject: i.subject ?? '' }, moment, audience);
@@ -695,6 +712,7 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
     if (moment === 'before-stop') return { stdout: JSON.stringify({ systemMessage: text }), exitCode: 0 };
     return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: HOOK_EVENT[moment], additionalContext: text } }), exitCode: 0 };
   } catch {
+    report.outcome = 'error';
     return silent;
   } finally {
     if (timer) clearTimeout(timer);
@@ -719,7 +737,8 @@ additionalContext. Prints nothing when there is nothing new; always exits 0. Tur
     const write = process.stdout.write.bind(process.stdout);
     process.stdout.write = (() => true) as typeof process.stdout.write;
     let r: HookRunResult;
-    try { r = await runHook(moment as HookMoment, raw); } finally { process.stdout.write = write; }
+    let report: HookRunReport | undefined;
+    try { r = await runHook(moment as HookMoment, raw, { onRun: rep => { report = rep; } }); } finally { process.stdout.write = write; }
     // The hook's one stdout write is also its screening choke point: every moment's
     // additionalContext is repository-derived text headed straight into model context, and only
     // 'subagent-start' sanitized its own. The class only removes characters inside the JSON's
@@ -727,5 +746,7 @@ additionalContext. Prints nothing when there is nothing new; always exits 0. Tur
     if (r.stdout) write(sanitizeForTerminal(r.stdout, { keepNewlines: true }) + '\n');
     // Codex expects JSON from a Stop hook that exits 0; an empty object says nothing.
     else if (options.harness === 'codex' && moment === 'before-stop') write('{}\n');
+    // Whole-process time, as the p95 targets are; after the output, so it never delays the agent.
+    if (report?.root) await recordHookRun(report.root, { moment, ms: process.uptime() * 1000, outcome: report.outcome, shown: report.shown });
     process.exit(0);
   });

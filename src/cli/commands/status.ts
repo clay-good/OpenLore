@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import { LOOP_MOMENTS } from '../../core/services/hook-session.js';
+import { readHookHealth, type MomentHealth } from '../../core/services/hook-health.js';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
 import { readLiveLedger, type LedgerSnapshot } from '../../core/services/session-ledger.js';
@@ -87,6 +88,8 @@ export interface IndexStatus {
    * Set by `openlore status` only.
    */
   hookMoments?: Array<{ moment: string; wired: boolean; enabled: boolean }>;
+  /** Hook runs of the last 7 days, per moment (change: hook-reliability, task 6.2). Absent when none ran. */
+  hookHealth?: MomentHealth[];
   /**
    * The live MCP session's ledger (change: add-session-structural-ledger): raw counts, named
    * background changes and edit loops — or why they are withheld. Set by `openlore status` only.
@@ -207,6 +210,19 @@ async function changedSinceIndex(rootPath: string, builtAtMs: number | null): Pr
     } catch { /* Outside the repo or unreadable. Deletions are handled above. */ }
   }
   return { files, truncated };
+}
+
+/**
+ * One line of hook health: each moment's last run and p95 (whole-process time), then the error and
+ * overrun totals and the findings shown, over the last 7 days.
+ */
+export function formatHookHealth(health: MomentHealth[], now = Date.now()): string {
+  const secs = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
+  const moments = health.map(h => `${h.moment} ${formatAge(now - Date.parse(h.lastRun))}, p95 ${secs(h.p95Ms)}`);
+  const errors = health.reduce((n, h) => n + h.errors, 0);
+  const overruns = health.reduce((n, h) => n + h.overruns, 0);
+  const shown = health.reduce((n, h) => n + h.shown, 0);
+  return `${moments.join('; ')} — ${errors} error(s), ${overruns} overrun(s), ${shown} finding(s) shown (last 7 days)`;
 }
 
 /** Collect the index's self-state without mutating anything. */
@@ -339,12 +355,14 @@ Read-only: this never builds, rebuilds, or locks the index.
     const governance = index.configUnreadable
       ? undefined
       : await readOpenLoreConfig(rootPath).then(config => collectGovernanceStatus(rootPath, config)).catch(() => undefined);
+    const health = readHookHealth(rootPath);
     const status: IndexStatus = {
       ...index,
       ...(governance ? { governance } : {}),
       wiringScope: await collectWiringScope(rootPath),
       session: collectSessionStatus(rootPath),
       hookMoments: collectHookMoments(rootPath),
+      ...(health.length ? { hookHealth: health } : {}),
     };
 
     if (options.json) {
@@ -365,6 +383,7 @@ Read-only: this never builds, rebuilds, or locks the index.
     if (moments.length) {
       console.log(`  ${label('Loop hooks')} ${safe(moments.map(m => m.enabled ? m.moment : `${m.moment} (off)`).join(', '))}`);
     }
+    if (status.hookHealth?.length) console.log(`  ${label('Hook health')} ${safe(formatHookHealth(status.hookHealth))}`);
     const session = status.session;
     if (session && 'pid' in session) {
       // The ledger is a file in the repository: every value is sanitized before it reaches the terminal.

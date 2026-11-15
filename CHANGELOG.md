@@ -28,6 +28,11 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **`openlore status` reports hook health.** Every hook run is recorded locally in
+  `.openlore/session-ledger/hook-runs.jsonl`, and a new `Hook health` line (and `hookHealth` in
+  `--json`) shows each moment's last run and p95, the errors and overruns, and the findings shown
+  over the last 7 days. A failed or timed-out hook is still silent to the agent, but now it is
+  counted for you.
 - **Tighter hook time limits, now tested.** From measurement: before-edit stops at 3 s (was 8 s),
   after-edit at 6 s (was 15 s), and before-stop at 20 s (was 50 s). `npm run test:budgets` now times
   each moment on a fixed 2,000-function fixture and fails when a p95 passes its budget, and CI

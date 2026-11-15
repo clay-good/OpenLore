@@ -10,7 +10,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { collectHookMoments, collectIndexStatus, collectWiringScope, statusCommand } from './status.js';
+import { collectHookMoments, collectIndexStatus, collectWiringScope, formatHookHealth, statusCommand } from './status.js';
 import { _resetVectorIndexCachesForTesting } from '../../core/analyzer/vector-index.js';
 
 const ANALYSIS = join('.openlore', 'analysis');
@@ -367,5 +367,43 @@ describe('openlore status — loop hook moments (change: hook-reliability)', () 
     await mkdir(join(root, '.openlore'), { recursive: true });
     await writeFile(join(root, '.openlore', 'config.json'), '{"hooks": {');
     expect(wired()).toEqual(['prompt-submitted', 'before-edit', 'before-stop']);
+  });
+});
+
+describe('openlore status — hook health (change: hook-reliability, task 6.2)', () => {
+  it('formats one line: last run and p95 per moment, then errors, overruns, findings shown', () => {
+    const now = Date.parse('2026-11-14T12:00:00Z');
+    const line = formatHookHealth([
+      { moment: 'prompt-submitted', runs: 3, lastRun: new Date(now - 120_000).toISOString(), p95Ms: 940, errors: 1, overruns: 0, shown: 0 },
+      { moment: 'after-tools', runs: 5, lastRun: new Date(now - 30_000).toISOString(), p95Ms: 430, errors: 0, overruns: 2, shown: 4 },
+    ], now);
+    expect(line).toBe('prompt-submitted 2 minutes ago, p95 0.9 s; after-tools just now, p95 0.4 s — 1 error(s), 2 overrun(s), 4 finding(s) shown (last 7 days)');
+  });
+
+  it('--json carries hookHealth when runs were recorded, and omits it otherwise', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-status-health-'));
+    const cwd = process.cwd();
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+    try {
+      process.chdir(root);
+      await statusCommand.parseAsync(['node', 'openlore', '--json']);
+      expect((JSON.parse(lines.join('\n')) as Record<string, unknown>).hookHealth).toBeUndefined();
+      await mkdir(join(root, '.openlore', 'session-ledger'), { recursive: true });
+      await writeFile(join(root, '.openlore', 'session-ledger', 'hook-runs.jsonl'), `${JSON.stringify({ t: new Date().toISOString(), moment: 'before-edit', ms: 300, outcome: 'overrun', shown: 0 })}\n`);
+      lines.length = 0;
+      await statusCommand.parseAsync(['node', 'openlore', '--json']);
+      expect((JSON.parse(lines.join('\n')) as { hookHealth: unknown[] }).hookHealth).toEqual([
+        expect.objectContaining({ moment: 'before-edit', runs: 1, overruns: 1 }),
+      ]);
+      lines.length = 0;
+      await statusCommand.parseAsync(['node', 'openlore']);
+      expect(lines.join('\n')).toMatch(/Hook health\s+before-edit just now, p95 0\.3 s — 0 error\(s\), 1 overrun\(s\), 0 finding\(s\) shown/);
+    } finally {
+      console.log = log;
+      process.chdir(cwd);
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

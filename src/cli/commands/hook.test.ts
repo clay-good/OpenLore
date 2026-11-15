@@ -454,3 +454,39 @@ describe('time limits (change: hook-reliability, task 5.1)', () => {
     expect(PROMPT_SUBMITTED_LIMIT_MS).toBeLessThan(promptTimeout * 1000);
   });
 });
+
+describe('the run report for hook health (change: hook-reliability, task 6.1)', () => {
+  const capture = async (moment: Parameters<typeof runHook>[0], raw: string, opts: { timeoutMs?: number } = {}) => {
+    let report: unknown;
+    const r = await runHook(moment, raw, { ...opts, onRun: rep => { report = rep; } });
+    return { r, report: report as { root?: string; outcome: string; shown: number } };
+  };
+
+  it('ok, with the number of findings shown', async () => {
+    const root = repo({ 'gen/order.pb.go': GENERATED });
+    const { report } = await capture('before-edit', payload(root, 'gen/order.pb.go'));
+    expect(report).toEqual({ root, outcome: 'ok', shown: 1 });
+  });
+
+  it('a slow check is stopped, prints nothing, and is an overrun', async () => {
+    const root = repo({ 'gen/order.pb.go': GENERATED });
+    const { r, report } = await capture('before-edit', payload(root, 'gen/order.pb.go'), { timeoutMs: 1 });
+    expect(r).toEqual({ stdout: '', exitCode: 0 });
+    expect(report).toEqual({ root, outcome: 'overrun', shown: 0 });
+  });
+
+  it('a check that throws is an error', async () => {
+    const root = repo();
+    verify.result = undefined as unknown as Record<string, unknown>; // handleVerifyChange returns undefined: reading .error throws
+    const { r, report } = await capture('before-stop', payload(root));
+    expect(r).toEqual({ stdout: '', exitCode: 0 });
+    expect(report.outcome).toBe('error');
+  });
+
+  it('outside an OpenLore repository there is no root, so nothing is recorded', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'olnoroot-')));
+    dirs.push(dir);
+    const { report } = await capture('before-edit', JSON.stringify({ session_id: 's', cwd: dir, tool_name: 'Edit', tool_input: { file_path: join(dir, 'a.ts') } }));
+    expect(report.root).toBeUndefined();
+  });
+});

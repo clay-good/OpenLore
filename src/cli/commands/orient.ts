@@ -35,6 +35,7 @@ import {
 } from '../../core/services/one-shot-index-build.js';
 import { readStdin } from '../../utils/stdin.js';
 import { findingIdentity, markShown, readSession, wasShown, writeSession } from '../../core/services/hook-session.js';
+import { recordHookRun, type HookOutcome } from '../../core/services/hook-health.js';
 import { autoInitSuppression, isInsideGitWorkTree, recordDetachedRepair } from '../../core/services/cold-start-bootstrap.js';
 import { seedFromSiblingCheckout, servingSeededIndex } from '../../core/runtime/seed-from-sibling.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
@@ -71,6 +72,7 @@ export async function injectOutput(
   taskOpt: string | undefined,
   buildNote?: string,
   silentWithoutIndex = false,
+  run?: { outcome: HookOutcome },
 ): Promise<string> {
   let prompt = taskOpt ?? '';
   let sessionId: string | undefined;
@@ -90,14 +92,17 @@ export async function injectOutput(
     // so stdout carries only the orientation block.
     const debug = process.env.OPENLORE_INJECT_DEBUG === '1';
     // Quiet logger too: a hook writes nothing to stderr either ("[ok] Successfully validated…").
-    const block = await withQuietStdout(() => withLoggerOptions({ quiet: true }, () => buildInjection(directory, prompt, debug ? evaluation => {
+    const block = await withQuietStdout(() => withLoggerOptions({ quiet: true }, () => buildInjection(directory, prompt, evaluation => {
+      // A failed lookup is silent to the agent and counted for the operator.
+      if (evaluation.reason === 'error' && run) run.outcome = 'error';
+      if (!debug) return;
       const verdict = evaluation.passes ? 'passed' : 'suppressed';
       process.stderr.write(
         `[openlore:inject] verdict=${verdict} reason=${evaluation.reason ?? 'none'} ` +
         `passed=${evaluation.passedCriteria.join(',') || 'none'} ` +
         `failed=${evaluation.failedCriteria.join(',') || 'none'}\n`,
       );
-    } : undefined)));
+    })));
     // Outside any git work tree (e.g. $HOME) with no index, say nothing: "run openlore
     // analyze" on every prompt there invites an agent to index the whole directory.
     // With a build in flight, "run openlore analyze" is the wrong remedy: say what is happening.
@@ -121,6 +126,7 @@ export async function injectOutput(
     return out ? safe(out, { keepNewlines: true }) : '';
   } catch {
     // buildInjection is fail-open; guard the assembly too: never throw.
+    if (run) run.outcome = 'error';
     return '';
   }
 }
@@ -418,14 +424,23 @@ prints a short session-start primer (used by the install SessionStart hook).
     // moment — index bootstrap and lookup — under its runtime limit (change: hook-reliability).
     if (opts.inject) {
       if (promptSubmittedOff(root)) return;
+      const run: { outcome: HookOutcome } = { outcome: 'ok' };
       const out = await withinLimit(async () => {
-        const build = await bootstrapOneShotIndex(root);
-        const building = build?.state === 'started' || build?.state === 'running';
-        return injectOutput(directory, task, build && oneShotBuildNote(build), !building && !hasAnalysis(root) && !isInsideGitWorkTree(root));
+        try {
+          const build = await bootstrapOneShotIndex(root);
+          const building = build?.state === 'started' || build?.state === 'running';
+          return await injectOutput(directory, task, build && oneShotBuildNote(build), !building && !hasAnalysis(root) && !isInsideGitWorkTree(root), run);
+        } catch (error) {
+          run.outcome = 'error';
+          throw error;
+        }
       }, PROMPT_SUBMITTED_LIMIT_MS);
-      // Past the limit: print nothing and stop the work still running.
+      if (out === TIMED_OUT) run.outcome = 'overrun';
+      if (out !== TIMED_OUT && out) console.log(out);
+      // Hook health (change: hook-reliability, task 6.1): whole-process time, after the output.
+      await recordHookRun(root, { moment: 'prompt-submitted', ms: process.uptime() * 1000, outcome: run.outcome, shown: 0 });
+      // Past the limit: stop the work still running.
       if (out === TIMED_OUT) process.exit(0);
-      if (out) console.log(out);
       return;
     }
 
