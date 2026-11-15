@@ -136,16 +136,16 @@ live registry.
 <!-- standing-context-cost:start -->
 | Preset | Tools | Measured tokens | Budget |
 |---|---:|---:|---:|
-| `configuration` | 1 | 545 | 585 |
-| `minimal` | 6 | 2,854 | 2,950 |
+| `configuration` | 1 | 707 | 760 |
+| `minimal` | 6 | 2,933 | 2,950 |
 | `navigation` | 10 | 3,616 | 3,800 |
-| `memory` | 3 | 1,510 | 1,610 |
+| `memory` | 3 | 1,602 | 1,610 |
 | `verify` | 5 | 2,089 | 2,220 |
-| `federation` | 10 | 3,912 | 4,100 |
-| `coordination` | 8 | 3,562 | 3,720 |
+| `federation` | 10 | 4,005 | 4,100 |
+| `coordination` | 8 | 3,721 | 3,980 |
 | `substrate` | 15 | 5,248 | 5,500 |
 | `plugin` | 11 | 4,225 | 4,520 |
-| `full` | 84 | 27,880 | 28,400 |
+| `full` | 84 | 28,680 | 30,000 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line
