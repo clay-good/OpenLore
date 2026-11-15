@@ -268,32 +268,37 @@ describe('idle self-shutdown', () => {
   it('does not let rejected hidden-tool requests postpone idle shutdown', async () => {
     const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
     const dir = await mkdtemp(join(tmpdir(), 'openlore-idle-'));
+    let h: Awaited<ReturnType<typeof startServe>> | undefined;
     try {
-      const h = await startServe({
+      // Wide margins, so a loaded CI runner cannot flip the verdict: the idle deadline is 6 s, the
+      // rejected request lands at 2 s, so a reset would move the deadline to 8 s. Shutdown must
+      // come before 7 s: up to 1 s late is tolerated, a reset is not.
+      const start = Date.now();
+      h = await startServe({
         directory: dir,
         port: '0',
         watch: false,
         allowUnauthenticatedForTesting: true,
         preset: 'navigation',
-        idleTimeout: '0.01',
+        idleTimeout: '0.1',
       });
-      await sleep(350);
+      await sleep(2000 - (Date.now() - start));
       const rejected = await fetch(`${h!.baseUrl}/tool/record_decision`, {
         method: 'POST',
         body: JSON.stringify({ args: { title: 'hidden', rationale: 'hidden' } }),
       });
       expect(rejected.status).toBe(403);
 
-      // The original 600ms idle deadline still wins. Resetting it on the 403
-      // would keep the daemon alive until roughly 950ms.
-      await sleep(400);
+      while (!exit.mock.calls.length && Date.now() - start < 7000) await sleep(50);
       expect(exit).toHaveBeenCalled();
       expect(await readDescriptor(dir)).toBeNull();
     } finally {
       exit.mockRestore();
+      // Never leave a live timer behind: a late shutdown would land in the next test.
+      await h?.close().catch(() => undefined);
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it('never arms the timer when disabled (--idle-timeout 0)', async () => {
     const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
