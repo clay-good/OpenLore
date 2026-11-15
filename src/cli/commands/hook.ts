@@ -34,7 +34,7 @@ import { readStdin } from '../../utils/stdin.js';
 import { withLoggerOptions } from '../../utils/logger.js';
 import { OPENLORE_DIR } from '../../constants.js';
 import { recordHookRun, type HookOutcome } from '../../core/services/hook-health.js';
-import { HOOK_MOMENTS, findingIdentity, markShown, readSession, wasShown, writeSession, type FindingProof, type HookMoment } from '../../core/services/hook-session.js';
+import { HOOK_MOMENTS, findingIdentity, markFixed, markOpen, markShown, readSession, wasShown, writeSession, type FindingProof, type HookMoment } from '../../core/services/hook-session.js';
 
 export { HOOK_MOMENTS, type HookMoment };
 
@@ -66,7 +66,7 @@ const SEVERITY_RANK: Record<string, number> = { critical: 0, error: 1, warning: 
  * dedupe (`findingIdentity`; without a code, the `key` is the identity); `key` is still recorded
  * for an older CLI reading the same session record.
  */
-export interface HookItem { key: string; severity: string; text: string; next?: string; code?: string; subject?: string; proof?: FindingProof; id?: string }
+export interface HookItem { key: string; severity: string; text: string; next?: string; code?: string; subject?: string; proof?: FindingProof; id?: string; check?: string; file?: string }
 
 export interface HookPayload {
   sessionId?: string;
@@ -289,7 +289,7 @@ async function beforeEdit(root: string, files: string[], edit?: HookPayload['edi
   const { facts } = await classifyGeneratedFiles(root, files);
   const items: HookItem[] = [...facts.values()].map(f => ({
     key: `generated:${f.file}`,
-    code: 'generated-file', subject: f.file, proof: { path: f.file, discriminator: f.kind },
+    code: 'generated-file', subject: f.file, proof: { path: f.file, discriminator: f.kind }, check: 'generated', file: f.file,
     severity: 'warning',
     text: generatedText(f),
     ...(f.kind !== 'lockfile' ? { next: f.regenerateWith !== 'unknown' ? `regenerate with \`${f.regenerateWith}\`` : 'edit the source and regenerate' } : {}),
@@ -355,7 +355,7 @@ function generatedText(f: { file: string; kind: string; generatedFrom: string[] 
  * delivery — the live ledger's background changes and edit loops, and for the edited file its
  * generated-file, phantom-reference and check-weakening findings.
  */
-async function afterTools(root: string, files: string[], baseline: string | undefined): Promise<HookItem[]> {
+async function afterTools(root: string, files: string[], baseline: string | undefined, ran: Set<string> = new Set()): Promise<HookItem[]> {
   const items: HookItem[] = [];
   const { recordAgentEdit, readLiveLedger } = await import('../../core/services/session-ledger.js');
   for (const f of files) recordAgentEdit(root, f);
@@ -388,6 +388,7 @@ async function afterTools(root: string, files: string[], baseline: string | unde
   if (!files.length) return items;
 
   items.push(...(await beforeEdit(root, files)));
+  ran.add('generated');
 
   if (!baseline) return items; // no commit to compare with (an unborn branch)
   // Compared with the commit this harness session started from: a finding in an earlier commit is
@@ -398,11 +399,13 @@ async function afterTools(root: string, files: string[], baseline: string | unde
   const changed = repoFiles.map(path => ({ path, status: 'modified' as const, additions: 0, deletions: 0, ...classifyFile(path) }));
   const { checkPhantomReferences } = await import('../../core/services/phantom-references.js');
   const phantom = await checkPhantomReferences(root, baseline, changed).catch(() => undefined);
+  if (phantom) ran.add('phantom');
+  const rel = (p?: string) => (p && p.startsWith(prefix) ? p.slice(prefix.length) : p);
   for (const f of phantom?.findings ?? []) {
     // Identity: the cited line's text, not its number (the source's discriminator carries the number).
     const lineText = f.location?.line ? await citedLine(root, prefix, f.location.path, f.location.line) : undefined;
     items.push({
-      key: `${f.code}:${f.location?.path ?? ''}:${f.subject}`, code: f.code, subject: f.subject,
+      key: `${f.code}:${f.location?.path ?? ''}:${f.subject}`, code: f.code, subject: f.subject, check: 'phantom', file: rel(f.location?.path),
       proof: lineText !== undefined ? { path: f.location!.path, lineText } : { path: f.location?.path, discriminator: f.discriminator },
       severity: f.severity, text: f.message, ...(f.remediation ? { next: f.remediation } : {}),
     });
@@ -413,8 +416,9 @@ async function afterTools(root: string, files: string[], baseline: string | unde
   // differ on Windows: forward slashes, a long name for an 8.3 one).
   const top = resolve(root, ...prefix.split('/').filter(Boolean).map(() => '..'));
   const weak = top ? await checkWeakening({ root: top, baseRef: baseline, files: repoFiles }).catch(() => undefined) : undefined;
+  if (weak) ran.add('weakening');
   // Check-weakening discriminators are text-based (the added ignore line, the step), not line numbers.
-  for (const f of weak?.findings ?? []) items.push({ key: `${f.code}:${f.subject}:${f.discriminator ?? ''}`, code: f.code, subject: f.subject, proof: { path: f.location?.path, discriminator: f.discriminator }, severity: f.severity, text: f.message });
+  for (const f of weak?.findings ?? []) items.push({ key: `${f.code}:${f.subject}:${f.discriminator ?? ''}`, code: f.code, subject: f.subject, proof: { path: f.location?.path, discriminator: f.discriminator }, check: 'weakening', file: rel(f.location?.path), severity: f.severity, text: f.message });
   return items;
 }
 
@@ -496,11 +500,30 @@ async function beforeStop(root: string, baseline: string | undefined, sessionId?
   const r = await handleVerifyChange({ directory: root, ...(baseline ? { baseRef: baseline } : {}) }) as {
     error?: string;
     items?: Array<{ subject: string; check: string; severity: string; nextAction: string }>;
-    findings?: Array<{ code: string; subject: string; message: string; enforcementClass?: string; remediation?: string }>;
+    findings?: Array<{ code: string; subject: string; message: string; enforcementClass?: string; remediation?: string; discriminator?: string; location?: { path: string; line?: number } }>;
     gated?: boolean;
   };
   if (r.error) return { items: runItem ? [runItem] : [] };
-  const items: HookItem[] = (r.items ?? []).map(i => ({ key: `${i.check}:${i.subject}`, code: i.check, subject: i.subject, severity: i.severity, text: `${i.subject} [${i.check}]`, next: i.nextAction }));
+  // A receipt item built from a phantom-reference or check-weakening finding gets that finding's
+  // identity, the same one the after-edit hook gave it: one problem is one finding, so its outcome
+  // (fixed, decided, open) is counted once (change: hook-reliability, task 7.2).
+  const prefix = await repoPrefix(root).catch(() => '');
+  const rel = (p?: string) => (p && p.startsWith(prefix) ? p.slice(prefix.length) : p);
+  const sameFinding: Record<string, string> = { phantom_references: 'phantom', check_weakening: 'weakening' };
+  const items: HookItem[] = [];
+  for (const i of r.items ?? []) {
+    const item: HookItem = { key: `${i.check}:${i.subject}`, code: i.check, subject: i.subject, severity: i.severity, text: `${i.subject} [${i.check}]`, next: i.nextAction };
+    const check = sameFinding[i.check];
+    const f = check ? (r.findings ?? []).find(x => x.message === i.subject) : undefined;
+    if (check && f) {
+      const lineText = check === 'phantom' && f.location?.line ? await citedLine(root, prefix, f.location.path, f.location.line) : undefined;
+      Object.assign(item, {
+        code: f.code, subject: f.subject, check, file: rel(f.location?.path),
+        proof: lineText !== undefined ? { path: f.location!.path, lineText } : { path: f.location?.path, discriminator: f.discriminator },
+      });
+    }
+    items.push(item);
+  }
   if (runItem) items.push(runItem);
   const blocking = (r.findings ?? []).filter(f => f.enforcementClass === 'blocking');
   if (!r.gated || !blocking.length) return { items };
@@ -684,7 +707,8 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
       }
       if (moment === 'after-tools') {
         if (payload.sessionId) await runs.recordEdits(root, payload.sessionId, files).catch(() => undefined);
-        return { items: await afterTools(root, files, baseline) };
+        const ran = new Set<string>();
+        return { items: await afterTools(root, files, baseline, ran), ran };
       }
       return beforeStop(root, baseline, payload.sessionId);
     });
@@ -696,16 +720,22 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
     // Once per session per audience: the before-stop receipt is the user's, every other moment
     // speaks to the agent (design section 3).
     const audience = moment === 'before-stop' ? 'user' : 'agent';
-    const fresh = done.items
-      .map(i => ({ ...i, ...withIdentity(i) }))
-      .filter(i => !wasShown(session, i.identity, audience));
+    const all = done.items.map(i => ({ ...i, ...withIdentity(i) }));
+    const reported = new Set(all.map(i => i.identity));
+    // Acted-on states (design section 4): after an agent edit, a check that ran to completion and
+    // no longer reports a finding on the edited file fixed it; the stop receipt marks what is open.
+    if ('ran' in done) for (const check of done.ran) markFixed(session, check, files, reported);
+    if (moment === 'before-stop') markOpen(session, reported);
+    const fresh = all.filter(i => !wasShown(session, i.identity, audience));
     const { text, shown } = renderShown(moment, fresh);
     if (!text) { await writeSession(root, payload.sessionId, session); return silent; }
     report.shown = shown.length;
     for (const i of shown as Array<HookItem & { identity: string }>) {
       session.keys.add(i.key);
-      markShown(session, i.identity, { code: i.code ?? i.key, subject: i.subject ?? '' }, moment, audience);
+      markShown(session, i.identity, { code: i.code ?? i.key, subject: i.subject ?? '', check: i.check, file: i.file }, moment, audience);
     }
+    // A finding first shown in this stop receipt is open too.
+    if (moment === 'before-stop') markOpen(session, reported);
     await writeSession(root, payload.sessionId, session);
     // At Stop, context for the model makes it continue working; the advisory receipt is for the
     // user instead. Only a policy block reaches the model at Stop.

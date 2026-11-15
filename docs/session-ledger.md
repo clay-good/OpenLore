@@ -69,6 +69,31 @@ The `after-tools` hook also records the session's test runs (see
 and exit status, and the symbol hashes at the last run. The `before-stop` receipt names what was
 edited after that run.
 
+## Hook runs and finding outcomes
+
+Two more records, written by the agent-loop hooks (change: `hook-reliability`). Both stay in
+`.openlore/session-ledger/`; nothing is sent anywhere.
+
+| File | One entry per | Holds |
+|------|---------------|-------|
+| `hook-runs.jsonl` | hook run that reached the hook | time, moment, whole-process time, outcome (`ok`, `error`, `overrun`), findings shown. Cut to its newest half past 1 MB |
+| `hook-delivered/<session>.json` | harness session | each finding shown, by identity (code, subject, proof): who saw it, and its state |
+
+What happened to a finding the hooks showed, as `openlore status` counts it:
+
+| State | Rule |
+|-------|------|
+| `fixed` | after an agent edit to its file, the same check ran to completion on that file and did not report it |
+| `decided` | a decision's title, rationale, or consequences cites its id (`f:1a2b3c4d`); joined when `openlore status` runs |
+| `open` | the session's stop receipt still reported it |
+| `not assessed` | none of the above: the check did not run again |
+
+Limits: without a harness `session_id` nothing is recorded per session. A check that failed or timed
+out proves nothing, so the finding stays not assessed. A decision that does not cite the id is not
+counted. OpenLore cannot read the agent's final message: `open` means the stop receipt, which you
+see, still listed it. One problem found by two checks (for example a phantom import after an edit and
+`verify_change` at stop) is two findings. A crash before the hook code loads is not counted.
+
 ## Lease tokens
 
 `orient` and `recall` return a `leaseToken` (`lt_` and 20 hex characters) naming the functions and

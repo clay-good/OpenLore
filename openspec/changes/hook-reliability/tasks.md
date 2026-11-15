@@ -128,17 +128,21 @@ nothing outside its own folder; every file below is edited when the group is bui
 
 ## 7. Acted-on counts
 
-- [ ] 7.1 In `src/cli/commands/hook.ts`, set finding states in the session record: `fixed` and
+- [x] 7.1 In `src/cli/commands/hook.ts`, set finding states in the session record: `fixed` and
   `open` by the rules of design section 4, at `after-tools` (for the edited file's checks) and
   `before-stop`. A check that failed or timed out changes no state. Test:
   `src/cli/commands/hook.test.ts`. Done when: show, edit away, re-run gives `fixed`; show, stop
   gives `open`; a failed check leaves the state unset.
-- [ ] 7.2 In `readHookHealth`, count `decided` by joining finding ids with decision text from
+- [x] 7.2 In `readHookHealth`, count `decided` by joining finding ids with decision text from
   `loadDecisionStore` (`src/core/decisions/store.ts:32`, `readOnly: true`), and add
   `fixed / decided / open / not assessed` to the health line and `hookHealth`. Test:
   `src/core/services/hook-health.test.ts`. Done when: a decision whose rationale contains
   `f:1a2b3c4d` moves that finding to `decided`, and the 4 counts sum to findings shown.
-- [ ] 7.3 Docs: `docs/session-ledger.md` (new section "Hook runs and finding outcomes": the 2 files,
+  Built (2026-11-14): counts are per distinct finding (one identity seen by the agent and the user
+  counts once), with precedence fixed > decided > open > not assessed. They are in `--json` as
+  `hookOutcomes` beside `hookHealth`. A fixed finding that is reported again is shown again and is
+  no longer fixed.
+- [x] 7.3 Docs: `docs/session-ledger.md` (new section "Hook runs and finding outcomes": the 2 files,
   the 4 states, local only, never sent) and `docs/install.md` (health line). Test: `src/doc-claim-sync.test.ts`. Done when: both
   pages state the limits from `proposal.md`.
 
