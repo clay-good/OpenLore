@@ -7,6 +7,12 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Added
 
+- **`npm run bench:select-tests`: does test selection name the tests real changes had to touch?**
+  It replays recent commits: index the parent, apply only the production changes, ask
+  `select_tests`, and compare with the test files the commit modified. Local and deterministic.
+  First run over 20 commits: 46 of 55 modified tests selected (84%), 82 test files selected on
+  average out of about 700.
+
 - **The before-stop receipt carries three certificates.** When the session diff touches a
   `.ts/.tsx/.js/.jsx/.py` file, the receipt names each exported symbol the change breaks and the
   files that use it (`certify_public_surface`). When it touches an OpenAPI, protobuf or GraphQL file,
