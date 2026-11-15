@@ -5,7 +5,7 @@ nothing outside its own folder; every file below is edited when the group is bui
 
 ## 1. Measure
 
-- [ ] 1.1 Add `scripts/bench-hooks.ts` (new) and the fixture builder `src/cli/commands/hook-fixture.ts`
+- [x] 1.1 Add `scripts/bench-hooks.ts` (new) and the fixture builder `src/cli/commands/hook-fixture.ts`
   (new: 200 files, 2,000 functions, one `openlore analyze`). Run each of the four moments 30 times
   on the fixture and on this repository; print p50 and p95 for the handler in-process and for the
   spawned CLI. Test: `src/cli/commands/hook-fixture.test.ts` (new: the fixture has the stated size).

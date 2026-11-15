@@ -36,6 +36,7 @@
     "bench": "tsx scripts/bench.ts",
     "bench:mcp": "tsx scripts/bench-mcp.ts",
     "bench:watch": "tsx scripts/bench-watch.ts",
+    "bench:hooks": "tsx scripts/bench-hooks.ts",
     "bench:agent": "tsx scripts/bench-agent.ts",
     "bench:surface": "tsx scripts/bench-preset-surface.ts",
     "bench:selection": "tsx scripts/bench-preset-selection.ts",
