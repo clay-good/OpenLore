@@ -7018,6 +7018,17 @@ export class CallGraphBuilder {
     const DEFAULT_IMPORT_RE = /^\s*import\s+(?:type\s+)?(\w+)\s+from\s+['"](\.[^'"]+)['"]/gm;
     // Members of an imported object literal, per (file, name), computed once.
     const nodesByFile = new Map<string, FunctionNode[]>();
+    const indexNodesByFile = () => {
+      if (nodesByFile.size > 0) return;
+      for (const n of allNodes.values()) {
+        if (n.isTest || n.isExternal) continue;
+        (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
+      }
+    };
+    const classMembers = (sourceFile: string, name: string): FunctionNode[] => {
+      indexNodesByFile();
+      return (nodesByFile.get(sourceFile) ?? []).filter(n => n.className === name);
+    };
     const memberCache = new Map<string, FunctionNode[]>();
     const objectLiteralMembers = (sourceFile: string, name: string): FunctionNode[] => {
       const key = `${sourceFile}\0${name}`;
@@ -7029,12 +7040,7 @@ export class CallGraphBuilder {
       if (content !== undefined && content.includes(name) && content.includes('{')) {
         const span = objectLiteralSpan(content, name);
         if (span) {
-          if (nodesByFile.size === 0) {
-            for (const n of allNodes.values()) {
-              if (n.isTest || n.isExternal) continue;
-              (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
-            }
-          }
+          indexNodesByFile();
           members = (nodesByFile.get(sourceFile) ?? []).filter(n => n.startIndex > span[0] && n.endIndex <= span[1]);
         }
       }
@@ -7065,6 +7071,11 @@ export class CallGraphBuilder {
       const emitEdge = (name: string, sourceFile: string) => {
         let candidates = trie.findBySimpleName(name)
           .filter(n => n.filePath === sourceFile && !n.isTest && !n.isExternal);
+        if (candidates.length === 0) {
+          // An imported class: the test constructs it and calls its methods, often inside anonymous
+          // `it` callbacks that have no node, so no call edge reaches them.
+          candidates = classMembers(sourceFile, name);
+        }
         if (candidates.length === 0) {
           // An imported object literal (an adapter, a handler table): its methods are indexed by
           // method name only, so the import names none of them. They lie inside its span.

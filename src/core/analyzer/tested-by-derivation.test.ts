@@ -68,6 +68,18 @@ describe('tested_by derivation — relative paths (bug B)', () => {
     expect(testedBy('src/calc.ts::add')).toContain('src/calc.test.ts::*');
   });
 
+  it('an imported class links its methods', async () => {
+    // The methods are called inside anonymous `it` callbacks, which have no node.
+    const files = [
+      { path: 'src/watcher.ts', content: 'export class Watcher {\n  start() { return 1; }\n  stop() { return 2; }\n}\nexport function helper() { return 3; }\n', language: 'TypeScript' },
+      { path: 'src/watcher.test.ts', content: 'import { Watcher } from "./watcher.js";\nit("starts", () => { const w = new Watcher(); expect(w.start()).toBe(1); w.stop(); });\n', language: 'TypeScript' },
+    ];
+    const cg = serializeCallGraph(await new CallGraphBuilder().build(files));
+    const linked = cg.edges.filter(e => e.kind === 'tested_by' && e.calleeId === 'src/watcher.test.ts::*').map(e => e.callerId).sort();
+    expect(linked).toEqual(expect.arrayContaining(['src/watcher.ts::Watcher.start', 'src/watcher.ts::Watcher.stop']));
+    expect(linked).not.toContain('src/watcher.ts::helper');
+  });
+
   it('marks newly supported language conventions and derives tested_by edges', async () => {
     const files = [
       { path: 'lib/calc.rb', content: 'def add(a, b)\n  a + b\nend\n', language: 'Ruby' },
