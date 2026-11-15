@@ -96,6 +96,10 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **JavaScript functions are labeled JavaScript.** Functions in `.js`, `.mjs`, `.cjs` and `.jsx`
+  files were stored with `language: "TypeScript"`, so per-language answers (language support,
+  filters, summaries) counted them as TypeScript. Extraction itself is unchanged. (#724 follow-up)
+
 - **TypeScript files that use `import('x').T` types, `typeof import(…)`, `using` as a variable, or
   `export type *` no longer parse with errors.** The bundled grammar cannot parse these; a
   length-preserving, parse-only mask now hides them from it. On this repository: files with parse
