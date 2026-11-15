@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hookRunsPath, readFindingOutcomes, readHookHealth, recordHookRun } from './hook-health.js';
+import { errorReason, hookRunsPath, readFindingOutcomes, readHookHealth, recordHookRun } from './hook-health.js';
 
 const dirs: string[] = [];
 const readOnly: string[] = [];
@@ -81,6 +81,25 @@ describe('readHookHealth', () => {
       { moment: 'prompt-submitted', runs: 1, lastRun: at(10_000), p95Ms: 400, errors: 1, overruns: 0, shown: 0 },
       { moment: 'after-tools', runs: 20, lastRun: at(30_000), p95Ms: 100, errors: 0, overruns: 1, shown: 19 },
     ]);
+  });
+});
+
+describe('hook run error reasons', () => {
+  it('records why a run failed, as one bounded line, and reports the newest per moment', async () => {
+    const root = fresh();
+    await recordHookRun(root, { moment: 'prompt-submitted', ms: 10, outcome: 'error', shown: 0, reason: errorReason(new TypeError('x is not a function\n    at f (a.ts:1)')), t: at(20_000) });
+    await recordHookRun(root, { moment: 'prompt-submitted', ms: 10, outcome: 'error', shown: 0, reason: `Error: \u001b[31m${'y'.repeat(500)}`, t: at(10_000) });
+    // Only an error carries a reason: an ok run's reason is not written.
+    await recordHookRun(root, { moment: 'after-tools', ms: 10, outcome: 'ok', shown: 0, reason: 'ignored', t: at(5_000) });
+    const lines = readFileSync(hookRunsPath(root), 'utf8').trim().split('\n').map(l => JSON.parse(l) as { reason?: string });
+    expect(lines[0].reason).toBe('TypeError: x is not a function');
+    expect(lines[1].reason).toMatch(/^Error: \S*y+$/);
+    expect(lines[1].reason!.length).toBeLessThanOrEqual(160);
+    expect(lines[1].reason).not.toContain('\u001b');
+    expect(lines[2].reason).toBeUndefined();
+    const health = readHookHealth(root, NOW);
+    expect(health.find(h => h.moment === 'prompt-submitted')!.lastError).toEqual({ t: at(10_000), reason: lines[1].reason });
+    expect(health.find(h => h.moment === 'after-tools')!.lastError).toBeUndefined();
   });
 });
 

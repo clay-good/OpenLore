@@ -36,7 +36,7 @@ import {
 } from '../../core/services/one-shot-index-build.js';
 import { readStdin } from '../../utils/stdin.js';
 import { findingIdentity, markShown, readSession, wasShown, writeSession } from '../../core/services/hook-session.js';
-import { recordHookRun, type HookOutcome } from '../../core/services/hook-health.js';
+import { errorReason, recordHookRun, type HookOutcome } from '../../core/services/hook-health.js';
 import { autoInitSuppression, isInsideGitWorkTree, recordDetachedRepair } from '../../core/services/cold-start-bootstrap.js';
 import { seedFromSiblingCheckout, servingSeededIndex } from '../../core/runtime/seed-from-sibling.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
@@ -75,7 +75,7 @@ export async function injectOutput(
   taskOpt: string | undefined,
   buildNote?: string,
   silentWithoutIndex = false,
-  run?: { outcome: HookOutcome },
+  run?: { outcome: HookOutcome; reason?: string },
 ): Promise<string> {
   let prompt = taskOpt ?? '';
   let sessionId: string | undefined;
@@ -98,7 +98,7 @@ export async function injectOutput(
     // Quiet logger too: a hook writes nothing to stderr either ("[ok] Successfully validated…").
     const block = await withQuietStdout(() => withLoggerOptions({ quiet: true }, () => buildInjection(directory, prompt, evaluation => {
       // A failed lookup is silent to the agent and counted for the operator.
-      if (evaluation.reason === 'error' && run) run.outcome = 'error';
+      if (evaluation.reason === 'error' && run) { run.outcome = 'error'; if (evaluation.error) run.reason = evaluation.error; }
       withheld = evaluation.passes ? undefined : evaluation.reason;
       if (!debug) return;
       const verdict = evaluation.passes ? 'passed' : 'suppressed';
@@ -141,9 +141,9 @@ export async function injectOutput(
     // the always-on UserPromptSubmit path. A bare console.log is invisible to the terminal-sink
     // guard, which only inspects INTERPOLATIONS — which is why this leaked for so long.
     return out ? safe(out, { keepNewlines: true }) : '';
-  } catch {
+  } catch (error) {
     // buildInjection is fail-open; guard the assembly too: never throw.
-    if (run) run.outcome = 'error';
+    if (run) { run.outcome = 'error'; run.reason = errorReason(error); }
     return '';
   }
 }
@@ -448,7 +448,7 @@ prints a short session-start primer (used by the install SessionStart hook).
     // moment — index bootstrap and lookup — under its runtime limit (change: hook-reliability).
     if (opts.inject) {
       if (promptSubmittedOff(root)) return;
-      const run: { outcome: HookOutcome } = { outcome: 'ok' };
+      const run: { outcome: HookOutcome; reason?: string } = { outcome: 'ok' };
       const out = await withinLimit(async () => {
         try {
           const build = await bootstrapOneShotIndex(root);
@@ -456,13 +456,14 @@ prints a short session-start primer (used by the install SessionStart hook).
           return await injectOutput(directory, task, build && oneShotBuildNote(build), !building && !hasAnalysis(root) && !isInsideGitWorkTree(root), run);
         } catch (error) {
           run.outcome = 'error';
+          run.reason = errorReason(error);
           throw error;
         }
       }, PROMPT_SUBMITTED_LIMIT_MS);
       if (out === TIMED_OUT) run.outcome = 'overrun';
       if (out !== TIMED_OUT && out) console.log(out);
       // Hook health (change: hook-reliability, task 6.1): whole-process time, after the output.
-      await recordHookRun(root, { moment: 'prompt-submitted', ms: process.uptime() * 1000, outcome: run.outcome, shown: 0 });
+      await recordHookRun(root, { moment: 'prompt-submitted', ms: process.uptime() * 1000, outcome: run.outcome, shown: 0, ...(run.reason ? { reason: run.reason } : {}) });
       // Past the limit: stop the work still running.
       if (out === TIMED_OUT) process.exit(0);
       return;

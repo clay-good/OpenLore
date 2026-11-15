@@ -408,6 +408,11 @@ describe('openlore status — hook health (change: hook-reliability, task 6.2)',
       lines.length = 0;
       await statusCommand.parseAsync(['node', 'openlore']);
       expect(lines.join('\n')).toMatch(/Hook health\s+before-edit just now, p95 0\.3 s — 0 error\(s\), 1 overrun\(s\), 0 finding\(s\) shown/);
+      // A failed run's reason is shown, so an error count can be acted on.
+      await writeFile(join(root, '.openlore', 'session-ledger', 'hook-runs.jsonl'), `${JSON.stringify({ t: new Date().toISOString(), moment: 'before-stop', ms: 300, outcome: 'error', shown: 0, reason: 'TypeError: x is not a function' })}\n`, { flag: 'a' });
+      lines.length = 0;
+      await statusCommand.parseAsync(['node', 'openlore']);
+      expect(lines.join('\n')).toMatch(/1 error\(s\), 1 overrun\(s\).*last error: before-stop just now: TypeError: x is not a function/);
     } finally {
       console.log = log;
       process.chdir(cwd);

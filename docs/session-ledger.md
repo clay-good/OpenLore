@@ -76,7 +76,7 @@ Two more records, written by the agent-loop hooks (change: `hook-reliability`). 
 
 | File | One entry per | Holds |
 |------|---------------|-------|
-| `hook-runs.jsonl` | hook run that reached the hook | time, moment, whole-process time, outcome (`ok`, `error`, `overrun`), findings shown. Cut to its newest half past 1 MB |
+| `hook-runs.jsonl` | hook run that reached the hook | time, moment, whole-process time, outcome (`ok`, `error`, `overrun`), findings shown, and for an `error` its reason (one line, 160 characters at most). Cut to its newest half past 1 MB |
 | `hook-delivered/<session>.json` | harness session | each finding shown, by identity (code, subject, proof): who saw it, and its state |
 
 What happened to a finding the hooks showed, as `openlore status` counts it:

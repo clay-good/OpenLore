@@ -493,6 +493,8 @@ describe('the run report for hook health (change: hook-reliability, task 6.1)', 
     const { r, report } = await capture('before-stop', payload(root));
     expect(r).toEqual({ stdout: '', exitCode: 0 });
     expect(report.outcome).toBe('error');
+    // What failed is kept for hook health, one line, and never printed to the agent.
+    expect(report.reason).toMatch(/^TypeError: /);
   });
 
   it('outside an OpenLore repository there is no root, so nothing is recorded', async () => {

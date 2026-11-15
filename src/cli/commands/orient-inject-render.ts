@@ -382,6 +382,8 @@ export interface RelevanceGateEvaluation {
   failedCriteria: string[];
   /** Present when `passes` is false: why the briefing was withheld. */
   reason?: WithholdReason;
+  /** For reason `error`: what failed, as one bounded line (hook health, never shown to the agent). */
+  error?: string;
 }
 
 function containsExactIdentifier(prompt: string, name: string): boolean {

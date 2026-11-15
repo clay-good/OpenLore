@@ -231,7 +231,10 @@ export function formatHookHealth(health: MomentHealth[], now = Date.now(), outco
   const findings = outcomes
     ? `${outcomes.total} finding(s) shown: ${outcomes.fixed} fixed, ${outcomes.decided} decided, ${outcomes.open} open, ${outcomes.notAssessed} not assessed`
     : `${shown} finding(s) shown`;
-  return `${moments.join('; ')} — ${errors} error(s), ${overruns} overrun(s), ${findings} (last 7 days)`;
+  // The newest recorded failure, so an error count can be acted on.
+  const last = health.filter(h => h.lastError).sort((a, b) => b.lastError!.t.localeCompare(a.lastError!.t))[0];
+  const lastError = last ? `; last error: ${last.moment} ${formatAge(now - Date.parse(last.lastError!.t))}: ${last.lastError!.reason}` : '';
+  return `${moments.join('; ')} — ${errors} error(s), ${overruns} overrun(s), ${findings} (last 7 days)${lastError}`;
 }
 
 /** Collect the index's self-state without mutating anything. */

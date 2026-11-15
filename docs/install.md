@@ -444,10 +444,11 @@ or before-stop moment, so test runs recorded there are not yet stated at stop.
   gone, and about an event that runs two different OpenLore commands for the same step (a second
   checkout, or a group an older install wrote without its marker).
 - **Health, for you.** Each run that reaches the hook is recorded in
-  `.openlore/session-ledger/hook-runs.jsonl` (moment, whole-process time, outcome, findings shown;
-  local only, never sent). `openlore status` prints one `Hook health` line for the last 7 days: each
-  moment's last run and p95, the errors and overruns, and the findings shown, counted as fixed,
-  decided, open, or not assessed (`hookHealth` and `hookOutcomes` in `--json`; the rules are in
+  `.openlore/session-ledger/hook-runs.jsonl` (moment, whole-process time, outcome, findings shown,
+  and for an error what failed, as one line; local only, never sent, never shown to the agent).
+  `openlore status` prints one `Hook health` line for the last 7 days: each moment's last run and
+  p95, the errors and overruns, the most recent error's reason, and the findings shown, counted as
+  fixed, decided, open, or not assessed (`hookHealth` and `hookOutcomes` in `--json`; the rules are in
   [session ledger](session-ledger.md#hook-runs-and-finding-outcomes)). With no run recorded, the line is absent. A run that never reached the hook (the CLI
   failed to load) is not counted.
 - **Silent on failure.** A check that throws or does not load, a passed time limit, a missing,
