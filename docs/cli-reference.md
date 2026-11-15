@@ -144,7 +144,8 @@ openlore install [options]   # wire agents (this repo AND your user scope),
                          #   continue, agents-md
   --preset <name>        # MCP tool preset to wire: substrate (default; navigation core +
                          #   spec workflows + recall + verify_claim + blast_radius), navigation (lean escape),
-                         #   minimal, memory, verify, federation, coordination, or full
+                         #   minimal, memory, verify, federation, coordination,
+                         #   plugin (evidence set + verify_change), or full
   --all-tools            # Wire the full 84-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
