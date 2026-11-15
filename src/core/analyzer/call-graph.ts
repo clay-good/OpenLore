@@ -1388,7 +1388,9 @@ async function extractTSGraph(
       filePath,
       className,
       isAsync,
-      language: 'TypeScript',
+      // The file's own language: a `.js/.mjs/.cjs/.jsx` function is JavaScript, though both are
+      // parsed by the same extractor (every consumer accepts either; ROADMAP P0, #724).
+      language,
       startIndex: fnNode.startIndex,
       endIndex: fnNode.endIndex,
       fanIn: 0,

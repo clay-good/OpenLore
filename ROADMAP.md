@@ -39,7 +39,6 @@ benchmark task 2.1 is not doing (owner, 2026-11-15): `verify_change` stays out o
 |-----|-------|--------|
 | The watcher ignores `.openlore-ignore` and reads ignore rules only at start | `src/core/services/mcp-watcher.ts` | #717 |
 | Three project-root walkers use three different rules | `hook.ts` `openloreRoot`, Pi `piProjectRoot`, statusline `openloreProjectRoot` | #722 / #723 |
-| JS and JSX nodes are labeled TypeScript | `src/core/analyzer/call-graph.ts` | #724 |
 | A Java field of an external type is still fanned out by name | Java resolution in `call-graph.ts` | #724 |
 | OpenAPI enum details render double-escaped | `src/core/services/mcp-handlers/service-contract.ts` | #724 |
 | CI runs 12 of 26 integration test files | `package.json` `test:integration:ci` | #724 |
