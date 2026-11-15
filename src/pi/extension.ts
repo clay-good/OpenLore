@@ -82,7 +82,7 @@ import { redirectConsoleToStderr } from '../utils/quiet-stdout.js';
 import {
   frameServedContent,
   readAnalysisContentProvenance,
-  reviewedFileContentProvenance,
+  specCorpusContentProvenance,
 } from '../core/services/served-content.js';
 import { safeJoin } from '../utils/path-confinement.js';
 import { globalOpenLoreConfigPath, readConfigObject, readLayeredConfig, readLayeredConfigSync } from '../utils/config-layers.js';
@@ -3037,7 +3037,7 @@ function registerOpenlore(
     if (await piContextMode(projectDir) === 'full') {
       const [analysisProvenance, specProvenance] = await Promise.all([
         readAnalysisContentProvenance(projectDir),
-        reviewedFileContentProvenance(projectDir, 'openspec'),
+        specCorpusContentProvenance(projectDir),
       ]);
       const digest = await readDigest(projectDir);
       if (digest) blocks.push(frameServedContent(
