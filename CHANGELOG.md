@@ -28,6 +28,11 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **Each hook finding is stated once per session, and carries an id.** A finding is identified by
+  its code, its subject, and the text of the line it cites (not the line number), and is printed
+  with an id such as `[f:1a2b3c4d]`. Lines added above it no longer repeat it; a change to the
+  cited line now does (before, it stayed hidden). The prompt hook states its no-index line and its
+  build note once per session instead of on every prompt.
 - **The prompt hook follows the same rules as the other hook moments.** `openlore orient --inject`
   now has its own off switch, `hooks.prompt-submitted: false` (which also starts no index build), a
   3 s time limit, and silence on a failed lookup: the "orientation failed for this turn" line is
