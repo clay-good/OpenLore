@@ -759,3 +759,31 @@ describe('tools/list payload budget (spec-28)', () => {
     }
   });
 });
+
+describe('the plugin preset (change: reframe-governance-as-agent-evidence)', () => {
+  const PLUGIN_TOOLS = [
+    'analyze_impact', 'blast_radius', 'find_path', 'get_function_skeleton', 'get_subgraph', 'orient',
+    'recall', 'search_code', 'suggest_insertion_points', 'verify_change', 'verify_claim',
+  ];
+  it('is exactly the 11 evidence tools, each registered', () => {
+    expect([...TOOL_PRESETS.plugin].sort()).toEqual(PLUGIN_TOOLS);
+    const registered = new Set(TOOL_DEFINITIONS.map(t => t.name));
+    for (const name of PLUGIN_TOOLS) expect(registered.has(name), name).toBe(true);
+    expect(selectActiveTools(TOOL_DEFINITIONS, { preset: 'plugin' }).map(t => t.name).sort()).toEqual(PLUGIN_TOOLS);
+  });
+  it('stays small: at most 12 tools', () => {
+    expect(TOOL_PRESETS.plugin.size).toBeLessThanOrEqual(12);
+  });
+  it('carries no spec-generation tool', () => {
+    expect([...TOOL_PRESETS.plugin].filter(name => name.startsWith('prepare_spec_'))).toEqual([]);
+  });
+  it('offers nothing the npm default lacks, except verify_change until a benchmark run admits it to substrate', () => {
+    // design 1 gate: verify_change joins substrate only with a conforming benchmark-protocol run.
+    const outside = [...TOOL_PRESETS.plugin].filter(name => !TOOL_PRESETS.substrate.has(name));
+    expect(outside).toEqual(TOOL_PRESETS.substrate.has('verify_change') ? [] : ['verify_change']);
+  });
+  it('leaves substrate unchanged at its 15 tools', () => {
+    expect(TOOL_PRESETS.substrate.size).toBe(15);
+  });
+});
+

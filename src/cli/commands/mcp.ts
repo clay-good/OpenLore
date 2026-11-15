@@ -2690,6 +2690,17 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
     'recall', 'verify_claim', 'blast_radius',
     'prepare_spec_generation', 'prepare_spec_repair',
   ]),
+  // The Claude Code plugin's set (change: reframe-governance-as-agent-evidence, design 1-2):
+  // deterministic evidence tools only. It leaves out spec generation (prepare_spec_*) and the
+  // orientation views a plugin user rarely needs (trace_execution_path, get_landmarks, get_map),
+  // and adds verify_change, the pull form of the before-stop moment. Every other tool is in
+  // `substrate` too; verify_change joins `substrate` only after a benchmark-protocol run
+  // (DefaultSurfaceDecisionsRideTheBenchmarkProtocol). Every tool left out stays available under
+  // its own name through another preset, `--preset full`, and Pi.
+  plugin: new Set([
+    'orient', 'search_code', 'get_subgraph', 'analyze_impact', 'suggest_insertion_points',
+    'get_function_skeleton', 'find_path', 'recall', 'verify_claim', 'blast_radius', 'verify_change',
+  ]),
 };
 
 /**
@@ -2714,6 +2725,7 @@ export const STANDING_CONTEXT_BUDGETS: Record<string, {
   verify: { baselineTokens: 2_075, maxTokens: 2_220, rationale: 'Grew with verify_change then certify_provenance (add-verification-feedback-loop, add-change-provenance-certificate); exact measured baseline plus 7.0% headroom.' },
   federation: { baselineTokens: 3_837, maxTokens: 4_100, rationale: 'Exact v1 wire baseline plus 6.9% headroom.' },
   coordination: { baselineTokens: 3_476, maxTokens: 3_720, rationale: 'Grew with certify_merge, fleet_status, then declare_footprint (add-merge-semantic-certificate, add-fleet-coordination-arc, add-peer-footprint-board); exact measured baseline plus 7.0% headroom.' },
+  plugin: { baselineTokens: 4_225, maxTokens: 4_520, rationale: 'The Claude Code plugin set (change: reframe-governance-as-agent-evidence); exact measured baseline plus 7.0% headroom.' },
   substrate: { baselineTokens: 5_131, maxTokens: 5_500, rationale: 'Exact v1 wire baseline plus 7.2% headroom.' },
   full: { baselineTokens: 27_125, maxTokens: 28_400, rationale: 'Grew with verify_change, certify_provenance, certify_merge, get_handoff_briefing, certify_service_contract, and declare_footprint; re-baselined at 27,125 measured (add-peer-footprint-board) plus 4.7% headroom.' },
 };
@@ -3502,7 +3514,7 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the "${LEAN_DEFAULT_PRESET}" surface — the graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path), spec preparation (prepare_spec_generation + prepare_spec_repair), and governance reads (recall + verify_claim + blast_radius) — NOT the full registry. "navigation" = the lean navigate-only escape (the graph-traversal core alone, no governance or spec-workflow reads); "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "configuration" = provider-free configure_openlore management; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + certify_merge + fleet_status + declare_footprint + analyze_impact + find_path; "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
+  .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the "${LEAN_DEFAULT_PRESET}" surface — the graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path), spec preparation (prepare_spec_generation + prepare_spec_repair), and governance reads (recall + verify_claim + blast_radius) — NOT the full registry. "navigation" = the lean navigate-only escape (the graph-traversal core alone, no governance or spec-workflow reads); "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "configuration" = provider-free configure_openlore management; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + certify_merge + fleet_status + declare_footprint + analyze_impact + find_path; "plugin" = the Claude Code plugin's 11 evidence tools (orient, search_code, get_subgraph, analyze_impact, suggest_insertion_points, get_function_skeleton, find_path, recall, verify_claim, blast_radius, verify_change); "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
   .option('--all-tools', `Expose the full surface — all ${TOOL_DEFINITIONS.length} tools (alias for --preset full). Opt-in breadth; the "${LEAN_DEFAULT_PRESET}" default is recommended.`)
   .option('--list-tools', 'Print the active tool surface grouped by capability family (navigate/change/remember/verify/coordinate/federate) and exit — does not start the server. Respects --preset / --all-tools.')
   .action((options: McpServerOptions) => startMcpServer(options));
