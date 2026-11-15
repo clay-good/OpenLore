@@ -21,7 +21,7 @@ paths:
       operationId: createOrder
       requestBody:
         required: true
-        content: {application/json: {schema: {type: object, required: [sku, qty], properties: {sku: {type: string}, qty: {type: integer}, note: {type: string}}}}}
+        content: {application/json: {schema: {type: object, required: [sku, qty], properties: {sku: {type: string}, qty: {type: integer, enum: [1, 5]}, note: {type: string}}}}}
       responses: {'201': {description: created}}
   /orders/{id}:
     get:
@@ -53,7 +53,7 @@ describe('contract elements in the briefings', () => {
     const r = await contractsForFiles(root, ['src/orders.ts']);
     expect(r?.contracts).toEqual([
       { operation: 'GET /v1/orders/{id}', spec: 'api/openapi.yaml:13', route: { file: 'src/orders.ts', method: 'GET', path: '/orders/:id' }, deprecated: true, matchedWithoutBasePath: true, requiredParams: ['id (path, string)'], requiredBody: [] },
-      { operation: 'POST /v1/orders', operationId: 'createOrder', spec: 'api/openapi.yaml:6', route: { file: 'src/orders.ts', method: 'POST', path: '/orders' }, matchedWithoutBasePath: true, requiredParams: [], requiredBody: ['qty (integer)', 'sku (string)'] },
+      { operation: 'POST /v1/orders', operationId: 'createOrder', spec: 'api/openapi.yaml:6', route: { file: 'src/orders.ts', method: 'POST', path: '/orders' }, matchedWithoutBasePath: true, requiredParams: [], requiredBody: ['qty (integer enum 1 | 5)', 'sku (string)'] },
     ]);
   });
 

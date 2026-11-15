@@ -39,7 +39,6 @@ edit-time hooks, guarded to OpenLore projects (#762).
 | Fix | Where | Source |
 |-----|-------|--------|
 | Three project-root walkers use three different rules | `hook.ts` `openloreRoot`, Pi `piProjectRoot`, statusline `openloreProjectRoot` | #722 / #723 |
-| OpenAPI enum details render double-escaped | `src/core/services/mcp-handlers/service-contract.ts` | #724 |
 | Two tool input schemas have properties without descriptions; 15 descriptions exceed 800 characters | `explain_retrieval_miss`, `declare_footprint` in `src/cli/commands/mcp.ts` | `mcp-quality` spec |
 
 ## P1: the agent-evidence direction (in this order)

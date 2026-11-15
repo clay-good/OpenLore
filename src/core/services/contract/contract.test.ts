@@ -262,6 +262,15 @@ describe('adversarial review regressions', () => {
   it('enum values with commas do not collide', () => {
     expect(rules(get("{type: object, properties: {e: {type: string, enum: [a, 'b,c']}}}"), get('{type: object, properties: {e: {type: string, enum: [a, b, c]}}}'))).toEqual(['response-property-type-changed e']);
   });
+
+  it('an enum change reads as its values, not as escaped JSON', () => {
+    const details = (a: string, b: string) => diffContracts([doc(a)], [doc(b)]).map(c => c.detail);
+    expect(details(get('{type: object, properties: {e: {type: string, enum: [open, shipped]}}}'), get('{type: object, properties: {e: {type: string, enum: [open]}}}')))
+      .toEqual(['response property `e`: string enum "open" | "shipped" → string enum "open"']);
+    const p = (t: string) => spec(`  /a:\n    get:\n      parameters: [{name: f, in: query, schema: ${t}}]\n      responses: {'200': {description: ok}}\n`);
+    expect(details(p('{type: integer, enum: [1, 2]}'), p('{type: string, format: date}')))
+      .toEqual(['query parameter `f`: integer enum 1 | 2 → string (date)']);
+  });
 });
 
 describe('second review regressions', () => {

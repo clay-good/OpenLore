@@ -103,6 +103,14 @@ function splitType(t: string | undefined): { base: string; values: string[] } {
   return { base: m?.[1] ?? '', values };
 }
 
+/** An encoded type as an agent reads it: `string:date{…}` → `string (date) enum "a" | "b"`. */
+export function displayType(t: string | undefined): string {
+  if (t === undefined) return '?';
+  const { base, values } = splitType(t);
+  const [types, format] = base.split(':');
+  return `${types || '?'}${format ? ` (${format})` : ''}${values.length ? ` enum ${values.join(' | ')}` : ''}`;
+}
+
 /**
  * A type change. A widening accepts every value the old type accepted: the same types (plus
  * possibly `null` or others) and format, with an enum that only gained values or was dropped.
@@ -142,7 +150,7 @@ function diffParams(file: string, beforeOp: ContractOperation, after: ContractOp
     else {
       if (p.required && !b.required) out.push(change(file, after, 'param-made-required', `${p.in} parameter \`${p.name}\` is now required`, el));
       // A parameter only accepts a wider type safely; any other change breaks some caller.
-      if (typeChange(b.type, p.type) === 'changed') out.push(change(file, after, 'param-type-changed', `${p.in} parameter \`${p.name}\`: ${b.type ?? '?'} → ${p.type ?? '?'}`, el));
+      if (typeChange(b.type, p.type) === 'changed') out.push(change(file, after, 'param-type-changed', `${p.in} parameter \`${p.name}\`: ${displayType(b.type)} → ${displayType(p.type)}`, el));
       if (p.hash !== b.hash) out.push(change(file, after, 'schema-unassessed', `${p.in} parameter \`${p.name}\` changed outside the model (constraints, nested schema, or style)`, el));
     }
   }
@@ -161,7 +169,7 @@ function diffProps(
       else {
         if (p.required && !b.required) out.push(change(file, op, 'body-property-made-required', `request property \`${n}\` is now required`, n));
         const t = typeChange(b.type, p.type);
-        if (t !== 'same') out.push(change(file, op, t === 'widened' ? 'body-property-widened' : 'body-property-type-changed', `request property \`${n}\`: ${b.type ?? '?'} → ${p.type ?? '?'}`, n));
+        if (t !== 'same') out.push(change(file, op, t === 'widened' ? 'body-property-widened' : 'body-property-type-changed', `request property \`${n}\`: ${displayType(b.type)} → ${displayType(p.type)}`, n));
         if (p.hash !== b.hash) out.push(change(file, op, 'schema-unassessed', `request property \`${n}\` changed outside the model (nested schema or constraints)`, n));
       }
     }
@@ -171,7 +179,7 @@ function diffProps(
       if (!p) out.push(change(file, op, 'response-property-removed', `response property \`${n}\` removed`, n));
       else {
         const t = typeChange(b.type, p.type);
-        if (t !== 'same') out.push(change(file, op, t === 'widened' ? 'response-property-widened' : 'response-property-type-changed', `response property \`${n}\`: ${b.type ?? '?'} → ${p.type ?? '?'}`, n));
+        if (t !== 'same') out.push(change(file, op, t === 'widened' ? 'response-property-widened' : 'response-property-type-changed', `response property \`${n}\`: ${displayType(b.type)} → ${displayType(p.type)}`, n));
         if (b.required && !p.required) out.push(change(file, op, 'response-property-made-optional', `response property \`${n}\` may now be absent`, n));
         if (p.hash !== b.hash) out.push(change(file, op, 'schema-unassessed', `response property \`${n}\` changed outside the model (nested schema or constraints)`, n));
       }
