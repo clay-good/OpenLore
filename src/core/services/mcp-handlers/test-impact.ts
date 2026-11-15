@@ -303,9 +303,13 @@ export async function handleSelectTests(
       seeds = narrowed.seeds;
       changeGranularity = narrowed.receipt;
       seededUnchanged = narrowed.seededUnchanged ?? 0;
+      // Only a file the index already holds functions in: a moved or brand-new file has no sibling
+      // whose tests could stand in, and keeps the "not in the index" answer.
       const indexedIds = new Set(cg.nodes.map(n => n.id));
+      const indexedFiles = new Set(cg.nodes.filter(n => !n.isTest && !n.isExternal).map(n => normalizeRelative(n.filePath)));
       for (const [file, change] of narrowed.set?.byFile ?? []) {
-        if (change.granularity === 'symbol' && change.appeared.some(id => !indexedIds.has(id))) newSymbolFiles.add(normalizeRelative(file));
+        if (change.granularity === 'symbol' && indexedFiles.has(normalizeRelative(file))
+            && change.appeared.some(id => !indexedIds.has(id))) newSymbolFiles.add(normalizeRelative(file));
       }
       // A test file the diff touched, or a new untracked one, is selected on its own standing — not
       // only if reachability happens to reach it. Only a file the analyzer's own rule calls a test, inside
