@@ -103,8 +103,8 @@ openlore orient [options]
   --metrics              # Report wall time + output size to stderr (opt-in)
   --inject               # Emit a bounded, ignorable task-scoped orientation block
                          #   for a pre-turn agent hook; reads the task from --task
-                         #   or stdin. Fail-open: any failure degrades to a single
-                         #   pointer line at exit 0 (see docs/install.md).
+                         #   or stdin. Briefs only code the prompt names exactly;
+                         #   otherwise silent. Fail-open, exit 0 (see docs/install.md).
 ```
 
 With no `--task`, `orient` prints a session-start primer. Requires `openlore analyze`

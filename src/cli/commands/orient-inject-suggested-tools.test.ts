@@ -1,7 +1,7 @@
 /** orient --inject suggests only tools the wired MCP surface exposes. */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -23,11 +23,15 @@ const { buildInjection } = await import('./orient-inject.js');
 
 describe('buildInjection suggested tools', () => {
   let dir: string;
-  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'openlore-inject-tools-')); });
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-inject-tools-'));
+    await mkdir(join(dir, '.openlore', 'analysis'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'analysis', 'llm-context.json'), '{}');
+  });
   afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 
   it('drops tools outside the default substrate surface when unwired', async () => {
-    const block = await buildInjection(dir, 'add rate limiting to the API');
+    const block = await buildInjection(dir, 'add rate limiting to `openloreRun`');
     expect(block).toContain('Suggested tools: get_subgraph');
     expect(block).not.toContain('record_decision');
     expect(block).not.toContain('check_spec_drift');
@@ -37,7 +41,7 @@ describe('buildInjection suggested tools', () => {
     await writeFile(join(dir, '.mcp.json'), JSON.stringify({
       mcpServers: { openlore: { command: 'openlore', args: ['mcp', '--preset', 'full'] } },
     }));
-    const block = await buildInjection(dir, 'add rate limiting to the API');
+    const block = await buildInjection(dir, 'add rate limiting to `openloreRun`');
     expect(block).toContain('Suggested tools: record_decision, get_subgraph, check_spec_drift');
   });
 
@@ -48,7 +52,7 @@ describe('buildInjection suggested tools', () => {
       await writeFile(join(home, '.claude.json'), JSON.stringify({
         mcpServers: { openlore: { command: '/usr/bin/node', args: ['/x/cli.js', 'mcp', '--preset', 'full'] } },
       }));
-      const block = await buildInjection(dir, 'add rate limiting to the API');
+      const block = await buildInjection(dir, 'add rate limiting to `openloreRun`');
       expect(block).toContain('Suggested tools: record_decision, get_subgraph, check_spec_drift');
     } finally {
       vi.unstubAllEnvs();

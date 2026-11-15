@@ -37,7 +37,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { startDetachedIndexBuild } from '../../core/services/one-shot-index-build.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
-import { pointerLineFor } from './orient-inject-render.js';
+import { SILENCE_CONTRACT_LINE } from './orient-inject-render.js';
 import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { existsSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
@@ -127,7 +127,8 @@ describe('orient command', () => {
   });
 
   describe('--inject (task-scoped injection hook)', () => {
-    it('emits an attributed, ignorable block for a strong match and never errors', async () => {
+    it('emits an attributed, ignorable block for an exact anchor, showing only what it names', async () => {
+      mockExistsSync.mockImplementation((p: unknown) => String(p).endsWith('llm-context.json'));
       mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'covered', questionKind: 'where-is' },
         task: 'auth flow',
         searchMode: 'hybrid',
@@ -140,9 +141,12 @@ describe('orient command', () => {
         callPaths: [],
         suggestedTools: ['orient'],
       });
-      await orientCommand.parseAsync(['--inject', '--task', 'auth flow'], { from: 'user' });
+      await orientCommand.parseAsync(['--inject', '--task', 'why does `authMiddleware` reject this?'], { from: 'user' });
       expect(output()).toContain('[OpenLore]');
       expect(output().toLowerCase()).toContain('ignore');
+      expect(output()).toContain('authMiddleware — src/auth/mw.ts');
+      expect(output()).not.toContain('Spec domains');
+      expect(mockHandleOrient).toHaveBeenCalledWith('/fake/proj', 'authMiddleware', 8, undefined, true, 'distance', expect.objectContaining({ repoWideParseHealth: false }));
       expect(process.exitCode).toBeUndefined();
     });
 
@@ -161,7 +165,8 @@ describe('orient command', () => {
       expect(process.exitCode).toBeUndefined();
     });
 
-    it('reports a suppressed gate to stderr only when injection debug is enabled', async () => {
+    it('a prose prompt is not searched; silence is explained once, and the reason goes to stderr only in debug', async () => {
+      mockExistsSync.mockImplementation((p: unknown) => String(p).endsWith('llm-context.json'));
       mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'weak', questionKind: 'where-is' },
         task: 'update the documentation',
         searchMode: 'bm25_fallback',
@@ -175,15 +180,13 @@ describe('orient command', () => {
 
       await orientCommand.parseAsync(['--inject', '--task', 'update the documentation'], { from: 'user' });
 
-      // A weak match is withheld with its own stated reason, distinct from the
-      // "no lookup was performed" variants (change: scope-advisory-noise-to-touched-code).
-      expect(output()).toBe(pointerLineFor('weak-relevance'));
-      expect(output()).toContain('nothing in the graph matched this turn');
+      // No anchor: no lookup at all, and (with no session id to deduplicate on) the silence
+      // contract line (change: anchor-gated-prompt-briefing).
+      expect(mockHandleOrient).not.toHaveBeenCalled();
+      expect(output()).toBe(SILENCE_CONTRACT_LINE);
       const stderrText = stderrSpy.mock.calls.map(c => String(c[0])).join('');
       expect(stderrText).toContain('[openlore:inject] verdict=suppressed');
-      expect(stderrText).toContain('reason=weak-relevance');
-      expect(stderrText).toContain('failed=');
-      expect(stderrText).not.toContain('hybrid-score');
+      expect(stderrText).toContain('reason=no-anchor');
       expect(output()).not.toContain('verdict=suppressed');
 
       stderrSpy.mockClear();
