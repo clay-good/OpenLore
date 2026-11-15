@@ -49,6 +49,7 @@ import {
   compositeScore,
   buildReason,
 } from './semantic.js';
+import { indexedSpecProvenanceAt, specRootRelOrNull } from './spec-paths.js';
 import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type GraphFreshnessView, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
@@ -62,7 +63,6 @@ import { getSourceRoots, moduleFromPath } from './epistemic-lease.js';
 import { readHotspotArtifact, hotspotsForModules } from './behavioral-hotspots.js';
 import {
   decisionContentProvenance,
-  indexedSpecContentProvenance,
   readAnalysisContentProvenance,
   specCorpusContentProvenance,
   type AnalysisContentProvenance,
@@ -260,6 +260,7 @@ export async function handleOrient(
   const { VectorIndex } = await import('../../analyzer/vector-index.js');
   const { embedderMode, resolveEmbedder, servedRetrievalMode, isKeywordRetrievalMode } = await import('../../analyzer/embedder.js');
   const { SpecVectorIndex } = await import('../../analyzer/spec-vector-index.js');
+  const { specRowProse } = await import('../../analyzer/spec-row-text.js');
 
   const hasCodeIndex = VectorIndex.exists(outputDir);
   const hasSpecIndex = SpecVectorIndex.exists(outputDir);
@@ -554,6 +555,7 @@ export async function handleOrient(
         limit: 3,
         vocabularyExpansion,
       });
+      const specRootRel = await specRootRelOrNull(absDir);
       matchingSpecs = await Promise.all(specResults.map(async r => ({
         domain: r.record.domain,
         section: r.record.section,
@@ -562,10 +564,11 @@ export async function handleOrient(
         matchEvidence: requireMatchEvidence(r.matchEvidence),
         ...(r.expansionTerms?.length ? { expansionTerms: r.expansionTerms } : {}),
         text: r.record.text.slice(0, 300) + (r.record.text.length > 300 ? '…' : ''),
-        provenance: await indexedSpecContentProvenance(
+        provenance: await indexedSpecProvenanceAt(
           absDir,
-          `openspec/specs/${r.record.domain}/spec.md`,
-          [r.record.title, r.record.text],
+          specRootRel,
+          r.record.domain,
+          [r.record.title, specRowProse(r.record.domain, r.record.title, r.record.text)],
         ),
       })));
     } catch {

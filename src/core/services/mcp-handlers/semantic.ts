@@ -3,7 +3,7 @@
  * search_code, suggest_insertion_points, search_specs.
  */
 
-import { join, relative } from 'node:path';
+import { join } from 'node:path';
 import { NO_SPEC_SOURCE, SPEC_SOURCES_LOOKED_FOR, noSpecSourceText } from '../../spec-sources/state.js';
 import {
   INSERTION_SEMANTIC_WEIGHT,
@@ -16,18 +16,16 @@ import {
   INSERTION_ORCHESTRATOR_FAN_OUT_THRESHOLD,
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
-  OPENSPEC_DIR,
   OPENSPEC_SPECS_SUBDIR,
 } from '../../../constants.js';
 import { fileExists } from '../../../utils/command-helpers.js';
-import { resolveOpenspecDir } from '../../../utils/openspec-dir.js';
 import { validateDirectory, safeJoin, loadMappingIndex, specsForFile, functionsForDomain, queryTooLongError, notReadyResult, readCachedContext, getCachedNodeStartLine, refuseUnattestedIndex } from './utils.js';
 import { loadParseHealth, parseHealthBoundary, readabilityShortfall } from './parse-health-boundary.js';
 import { expandHandle, applyTokenBudget, collapseExactDuplicates, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
+import { configuredSpecRoot, indexedSpecProvenanceAt, specRootRelOrNull } from './spec-paths.js';
 import {
   readAnalysisContentProvenance,
-  indexedSpecContentProvenance,
   reviewedFileContentProvenance,
   type AnalysisContentProvenance,
 } from '../served-content.js';
@@ -744,19 +742,6 @@ export async function handleSuggestInsertionPoints(
 /**
  * Return the full content of a spec domain's spec.md plus its mapping entries.
  */
-/**
- * The spec root this project actually uses, normalized.
- *
- * A repo that moved `openspec/` would otherwise have every spec resolved to a
- * path that does not exist — `get_spec` reporting not-found for files plainly on
- * disk, and `list_spec_domains` answering with an empty list.
- */
-async function configuredSpecRoot(absDir: string): Promise<{ absolute: string; relative: string }> {
-  const configured = (await readOpenLoreConfig(absDir).catch(() => null))?.openspecPath ?? OPENSPEC_DIR;
-  const absolute = resolveOpenspecDir(absDir, configured);
-  const relativePath = relative(absDir, absolute).replaceAll('\\', '/');
-  return { absolute, relative: relativePath || '.' };
-}
 
 export async function handleGetSpec(directory: string, domain: string): Promise<unknown> {
   const { existsSync } = await import('node:fs');
@@ -869,6 +854,7 @@ export async function handleSearchSpecs(
   const outputDir = join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
 
   const { SpecVectorIndex } = await import('../../analyzer/spec-vector-index.js');
+  const { specRowProse } = await import('../../analyzer/spec-row-text.js');
   const { resolveEmbedder, embedderMode, isKeywordRetrievalMode } = await import('../../analyzer/embedder.js');
 
   if (!SpecVectorIndex.exists(outputDir)) {
@@ -919,6 +905,7 @@ export async function handleSearchSpecs(
     ? snapshotRetrievalMode
     : semanticRetrievalMode;
   const searchMode = isKeywordRetrievalMode(retrievalMode) ? 'bm25_fallback' : 'hybrid';
+  const specRootRel = await specRootRelOrNull(absDir);
   const servedResults = await Promise.all(results.map(async (r) => ({
     score: r.score,
     scoreKind: r.scoreKind ?? (isKeywordRetrievalMode(retrievalMode) ? 'bm25' : 'cosine_distance'),
@@ -929,10 +916,11 @@ export async function handleSearchSpecs(
     section: r.record.section,
     title: r.record.title,
     text: r.record.text,
-    provenance: await indexedSpecContentProvenance(
+    provenance: await indexedSpecProvenanceAt(
       absDir,
-      `openspec/specs/${r.record.domain}/spec.md`,
-      [r.record.title, r.record.text, ...r.record.linkedFiles],
+      specRootRel,
+      r.record.domain,
+      [r.record.title, specRowProse(r.record.domain, r.record.title, r.record.text), ...r.record.linkedFiles],
     ),
     linkedFiles: r.record.linkedFiles,
     linkedFunctions: mappingIdx ? functionsForDomain(mappingIdx, r.record.domain) : undefined,
@@ -1004,12 +992,14 @@ export async function handleUnifiedSearch(
     vocabularyExpansion: cfg?.retrieval?.vocabularyExpansion !== false,
   });
   const analysisProvenance = await readAnalysisContentProvenance(absDir);
+  const specRootRel = await specRootRelOrNull(absDir);
   const servedResults = await Promise.all(results.map(async result => ({
     ...result,
     provenance: result.source.domain
-      ? await indexedSpecContentProvenance(
+      ? await indexedSpecProvenanceAt(
           absDir,
-          `openspec/specs/${result.source.domain}/spec.md`,
+          specRootRel,
+          result.source.domain,
           [result.source.section, result.source.title].filter((value): value is string => Boolean(value)),
         )
       : analysisProvenance,

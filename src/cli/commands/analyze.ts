@@ -957,7 +957,7 @@ After analysis, agents query the index (openlore orient, or the MCP server). Spe
       const digestWritten = await generateCodebaseDigest(
         artifacts.llmContext,
         depGraph,
-        { rootPath, outputDir: outputPath, repoStructure: artifacts.repoStructure },
+        { rootPath, outputDir: outputPath, repoStructure: artifacts.repoStructure, openspecPath: openloreConfig.openspecPath },
       );
 
       // Generate AI tool config files — prompt user to select which assistants

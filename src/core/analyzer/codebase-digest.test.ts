@@ -50,6 +50,22 @@ describe('generateCodebaseDigest', () => {
     expect(content).toContain('openlore MCP workflow');
   });
 
+  it('lists spec domains from the configured openspecPath, with their real paths', async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'digest-test-'));
+    const out = join(tmpDir, 'out');
+    await mkdir(out);
+    await mkdir(join(tmpDir, 'docs', 'specs', 'payments'), { recursive: true });
+    await writeFile(join(tmpDir, 'docs', 'specs', 'payments', 'spec.md'), '# Payments\n');
+
+    await generateCodebaseDigest(makeContext(), null, { rootPath: tmpDir, outputDir: out, openspecPath: 'docs' });
+    expect(await readFile(join(out, 'CODEBASE.md'), 'utf-8')).toContain('- `payments` — `docs/specs/payments/spec.md`');
+
+    await mkdir(join(tmpDir, 'openspec', 'specs', 'api'), { recursive: true });
+    await writeFile(join(tmpDir, 'openspec', 'specs', 'api', 'spec.md'), '# API\n');
+    await generateCodebaseDigest(makeContext(), null, { rootPath: tmpDir, outputDir: out });
+    expect(await readFile(join(out, 'CODEBASE.md'), 'utf-8')).toContain('- `api` — `openspec/specs/api/spec.md`');
+  });
+
   it('renders reconciled ownership domains without re-inferring them', async () => {
     const tmpDir = await mkdtemp(join(tmpdir(), 'digest-test-'));
     const repoStructure = {
