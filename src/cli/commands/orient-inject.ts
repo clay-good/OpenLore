@@ -26,6 +26,7 @@ import { proposalContextForPrompt } from './proposal-context.js';
 import {
   INJECTION_DEFAULTS,
   classifyTurnIntent,
+  isHarnessEvent,
   pointerLineFor,
   resolveInjectionConfig,
   evaluateRelevanceGate,
@@ -44,6 +45,7 @@ export {
   MIN_INJECTION_TOKEN_BUDGET,
   POINTER_LINE,
   classifyTurnIntent,
+  isHarnessEvent,
   pointerLineFor,
   resolveInjectionConfig,
   evaluateRelevanceGate,
@@ -146,11 +148,13 @@ async function buildTaskInjection(
     const evaluation: RelevanceGateEvaluation = { passes: false, passedCriteria: [], failedCriteria, reason };
     onGateEvaluation?.(evaluation);
     recordInjectionVerdict(directory, evaluation);
-    return reason === 'error' ? '' : pointerLineFor(reason);
+    return reason === 'error' || reason === 'harness-event' ? '' : pointerLineFor(reason);
   };
 
   const task = prompt.trim();
   if (!task) return withhold('empty-prompt', ['empty-prompt']);
+  // A harness notice is not a turn: no lookup, and nothing said (change: hook-reliability).
+  if (isHarnessEvent(task)) return withhold('harness-event', ['harness-event']);
 
   // The intent gate runs BEFORE any structural lookup: a turn about pushing,
   // merging, or releasing needs no briefing, so orienting it is pure cost. It
@@ -175,7 +179,7 @@ async function buildTaskInjection(
     recordInjectionVerdict(directory, evaluation);
     if (!evaluation.passes) {
       // An orientation error result is silent, like a thrown one (change: hook-reliability).
-      return evaluation.reason === 'error' ? '' : pointerLineFor(evaluation.reason ?? 'weak-relevance');
+      return evaluation.reason === 'error' || evaluation.reason === 'harness-event' ? '' : pointerLineFor(evaluation.reason ?? 'weak-relevance');
     }
     return renderInjectionBlock(result, cfg);
   } catch {

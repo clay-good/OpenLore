@@ -19,6 +19,7 @@ import {
   buildInjection,
   buildProposalOnlyInjection,
   classifyTurnIntent,
+  isHarnessEvent,
   pointerLineFor,
   type ResolvedInjectionConfig,
   type PointerReason,
@@ -655,6 +656,27 @@ describe('buildInjection intent gate', () => {
     await writeConfig({ mode: 'off' });
     for (const prompt of prompts) {
       expect(await buildInjection(dir, prompt)).toBe('');
+    }
+  });
+});
+
+describe('a harness notice is not a turn (change: hook-reliability)', () => {
+  const NOTICE = '<task-notification>\n<task-id>b4b6q7h3n</task-id>\n<status>completed</status>\n<summary>Background command "Run the suite" completed (exit code 0)</summary>\n</task-notification>';
+
+  it('recognizes a background-task notification, and nothing a user would type', () => {
+    expect(isHarnessEvent(NOTICE)).toBe(true);
+    expect(isHarnessEvent(`  ${NOTICE}\n`)).toBe(true);
+    expect(isHarnessEvent('fix the bug in the <task-notification> parser')).toBe(false);
+    expect(isHarnessEvent('<task-notification> without its end')).toBe(false);
+    expect(isHarnessEvent('rename createTask')).toBe(false);
+  });
+
+  it('buildInjection says nothing for it: no lookup, no pointer line', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'olharness-'));
+    try {
+      expect(await buildInjection(dir, NOTICE)).toBe('');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });

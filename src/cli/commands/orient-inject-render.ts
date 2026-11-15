@@ -63,13 +63,24 @@ export type WithholdReason =
   | 'weak-relevance'
   | 'no-graph'
   | 'empty-prompt'
-  | 'error';
+  | 'error'
+  | 'harness-event';
 
 /**
  * The withhold causes the agent is told about. `error` is not one: a failed lookup is silent to
- * the agent (change: hook-reliability); telemetry still counts it.
+ * the agent (change: hook-reliability). Nor is `harness-event`: the harness wrote that prompt, not
+ * the user, so there is no turn to brief. Telemetry still counts both.
  */
-export type PointerReason = Exclude<WithholdReason, 'error'>;
+export type PointerReason = Exclude<WithholdReason, 'error' | 'harness-event'>;
+
+/**
+ * A prompt the harness generated rather than the user: Claude Code delivers a background task's
+ * completion as a `UserPromptSubmit` whose text is a `<task-notification>` block. Orienting on it
+ * briefs the agent on code the notice merely mentions (a task id, an output path), which is noise.
+ */
+export function isHarnessEvent(prompt: string): boolean {
+  return /^<task-notification>[\s\S]*<\/task-notification>/.test(prompt.trim());
+}
 
 /**
  * The agent-visible pointer line for each withhold cause.

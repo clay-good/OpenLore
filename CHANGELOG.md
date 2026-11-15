@@ -38,6 +38,10 @@ All notable changes to OpenLore are documented here. This project adheres to
   counted as fixed (the same check ran again after an edit to its file and no longer reports it),
   decided (a recorded decision cites its id, such as `f:1a2b3c4d`), open (the stop receipt still
   lists it), or not assessed. Local data only, never sent.
+- **No briefing for a background-task notice.** Claude Code delivers a finished background task as a
+  `<task-notification>` prompt; the prompt hook oriented on it and briefed the agent on unrelated
+  code that the notice's words happened to match. It now does no lookup and says nothing for such a
+  notice. Telemetry still counts it (`harness-event`).
 - **`openlore status` reports hook health.** Every hook run is recorded locally in
   `.openlore/session-ledger/hook-runs.jsonl`, and a new `Hook health` line (and `hookHealth` in
   `--json`) shows each moment's last run and p95, the errors and overruns, and the findings shown
