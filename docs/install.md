@@ -394,6 +394,12 @@ or before-stop moment, so test runs recorded there are not yet stated at stop.
   20 s, 30 s, 5 s, and 10 s for the moments in the table above; past it the hook prints nothing.
   The limits come from measurement (`npm run bench:hooks`); `npm run test:budgets` fails when a
   moment's measured p95 passes its budget.
+- **Health, for you.** Each run that reaches the hook is recorded in
+  `.openlore/session-ledger/hook-runs.jsonl` (moment, whole-process time, outcome, findings shown;
+  local only, never sent). `openlore status` prints one `Hook health` line for the last 7 days: each
+  moment's last run and p95, the errors and overruns, and the findings shown (`hookHealth` in
+  `--json`). With no run recorded, the line is absent. A run that never reached the hook (the CLI
+  failed to load) is not counted.
 - **Silent on failure.** A check that throws or does not load, a passed time limit, a missing,
   corrupt, or read-only `.openlore/`, a missing or unusable index, and an unreadable payload all end
   the same way: exit 0, nothing printed. The prompt-submitted moment (`openlore orient --inject`,

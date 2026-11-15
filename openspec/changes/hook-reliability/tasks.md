@@ -111,16 +111,20 @@ nothing outside its own folder; every file below is edited when the group is bui
 
 ## 6. Health line
 
-- [ ] 6.1 Add `src/core/services/hook-health.ts` (new): `recordHookRun` appends
+- [x] 6.1 Add `src/core/services/hook-health.ts` (new): `recordHookRun` appends
   `{ t, moment, ms, outcome, shown }` to `.openlore/session-ledger/hook-runs.jsonl`, cuts the file
   at 1 MB, and never throws; `readHookHealth` returns per moment last run, p95, errors, overruns,
   shown, over 7 days. Call `recordHookRun` from the wrapper for all four moments. Test:
   `src/core/services/hook-health.test.ts` (new). Done when: 20 parallel appends give 20 readable
   lines, a corrupt line is skipped, and an unwritable directory changes no hook output.
-- [ ] 6.2 Print one `Hook health` line and add `hookHealth` to `--json` in
+- [x] 6.2 Print one `Hook health` line and add `hookHealth` to `--json` in
   `src/cli/commands/status.ts` (after the `Loop hooks` line, 352-355). Test:
   `src/cli/commands/status.test.ts`. Done when: the line shows each moment's last run and p95, the
   error and overrun totals, and findings shown; with no run recorded the line is absent.
+  Built (2026-11-14): `runHook` reports each run through an `onRun` callback (its result shape is
+  unchanged), and the CLI records after printing, so recording never delays the agent. The
+  prompt moment records too, counting a failed lookup as an error and a passed limit as an
+  overrun. `recordHookRun` never creates `.openlore/`.
 
 ## 7. Acted-on counts
 
