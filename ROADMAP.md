@@ -40,7 +40,6 @@ edit-time hooks, guarded to OpenLore projects (#762).
 |-----|-------|--------|
 | The watcher ignores `.openlore-ignore` and reads ignore rules only at start | `src/core/services/mcp-watcher.ts` | #717 |
 | Three project-root walkers use three different rules | `hook.ts` `openloreRoot`, Pi `piProjectRoot`, statusline `openloreProjectRoot` | #722 / #723 |
-| A Java field of an external type is still fanned out by name | Java resolution in `call-graph.ts` | #724 |
 | OpenAPI enum details render double-escaped | `src/core/services/mcp-handlers/service-contract.ts` | #724 |
 | CI runs 12 of 26 integration test files | `package.json` `test:integration:ci` | #724 |
 | Two tool input schemas have properties without descriptions; 15 descriptions exceed 800 characters | `explain_retrieval_miss`, `declare_footprint` in `src/cli/commands/mcp.ts` | `mcp-quality` spec |

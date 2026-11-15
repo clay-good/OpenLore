@@ -7290,6 +7290,7 @@ export class CallGraphBuilder {
         // A loop, not a spread: a large repository's synthesized set can exceed the engine's
         // argument limit, and the throw would be swallowed below, silently dropping the pass.
         for (const edge of cha.edges) edges.push(edge);
+        dropExternalLeavesBoundInRepo(edges, cha.edges, allNodes);
         // Sites whose name-only fan-out CHA refused because the receiver is statically outside
         // this repository (change: suppress-false-cha-name-only). Disclosed through the SAME
         // channel as a refused resolution-ladder binding, so the graph records an unresolved
@@ -7425,6 +7426,35 @@ export async function dispatchFileExtract(
   // (change: bound-large-literal-extraction). Both lanes — serial and pooled — reach extraction
   // through this one function, so neither can escape the bound.
   return runWithExtractionBudget(() => dispatchFileExtractUnbudgeted(file));
+}
+
+/**
+ * A call site CHA bound precisely (`cha-declared-type`: the receiver's declared type resolved to
+ * one in-repo class that has the method) cannot also be an external call. Its `external::recv.m`
+ * leaf from the direct pass — `repo.save` on a `Repo` field — would list an in-repo class as an
+ * external dependency, so it is removed, with the leaf node when nothing else calls it
+ * (ROADMAP P0, #724).
+ */
+export function dropExternalLeavesBoundInRepo(
+  edges: CallEdge[],
+  chaEdges: readonly CallEdge[],
+  nodes: Map<string, FunctionNode>,
+): void {
+  const bound = new Set(chaEdges
+    .filter(e => e.synthesizedBy === 'cha-declared-type')
+    .map(e => `${e.callerId}\0${e.line}\0${e.calleeName}`));
+  if (bound.size === 0) return;
+  const dropped = new Set<string>();
+  for (let i = edges.length - 1; i >= 0; i--) {
+    const e = edges[i];
+    if (!e.calleeId.startsWith('external::') || e.synthesizedBy) continue;
+    if (!bound.has(`${e.callerId}\0${e.line}\0${e.calleeName}`)) continue;
+    dropped.add(e.calleeId);
+    edges.splice(i, 1);
+  }
+  if (dropped.size === 0) return;
+  const stillCalled = new Set(edges.map(e => e.calleeId));
+  for (const id of dropped) if (!stillCalled.has(id)) nodes.delete(id);
 }
 
 async function dispatchFileExtractUnbudgeted(
