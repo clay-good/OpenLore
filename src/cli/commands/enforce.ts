@@ -803,9 +803,9 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
     .some(([code, enforcementClass]) => enforcementClass === 'frozen' && collected.assessedCodes.has(code));
   const activeGatePolicy = Object.values(policy)
     .some((enforcementClass) => enforcementClass === 'blocking' || enforcementClass === 'frozen');
-  // Source-declared defaults are policy too. A default-blocking source must
-  // compare the working tree with the index even when the operator has not
-  // repeated that default in .openlore/config.json.
+  // Every source default is advisory today, so in practice only an operator policy can make a
+  // code blocking. The check still resolves each assessed code through the same precedence, so a
+  // blocking class from either source compares the working tree with the index.
   const activeGateAssessment = [...collected.assessedCodes]
     .some((code) => {
       const enforcementClass = resolveEnforcementClass(code, policy);
