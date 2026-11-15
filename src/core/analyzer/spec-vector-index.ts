@@ -22,6 +22,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join, basename, dirname, relative, isAbsolute } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
 import { isConfinedPath, readFileConfined } from '../../utils/path-confinement.js';
+import { readSpecFolderNames } from '../spec-sources/openspec.js';
 import type { Embedder } from './embedding-service.js';
 import { tokenize, buildBm25Corpus, bm25MatchEvidence, bm25Score } from './vector-index.js';
 import type { MatchEvidence, SearchableFields } from './retrieval-evidence.js';
@@ -1145,7 +1146,7 @@ async function findSpecFiles(specsDir: string): Promise<string[]> {
 
   let entries: string[];
   try {
-    entries = await readdir(specsDir);
+    entries = await readSpecFolderNames(specsDir);
   } catch {
     return [];
   }

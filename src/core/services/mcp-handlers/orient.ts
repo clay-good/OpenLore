@@ -213,26 +213,15 @@ interface InlineSpec {
 
 /**
  * How many spec domains the corpus holds, for the one question `specDomains: []` cannot answer on
- * its own: is this repository ungoverned, or is the link index simply not built? A local,
- * depth-bounded scan on purpose — no cross-module dependency for a directory probe, and every
- * failure is "no disclosure" rather than a broken orient (change: fix-governance-face-dark).
+ * its own: is this repository ungoverned, or is the link index simply not built? A depth-bounded
+ * scan through the OpenSpec adapter; a folder it cannot read adds nothing, and every other failure
+ * is "no disclosure" rather than a broken orient (change: fix-governance-face-dark).
  */
 async function countSpecDomains(absDir: string, openspecPath?: string): Promise<number> {
   try {
-    const { readdir } = await import('node:fs/promises');
+    const { findNestedSpecFiles } = await import('../../spec-sources/openspec.js');
     const specsDir = join(absDir, openspecPath ?? OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR);
-    const walk = async (dir: string, depth: number): Promise<number> => {
-      if (depth > 3) return 0;
-      let found = 0;
-      for (const entry of await readdir(dir, { withFileTypes: true })) {
-        if (entry.isFile() && entry.name === 'spec.md') found++;
-        else if (entry.isDirectory() && !entry.name.startsWith('.')) {
-          found += await walk(join(dir, entry.name), depth + 1);
-        }
-      }
-      return found;
-    };
-    return await walk(specsDir, 0);
+    return (await findNestedSpecFiles(specsDir, 3)).length;
   } catch {
     return 0;
   }

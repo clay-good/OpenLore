@@ -1,5 +1,6 @@
 import { FilePolicyResolver } from '../configuration/policy.js';
-import { mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { findNestedSpecFiles } from '../spec-sources/openspec.js';
 import { tmpdir } from 'node:os';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
 import { join, resolve } from 'node:path';
@@ -265,30 +266,11 @@ async function specCorpusPresent(options: BuildAnalysisIndexesOptions): Promise<
       resolveOpenspecDir(options.rootPath, options.config?.openspecPath ?? OPENSPEC_DIR),
       OPENSPEC_SPECS_SUBDIR,
     );
-    return (await findSpecMarkdown(specsDir, 0)).length > 0;
+    return (await findNestedSpecFiles(specsDir, 4)).length > 0;
   } catch {
     // Unreadable: do not invalidate on a transient error — the ordinary rebuild path still runs.
     return false;
   }
-}
-
-/** `spec.md` files under a specs directory, bounded in depth like the spec index's own discovery. */
-async function findSpecMarkdown(dir: string, depth: number): Promise<string[]> {
-  if (depth > 4) return [];
-  let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const found: string[] = [];
-  for (const entry of entries) {
-    if (entry.isFile() && entry.name === 'spec.md') found.push(join(dir, entry.name));
-    else if (entry.isDirectory() && !entry.name.startsWith('.')) {
-      found.push(...await findSpecMarkdown(join(dir, entry.name), depth + 1));
-    }
-  }
-  return found;
 }
 
 /**
