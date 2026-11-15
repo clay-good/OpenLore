@@ -65,14 +65,15 @@ export type WithholdReason =
   | 'empty-prompt'
   | 'error'
   | 'harness-event'
-  | 'no-anchor';
+  | 'no-anchor'
+  | 'index-busy';
 
 /**
  * The withhold causes the agent is told about. `error` is not one: a failed lookup is silent to
  * the agent (change: hook-reliability). Nor is `harness-event`: the harness wrote that prompt, not
  * the user, so there is no turn to brief. Telemetry still counts both.
  */
-export type PointerReason = Exclude<WithholdReason, 'error' | 'harness-event' | 'no-anchor'>;
+export type PointerReason = Exclude<WithholdReason, 'error' | 'harness-event' | 'no-anchor' | 'index-busy'>;
 
 /**
  * The once-per-session contract that replaces per-turn pointer lines (change:
@@ -410,13 +411,16 @@ export function evaluateRelevanceGate(
 ): RelevanceGateEvaluation {
   if (result.error) {
     // An absent index is a distinct, actionable cause: the remedy is `openlore
-    // analyze`, not a retry. Report it as such rather than as a generic failure.
-    const noGraph = result.notReady === true || result.reason === 'index-absent';
+    // analyze`, not a retry. Only `index-absent` means that: an index being published, swapped
+    // or repaired EXISTS, and "no analysis index is available" would be false there. Such a turn
+    // is silent, and it is not counted as a hook error.
+    const noGraph = result.reason === 'index-absent';
+    const busy = !noGraph && result.notReady === true;
     return {
       passes: false,
       passedCriteria: [],
-      failedCriteria: [noGraph ? 'no-graph' : 'orient-error'],
-      reason: noGraph ? 'no-graph' : 'error',
+      failedCriteria: [noGraph ? 'no-graph' : busy ? 'index-busy' : 'orient-error'],
+      reason: noGraph ? 'no-graph' : busy ? 'index-busy' : 'error',
     };
   }
   const fns = Array.isArray(result.relevantFunctions)

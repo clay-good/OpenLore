@@ -1,6 +1,6 @@
 /** The anchor gate of the prompt briefing (change: anchor-gated-prompt-briefing). */
 import { describe, expect, it } from 'vitest';
-import { extractCodeAnchors, keepExactAnchors, userWords, type LeanOrientResult } from './orient-inject-render.js';
+import { INJECTION_DEFAULTS, evaluateRelevanceGate, extractCodeAnchors, keepExactAnchors, userWords, type LeanOrientResult } from './orient-inject-render.js';
 import { isOpenSpecProposalInvocation } from './proposal-context.js';
 
 describe('extractCodeAnchors', () => {
@@ -85,6 +85,17 @@ describe('precision rules', () => {
     const r: LeanOrientResult = { relevantFunctions: ['a', 'b', 'c'].map(d => ({ name: 'main', filePath: `scripts/${d}.ts` })) };
     expect(keepExactAnchors(r, ['main'])).toBeUndefined();
     expect(keepExactAnchors({ relevantFunctions: r.relevantFunctions!.slice(0, 2) }, ['main'])!.relevantFunctions).toHaveLength(2);
+  });
+});
+
+describe('an index being published or repaired is not "no index"', () => {
+  it('only index-absent states that no index exists; other not-ready states are silent and not errors', () => {
+    const verdict = (reason: string) => evaluateRelevanceGate({ error: 'x', notReady: true, reason } as LeanOrientResult, INJECTION_DEFAULTS).reason;
+    expect(verdict('index-absent')).toBe('no-graph');
+    for (const r of ['index-publish-in-progress', 'index-generation-unavailable', 'index-generation-mismatch', 'index-unreadable', 'graph-unavailable']) {
+      expect(verdict(r), r).toBe('index-busy');
+    }
+    expect(evaluateRelevanceGate({ error: 'boom' } as LeanOrientResult, INJECTION_DEFAULTS).reason).toBe('error');
   });
 });
 
