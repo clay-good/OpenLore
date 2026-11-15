@@ -51,10 +51,10 @@ function repo(): string {
 }
 
 /** One payload per moment, in Claude Code's shape. */
-function payload(moment: Moment, root: string): string {
+function payload(moment: Moment, root: string, editTarget = 'gen/order.pb.go'): string {
   const base = { session_id: 's1', cwd: root };
   switch (moment) {
-    case 'before-edit': return JSON.stringify({ ...base, tool_name: 'Edit', tool_input: { file_path: join(root, 'gen/order.pb.go'), old_string: 'package gen', new_string: 'package gen2' } });
+    case 'before-edit': return JSON.stringify({ ...base, tool_name: 'Edit', tool_input: { file_path: join(root, editTarget), old_string: 'package gen', new_string: 'package gen2' } });
     case 'after-tools': return JSON.stringify({ ...base, tool_name: 'Edit', tool_input: { file_path: join(root, 'src/f.test.ts') }, tool_response: {} });
     case 'before-stop': return JSON.stringify({ ...base, stop_hook_active: false });
     case 'after-compact': return JSON.stringify({ ...base, source: 'compact' });
@@ -258,7 +258,7 @@ describe('a broken store: the real checks run and every moment is silent or a we
     write(root, '.openlore/analysis/call-graph.db', 'not sqlite');
     // An ordinary file and no session change: nothing for any check to state.
     execFileSync('git', ['checkout', '--', 'src/f.test.ts'], { cwd: root, env: GIT_ENV });
-    const ordinary = payload(moment, root).replace(/gen\/order\.pb\.go/g, 'src/f.ts');
+    const ordinary = payload(moment, root, 'src/f.ts');
     await expect(runHook(moment, ordinary)).resolves.toEqual(SILENT);
   });
 
