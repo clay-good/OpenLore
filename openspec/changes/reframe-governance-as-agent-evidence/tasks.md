@@ -4,24 +4,24 @@ Run one test file with `npx vitest run <file>`. Each group is one small PR, in t
 
 ## 1. Advisory by default
 
-- [ ] 1.1 Edit `src/core/services/mcp-handlers/enforcement-policy.ts`: set `defaultClass: 'advisory'`
+- [x] 1.1 Edit `src/core/services/mcp-handlers/enforcement-policy.ts`: set `defaultClass: 'advisory'`
   on the 7 codes at lines 483-518 (`corpus-reference-unresolved`, `corpus-reference-ambiguous`,
   `corpus-self-reference`, `corpus-duplicate-identifier`, `corpus-edge-unsupported`,
   `corpus-target-type-mismatch`, `corpus-supersession-cycle`). Do not change severity in
   `src/core/decisions/corpus-integrity.ts:222`. Test: `src/core/services/mcp-handlers/enforcement-policy.test.ts`
   (update the table at lines 24-33; add "no registry entry defaults to blocking or frozen").
   Done when: that test file passes and the new test fails if one entry is set back to `blocking`.
-- [ ] 1.2 Same file: fix the stale comment above `applyPolicyPrecedence` (lines 581-587, "which no
+- [x] 1.2 Same file: fix the stale comment above `applyPolicyPrecedence` (lines 581-587, "which no
   current code uses") and the `FindingCodeSpec` comment (lines 86-88). New text: every source default
   is advisory; the `sourceDefault` parameter stays for the precedence contract. Fix the matching
   test comment at `enforcement-policy.test.ts:37-38`. Test: same file.
   Done when: `grep -n "no current code uses\|are blocking because" src/core/services/mcp-handlers/enforcement-policy.ts` returns nothing.
-- [ ] 1.3 Edit `src/cli/commands/enforce.ts`: correct the comment at lines 806-808 ("Source-declared
+- [x] 1.3 Edit `src/cli/commands/enforce.ts`: correct the comment at lines 806-808 ("Source-declared
   defaults are policy too"); keep the code. Test: `src/cli/commands/enforce.test.ts` (add: no policy
   plus an unresolved corpus reference → `--hook` exits 0 and lists the finding as advisory; a policy
   naming the code as `blocking` → exits 1; keep the test at line 352 passing).
   Done when: `npx vitest run src/cli/commands/enforce.test.ts src/cli/commands/corpus-integrity-surfaces.test.ts src/cli/commands/doctor.test.ts` passes.
-- [ ] 1.4 Edit `CHANGELOG.md` under `## [Unreleased]`, new `### Changed` entry: the 7 codes are
+- [x] 1.4 Edit `CHANGELOG.md` under `## [Unreleased]`, new `### Changed` entry: the 7 codes are
   advisory by default; give the 7-line `enforcement.policy` block from `design.md` section 5 for
   repositories that relied on the default block. Edit `docs/configuration.md`: add 7 rows to the finding-code catalogue (after line 289), one for
   each code, with source `corpus-integrity` and default `advisory`. In line 289, replace "the

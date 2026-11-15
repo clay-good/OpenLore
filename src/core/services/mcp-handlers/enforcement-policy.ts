@@ -84,9 +84,9 @@ export interface ClassifiedFinding extends GovernanceFinding {
  * class, so (a) a declared policy that names an unknown code can be flagged, and
  * (b) the catalogue is the documented contract for what an operator may govern.
  *
- * `defaultClass` is source-owned. Most findings are advisory by default, while
- * corpus resolution and graph-shape failures are blocking because an invalid
- * governance graph must not be trusted as authoritative.
+ * `defaultClass` is source-owned, and every source default is advisory: a finding blocks only when
+ * the repository's `enforcement.policy` names its code as `blocking` (or `frozen`). Corpus-integrity
+ * failures keep severity `error`, so they stay visible as errors without blocking.
  */
 export interface FindingCodeSpec {
   defaultClass: EnforcementClass;
@@ -481,32 +481,32 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
   },
   // ── governance corpus integrity (add-knowledge-corpus-integrity) ──
   'corpus-reference-unresolved': {
-    defaultClass: 'blocking',
+    defaultClass: 'advisory',
     source: 'corpus-integrity',
     description: 'A declared corpus edge names a target that cannot be resolved.',
   },
   'corpus-reference-ambiguous': {
-    defaultClass: 'blocking',
+    defaultClass: 'advisory',
     source: 'corpus-integrity',
     description: 'A declared corpus edge resolves to more than one target.',
   },
   'corpus-self-reference': {
-    defaultClass: 'blocking',
+    defaultClass: 'advisory',
     source: 'corpus-integrity',
     description: 'A corpus artifact declares a graph edge to itself where self-reference is invalid.',
   },
   'corpus-duplicate-identifier': {
-    defaultClass: 'blocking',
+    defaultClass: 'advisory',
     source: 'corpus-integrity',
     description: 'Multiple corpus artifacts declare the same identifier.',
   },
   'corpus-edge-unsupported': {
-    defaultClass: 'blocking',
+    defaultClass: 'advisory',
     source: 'corpus-integrity',
     description: 'A corpus artifact declares an edge kind that its artifact type does not support.',
   },
   'corpus-target-type-mismatch': {
-    defaultClass: 'blocking',
+    defaultClass: 'advisory',
     source: 'corpus-integrity',
     description: 'A declared corpus edge resolves to an artifact outside the edge\'s target range.',
   },
@@ -516,7 +516,7 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     description: 'A live corpus artifact references a superseded, rejected, or otherwise retired target.',
   },
   'corpus-supersession-cycle': {
-    defaultClass: 'blocking',
+    defaultClass: 'advisory',
     source: 'corpus-integrity',
     description: 'Decision supersession edges form a cycle, so no member can be treated as authoritative.',
   },
@@ -583,7 +583,8 @@ export function sourceDefaultClass(code: string): EnforcementClass {
  * and the source-declared default, pick the effective class:
  *   explicit class > source default.
  * Order-independent and total. Exposed separately so the precedence is unit-tested
- * directly, including a source default of `blocking` (which no current code uses).
+ * directly. Every registry default is advisory; the `sourceDefault` parameter stays because the
+ * config spec defines the precedence for any source default.
  */
 export function applyPolicyPrecedence(
   explicit: EnforcementClass | undefined,
