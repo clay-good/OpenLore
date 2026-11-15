@@ -60,6 +60,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { PER_FILE_EXTRACTION_BUDGET_MS, PARSE_BUDGET_ENV } from '../../constants.js';
 import { recordPerfWork } from './perf-counters.js';
+import { maskTypeScriptGrammarGaps } from './ts-grammar-gaps.js';
 
 /**
  * Stable prefix on {@link ExtractionBudgetExceededError}'s message.
@@ -130,6 +131,15 @@ export interface BudgetableParser<TTree> {
    * {@link parseWithBudget}. Optional so a test double need not supply it.
    */
   reset?(): void;
+  /** The grammar in use; `typescript` / `tsx` get the parse-only grammar-gap masks. */
+  getLanguage?(): { name?: string } | null | undefined;
+}
+
+/** TypeScript text as the grammar can parse it (length-preserving; see `ts-grammar-gaps.ts`). */
+function parseableText<TTree>(parser: BudgetableParser<TTree>, content: string): string {
+  let name: string | undefined;
+  try { name = parser.getLanguage?.()?.name; } catch { name = undefined; }
+  return name === 'typescript' || name === 'tsx' ? maskTypeScriptGrammarGaps(content) : content;
 }
 
 /**
@@ -225,7 +235,7 @@ export function parseWithBudget<TTree>(parser: BudgetableParser<TTree>, content:
   let tree: TTree | null | undefined;
   try {
     recordPerfWork('sourceParses');
-    tree = parser.parse(content);
+    tree = parser.parse(parseableText(parser, content));
   } finally {
     // Always clear the deadline, including on a throw: leaving it armed would apply this
     // file's remaining budget to the NEXT file on the same singleton parser.

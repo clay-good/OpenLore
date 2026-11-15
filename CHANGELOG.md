@@ -89,6 +89,12 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **TypeScript files that use `import('x').T` types, `typeof import(…)`, `using` as a variable, or
+  `export type *` no longer parse with errors.** The bundled grammar cannot parse these; a
+  length-preserving, parse-only mask now hides them from it. On this repository: files with parse
+  errors 57 → 0, call edges +87, functions +8; orient answers no longer carry the parse "lower
+  bound" warning for them.
+
 - **Index build progress for you, silence for the agent.** While an index builds, `openlore
   statusline` and `openlore status` show `indexing 45% (1,310/2,900 files)`, then the phase name.
   The prompt hook no longer puts a build note into the agent's context while a build runs. During a
