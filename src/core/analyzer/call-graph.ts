@@ -53,6 +53,7 @@ import { scanResolverMaps, hasInlineSdl, type ResolverMap } from './contract/gra
 import { isProjectedLanguage, isDeclarationEdgeKind } from './projected-language.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
+import { dynamicImportNames } from './test-dynamic-imports.js';
 import { hasRustTestAttribute } from './rust-test-attributes.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
@@ -7067,6 +7068,12 @@ export class CallGraphBuilder {
         const sourceFile = resolveSource(m[2]);
         if (!sourceFile) continue;
         emitEdge(m[1], sourceFile);
+      }
+      // Dynamic imports: a test that loads its module after mocks are set up
+      // (`const { f } = await import('./m.js')`) tests `f` just as a static import does.
+      for (const { name, specifier } of dynamicImportNames(file.content)) {
+        const sourceFile = resolveSource(specifier);
+        if (sourceFile) emitEdge(name, sourceFile);
       }
     }
 

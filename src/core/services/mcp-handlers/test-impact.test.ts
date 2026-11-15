@@ -536,6 +536,21 @@ describe('select_tests safeguard tiers', () => {
     expect(find(r, 'testOther')).toMatchObject({ file: 'src/other.test.ts', reason: SELECTION_REASON.changedTest, confidence: 'high' });
   });
 
+  it('selects a test that names a changed file by its path, and none that does not', async () => {
+    // A source guard reads the file as text (line anchors, a forbidden-call scan): no call edge.
+    await mkdir(join(dir, 'src'), { recursive: true });
+    await writeFile(join(dir, 'src/other.test.ts'), "const EXEMPT = [{ file: 'src/pi/extension.ts', line: 776 }];\n");
+    changed([{ path: 'src/pi/extension.ts', status: 'modified', isTest: false }]);
+    const r = await handleSelectTests({ directory: dir, diffRef: 'HEAD' }) as Result;
+    expect(r.selectedTests.map(t => [t.file, t.test, t.confidence, t.reason])).toEqual([
+      ['src/other.test.ts', '*', 'medium', SELECTION_REASON.namesPath('src/pi/extension.ts')],
+    ]);
+
+    changed([{ path: 'src/pi/other.ts', status: 'modified', isTest: false }]);
+    const none = await handleSelectTests({ directory: dir, diffRef: 'HEAD' }) as Result;
+    expect(none.selectedTests).toEqual([]);
+  });
+
   it('selects a new test file whole when the analysis has not indexed it yet', async () => {
     await touch('src/brand-new.test.ts');
     changed([{ path: 'src/brand-new.test.ts', status: 'added' }]);
