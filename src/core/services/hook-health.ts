@@ -11,11 +11,28 @@ import { join } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { OPENLORE_DIR } from '../../constants.js';
 import { LOOP_MOMENTS, deliveredDir } from './hook-session.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 
 export type HookOutcome = 'ok' | 'error' | 'overrun';
 
-/** One recorded run: time, moment, whole-process milliseconds, outcome, findings shown. */
-export interface HookRun { t: string; moment: string; ms: number; outcome: HookOutcome; shown: number }
+/**
+ * One recorded run: time, moment, whole-process milliseconds, outcome, findings shown, and for an
+ * `error`, what failed: without it a failed run cannot be diagnosed afterwards.
+ */
+export interface HookRun { t: string; moment: string; ms: number; outcome: HookOutcome; shown: number; reason?: string }
+
+/** Longest `reason` kept in a record. */
+const MAX_REASON_CHARS = 160;
+
+/** A thrown value as one bounded line: `TypeError: x is not a function`. */
+export function errorReason(error: unknown): string {
+  const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return boundedReason(text);
+}
+
+function boundedReason(text: string): string {
+  return sanitizeForTerminal(text.split('\n')[0]).replace(/\s+/g, ' ').trim().slice(0, MAX_REASON_CHARS);
+}
 
 export interface MomentHealth {
   moment: string;
@@ -25,6 +42,8 @@ export interface MomentHealth {
   errors: number;
   overruns: number;
   shown: number;
+  /** The most recent failed run's reason, when one was recorded. */
+  lastError?: { t: string; reason: string };
 }
 
 const MAX_BYTES = 1024 * 1024;
@@ -41,7 +60,8 @@ export async function recordHookRun(root: string, run: Omit<HookRun, 't'> & { t?
     if (!existsSync(join(root, OPENLORE_DIR))) return;
     const path = hookRunsPath(root);
     mkdirSync(join(root, OPENLORE_DIR, 'session-ledger'), { recursive: true });
-    const line = JSON.stringify({ t: run.t ?? new Date().toISOString(), moment: run.moment, ms: Math.round(run.ms), outcome: run.outcome, shown: run.shown });
+    const reason = run.outcome === 'error' && run.reason ? boundedReason(run.reason) : undefined;
+    const line = JSON.stringify({ t: run.t ?? new Date().toISOString(), moment: run.moment, ms: Math.round(run.ms), outcome: run.outcome, shown: run.shown, ...(reason ? { reason } : {}) });
     // One descriptor for the append, the size, and the read: no check-then-use on the path.
     const fd = openSync(path, 'a+');
     let text: string | undefined;
@@ -68,7 +88,10 @@ function parseRun(line: string): HookRun | undefined {
     const r = JSON.parse(line) as Record<string, unknown>;
     if (typeof r.t !== 'string' || typeof r.moment !== 'string' || typeof r.ms !== 'number') return undefined;
     if (r.outcome !== 'ok' && r.outcome !== 'error' && r.outcome !== 'overrun') return undefined;
-    return { t: r.t, moment: r.moment, ms: r.ms, outcome: r.outcome, shown: typeof r.shown === 'number' ? r.shown : 0 };
+    return {
+      t: r.t, moment: r.moment, ms: r.ms, outcome: r.outcome, shown: typeof r.shown === 'number' ? r.shown : 0,
+      ...(typeof r.reason === 'string' && r.reason ? { reason: boundedReason(r.reason) } : {}),
+    };
   } catch {
     return undefined;
   }
@@ -94,7 +117,9 @@ export function readHookHealth(root: string, now = Date.now()): MomentHealth[] {
   const order = (m: string) => { const i = (LOOP_MOMENTS as readonly string[]).indexOf(m); return i < 0 ? LOOP_MOMENTS.length : i; };
   return [...byMoment.entries()]
     .sort(([a], [b]) => order(a) - order(b) || a.localeCompare(b))
-    .map(([moment, runs]) => ({
+    .map(([moment, runs]) => {
+      const failed = runs.filter(r => r.outcome === 'error' && r.reason).sort((a, b) => a.t.localeCompare(b.t)).at(-1);
+      return {
       moment,
       runs: runs.length,
       lastRun: runs.map(r => r.t).sort().at(-1)!,
@@ -102,7 +127,9 @@ export function readHookHealth(root: string, now = Date.now()): MomentHealth[] {
       errors: runs.filter(r => r.outcome === 'error').length,
       overruns: runs.filter(r => r.outcome === 'overrun').length,
       shown: runs.reduce((n, r) => n + r.shown, 0),
-    }));
+      ...(failed ? { lastError: { t: failed.t, reason: failed.reason! } } : {}),
+      };
+    });
 }
 
 /** What happened to the findings the hooks showed (design section 4); the four counts sum to `total`. */

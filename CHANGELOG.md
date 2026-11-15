@@ -115,6 +115,11 @@ All notable changes to OpenLore are documented here. This project adheres to
   place is still reported. The other returned a deliberate fallback, but the message said "only
   logged or ignored"; it now says "replaced by `return …`".
 
+- **A failed hook run records what failed.** A day of real sessions logged 24 prompt-hook errors
+  with no reason, so none could be diagnosed. Each `error` run in `hook-runs.jsonl` now keeps one
+  bounded, sanitized line (`TypeError: …`), and `openlore status` names the most recent one in its
+  `Hook health` line. The agent still sees nothing.
+
 - **Spec text under a configured `openspecPath` is labeled reviewed only when it is.** `orient`,
   `blast_radius` and the Pi context checked git for a fixed `openspec/` folder. With
   `openspecPath: "docs"`, an uncommitted edit under `docs/specs/` was served as `reviewed-corpus`.

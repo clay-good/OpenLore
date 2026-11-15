@@ -26,6 +26,7 @@ import { presetToolNames, resolveUserScopePreset, resolveWiredPreset } from '../
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import { emit } from '../../core/services/telemetry.js';
 import { proposalContextForPrompt } from './proposal-context.js';
+import { errorReason } from '../../core/services/hook-health.js';
 import {
   INJECTION_DEFAULTS,
   classifyTurnIntent,
@@ -150,8 +151,8 @@ async function buildTaskInjection(
 
   if (cfg.mode === 'off') return '';
 
-  const withhold = (reason: WithholdReason, failedCriteria: string[]): string => {
-    const evaluation: RelevanceGateEvaluation = { passes: false, passedCriteria: [], failedCriteria, reason };
+  const withhold = (reason: WithholdReason, failedCriteria: string[], error?: string): string => {
+    const evaluation: RelevanceGateEvaluation = { passes: false, passedCriteria: [], failedCriteria, reason, ...(error ? { error } : {}) };
     onGateEvaluation?.(evaluation);
     recordInjectionVerdict(directory, evaluation);
     // Only a missing index is said here (once per session, by the caller); every other withhold is
@@ -207,10 +208,11 @@ async function buildTaskInjection(
     onGateEvaluation?.(evaluation);
     recordInjectionVerdict(directory, evaluation);
     return renderInjectionBlock(result, cfg);
-  } catch {
+  } catch (error) {
     // A failed lookup is silent: a hook says nothing about OpenLore's own failure, and the agent
-    // keeps its turn (change: hook-reliability). The verdict is still recorded for telemetry.
-    return withhold('error', ['orient-error']);
+    // keeps its turn (change: hook-reliability). The verdict is still recorded for telemetry, and
+    // what failed goes to hook health.
+    return withhold('error', ['orient-error'], errorReason(error));
   }
 }
 

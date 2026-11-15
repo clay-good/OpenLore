@@ -33,7 +33,7 @@ import { readStdin } from '../../utils/stdin.js';
 import { withLoggerOptions } from '../../utils/logger.js';
 import { OPENLORE_DIR } from '../../constants.js';
 import { openloreProjectRoot } from '../../utils/project-root.js';
-import { recordHookRun, type HookOutcome } from '../../core/services/hook-health.js';
+import { errorReason, recordHookRun, type HookOutcome } from '../../core/services/hook-health.js';
 import { HOOK_MOMENTS, findingIdentity, markFixed, markOpen, markShown, readSession, wasShown, writeSession, type FindingProof, type HookMoment } from '../../core/services/hook-session.js';
 
 export { HOOK_MOMENTS, type HookMoment };
@@ -689,8 +689,9 @@ async function subagentStart(root: string, payload: HookPayload, timeoutMs: numb
     if (text === 'timeout' || !text) return { stdout: '', exitCode: 0 };
     const capped = sanitizeForTerminal(text, { keepNewlines: true }).slice(0, BUDGET_CHARS['subagent-start']).replace(/[\uD800-\uDBFF]$/, '');
     return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'SubagentStart', additionalContext: capped } }), exitCode: 0 };
-  } catch {
+  } catch (error) {
     report.outcome = 'error';
+    report.reason = errorReason(error);
     return { stdout: '', exitCode: 0 };
   } finally {
     if (timer) clearTimeout(timer);
@@ -713,8 +714,9 @@ async function afterCompact(root: string, timeoutMs: number, report: HookRunRepo
     if (text === 'timeout') report.outcome = 'overrun';
     if (text === 'timeout' || !text) return { stdout: '', exitCode: 0 };
     return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text.slice(0, BUDGET_CHARS['after-compact']).replace(/[\uD800-\uDBFF]$/, '') } }), exitCode: 0 };
-  } catch {
+  } catch (error) {
     report.outcome = 'error';
+    report.reason = errorReason(error);
     return { stdout: '', exitCode: 0 };
   } finally {
     if (timer) clearTimeout(timer);
@@ -742,7 +744,7 @@ function momentDisabled(root: string, moment: HookMoment): boolean {
 export interface HookRunResult { stdout: string; exitCode: 0 }
 
 /** What one run did, for the hook-health record (change: hook-reliability, task 6.1). */
-export interface HookRunReport { root?: string; outcome: HookOutcome; shown: number }
+export interface HookRunReport { root?: string; outcome: HookOutcome; shown: number; reason?: string }
 
 /**
  * Run one moment over a payload, then SCREEN the result.
@@ -765,8 +767,9 @@ export async function runHook(
   try {
     const r = await runHookUnscreened(moment, raw, opts, report);
     return r.stdout ? { ...r, stdout: screenJsonText(r.stdout) } : r;
-  } catch {
+  } catch (error) {
     report.outcome = 'error';
+    report.reason = errorReason(error);
     return { stdout: '', exitCode: 0 };
   } finally {
     opts.onRun?.(report);
@@ -870,8 +873,9 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
     // user instead. Only a policy block reaches the model at Stop.
     if (moment === 'before-stop') return { stdout: JSON.stringify({ systemMessage: text }), exitCode: 0 };
     return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: HOOK_EVENT[moment], additionalContext: text } }), exitCode: 0 };
-  } catch {
+  } catch (error) {
     report.outcome = 'error';
+    report.reason = errorReason(error);
     return silent;
   } finally {
     if (timer) clearTimeout(timer);
@@ -907,6 +911,6 @@ additionalContext. Prints nothing when there is nothing new; always exits 0. Tur
     // Codex expects JSON from a Stop hook that exits 0; an empty object says nothing.
     else if (options.harness === 'codex' && moment === 'before-stop') write('{}\n');
     // Whole-process time, as the p95 targets are; after the output, so it never delays the agent.
-    if (report?.root) await recordHookRun(report.root, { moment, ms: process.uptime() * 1000, outcome: report.outcome, shown: report.shown });
+    if (report?.root) await recordHookRun(report.root, { moment, ms: process.uptime() * 1000, outcome: report.outcome, shown: report.shown, ...(report.reason ? { reason: report.reason } : {}) });
     process.exit(0);
   });
