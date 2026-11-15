@@ -32,6 +32,7 @@ function repo(files: Record<string, string>): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'olhookcert-')));
   dirs.push(root);
   mkdirSync(join(root, '.openlore'));
+  writeFileSync(join(root, '.openlore', 'config.json'), '{}');
   for (const [rel, c] of Object.entries({ 'README.md': '# x\n', ...files })) write(root, rel, c);
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root, env: GIT_ENV });
   execFileSync('git', ['add', '-A'], { cwd: root, env: GIT_ENV });

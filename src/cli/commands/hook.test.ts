@@ -24,11 +24,12 @@ function write(root: string, rel: string, content: string): void {
   mkdirSync(dirname(join(root, rel)), { recursive: true });
   writeFileSync(join(root, rel), content);
 }
-/** A git repository with OpenLore set up (an `.openlore` directory) and one commit. */
+/** A git repository with OpenLore set up (`.openlore/config.json`) and one commit. */
 function repo(files: Record<string, string> = {}): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'olhook-')));
   dirs.push(root);
   mkdirSync(join(root, '.openlore'));
+  writeFileSync(join(root, '.openlore', 'config.json'), '{}');
   for (const [rel, c] of Object.entries({ 'README.md': '# x\n', ...files })) write(root, rel, c);
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root, env: GIT_ENV });
   execFileSync('git', ['add', '-A'], { cwd: root, env: GIT_ENV });
@@ -209,6 +210,15 @@ describe('review round 1', () => {
     expect(context(r.stdout)?.additionalContext).toContain('is generated');
   });
 
+  it('a bare .openlore/ a tool left in a subdirectory does not capture the hook', async () => {
+    const root = repo({ 'gen/order.pb.go': GENERATED });
+    // The project turns this moment off; a stray folder below it must not hide that setting.
+    writeFileSync(join(root, '.openlore', 'config.json'), JSON.stringify({ hooks: { 'before-edit': false } }));
+    mkdirSync(join(root, 'gen/.openlore/logs'), { recursive: true });
+    const r = await runHook('before-edit', JSON.stringify({ session_id: 'stray', cwd: join(root, 'gen'), tool_input: { file_path: join(root, 'gen/order.pb.go') } }));
+    expect(r.stdout).toBe('');
+  });
+
   it('never takes the home directory or a parent repository for the OpenLore root', async () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'olhome-')));
     dirs.push(home);
@@ -271,6 +281,7 @@ describe('review round 1', () => {
     const top = repo({ 'packages/app/gen/x.pb.go': GENERATED });
     rmSync(join(top, '.openlore'), { recursive: true });
     mkdirSync(join(top, 'packages/app/.openlore'));
+    writeFileSync(join(top, 'packages/app/.openlore/config.json'), '{}');
     const r = await runHook('before-edit', JSON.stringify({ session_id: 'mt', cwd: top, tool_input: { file_path: join(top, 'packages/app/gen/x.pb.go') } }));
     expect(context(r.stdout)?.additionalContext).toContain('is generated');
   });
@@ -279,6 +290,7 @@ describe('review round 1', () => {
     const top = repo({ 'packages/app/src/f.ts': 'export function f() { return 1; }\n', 'packages/app/src/f.test.ts': TEST });
     const app = join(top, 'packages/app');
     mkdirSync(join(app, '.openlore'));
+    writeFileSync(join(app, '.openlore', 'config.json'), '{}');
     write(app, 'src/f.test.ts', TEST.replace("it('b'", "it.skip('b'"));
     const r = await runHook('after-tools', JSON.stringify({ session_id: 'mono', cwd: app, tool_input: { file_path: join(app, 'src/f.test.ts') } }));
     expect(context(r.stdout)?.additionalContext).toContain('test `b`');

@@ -123,6 +123,13 @@ All notable changes to OpenLore are documented here. This project adheres to
   `blast_radius` and the hook briefings printed an enum type as `string{["\"open\"","\"shipped\""]}`;
   they now print `string enum "open" | "shipped"`, and a format as `string (date)`.
 
+- **The hooks, the status line and the Pi extension find the project by one rule.** A project is
+  the nearest directory whose `.openlore/` holds a `config.json` or an `analysis/`, found without
+  crossing a repository top or the home directory. Before, a `.openlore/` folder a tool left in a
+  subdirectory captured the hooks, so the project's own settings (such as a moment turned off) were
+  not read. The status line also crossed into a parent repository and reported its index for a
+  nested one, where the hooks stayed silent.
+
 - **TypeScript files that use `import('x').T` types, `typeof import(…)`, `using` as a variable, or
   `export type *` no longer parse with errors.** The bundled grammar cannot parse these; a
   length-preserving, parse-only mask now hides them from it. On this repository: files with parse
