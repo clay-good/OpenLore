@@ -231,6 +231,29 @@ describe('check weakening — renamed functions', () => {
     expect(r.findings.map(f => f.location?.path)).toEqual(['src/b.ts']);
     expect(r.findings[0].message).toContain('in `two`');
   });
+
+  it('a swallow moved to another file of the diff is not reported, in either file order', async () => {
+    // Moving `findSpecMarkdown`'s `catch { return []; }` into a shared module read as a new discard.
+    const body = '{ let e; try { e = await readdir(d); } catch { return []; } return e; }';
+    const from = { path: 'src/a.ts', base: `export async function walk(d) ${body}\n`, current: 'export const x = 1;\n' };
+    const to = { path: 'src/shared.ts', base: 'export const y = 1;\n', current: `export const y = 1;\nexport async function find(d) ${body}\n` };
+    expect((await detect([from, to])).findings).toEqual([]);
+    expect((await detect([to, from])).findings).toEqual([]);
+    // Copied, not moved: the original keeps its handler, so the copy is a new discard.
+    const kept = { ...from, current: from.base };
+    expect((await detect([kept, to])).findings.map(f => f.location?.path)).toEqual(['src/shared.ts']);
+  });
+
+  it('names the constant a handler returns instead of the error', async () => {
+    const r = await detect([
+      { path: 'src/a.ts', base: 'function f() { return g(); }\n', current: "function f() { try { return g(); } catch { return 'fallback'; } }\n" },
+      { path: 'src/b.ts', base: 'function f() { g(); }\n', current: 'function f() { try { g(); } catch {} }\n' },
+    ]);
+    expect(r.findings.map(f => f.message)).toEqual([
+      "An error from `g()` in `f` is now caught and replaced by `return 'fallback'` (src/a.ts:1).",
+      'An error from `g()` in `f` is now caught and only logged or ignored (src/b.ts:1).',
+    ]);
+  });
 });
 
 describe('check weakening — check configs', () => {

@@ -109,6 +109,12 @@ All notable changes to OpenLore are documented here. This project adheres to
   `select_tests` found 9 of the 12 tests they broke; it now finds all 12. Path readers are selected
   at medium confidence with their own reason.
 
+- **The swallowed-error finding is quieter and says what happens to the error.** In a day of real
+  sessions it fired twice, both noise. One handler had been moved from another file in the same
+  change: it now counts as moved, in either file order, while a copy that leaves the original in
+  place is still reported. The other returned a deliberate fallback, but the message said "only
+  logged or ignored"; it now says "replaced by `return …`".
+
 - **Spec text under a configured `openspecPath` is labeled reviewed only when it is.** `orient`,
   `blast_radius` and the Pi context checked git for a fixed `openspec/` folder. With
   `openspecPath: "docs"`, an uncommitted edit under `docs/specs/` was served as `reviewed-corpus`.

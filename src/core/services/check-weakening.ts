@@ -629,7 +629,18 @@ function firstCall(n: Node | null | undefined): string | null {
   return null;
 }
 
-interface Swallow { key: string; fn: string; call: string; line: number; body: string }
+interface Swallow {
+  key: string; fn: string; call: string; line: number; body: string;
+  /** The constant `return` that stands in for the error, when the handler has one. */
+  fallback?: string;
+}
+
+/** The handler's constant `return`, one line, when it has one: what the caller gets instead. */
+function fallbackOf(block: Node | null | undefined): string | undefined {
+  const statements = block?.namedChildren.flatMap(c => (c.type === 'statement_list' ? c.namedChildren : [c])) ?? [];
+  const ret = statements.find(s => s.type === 'return_statement');
+  return ret ? ret.text.replace(/\s+/g, ' ').replace(/;$/, '').slice(0, 60) : undefined;
+}
 
 function swallowedHandlers(language: string, root: Node): Swallow[] {
   const out: Swallow[] = [];
@@ -645,7 +656,8 @@ function swallowedHandlers(language: string, root: Node): Swallow[] {
       const call = firstCall(guarded);
       if (call) {
         const body = hash(guarded!.text);
-        out.push({ key: `${enclosingFunction(n)}\0${body}`, fn: enclosingFunction(n), call, line: n.startPosition.row + 1, body });
+        const fallback = fallbackOf(consequence);
+        out.push({ key: `${enclosingFunction(n)}\0${body}`, fn: enclosingFunction(n), call, line: n.startPosition.row + 1, body, ...(fallback ? { fallback } : {}) });
       }
       continue;
     }
@@ -658,7 +670,8 @@ function swallowedHandlers(language: string, root: Node): Swallow[] {
     const call = firstCall(tryBody);
     if (!call) continue;
     const body = hash(tryBody!.text);
-    out.push({ key: `${enclosingFunction(n)}\0${body}`, fn: enclosingFunction(n), call, line: n.startPosition.row + 1, body });
+    const fallback = fallbackOf(block);
+    out.push({ key: `${enclosingFunction(n)}\0${body}`, fn: enclosingFunction(n), call, line: n.startPosition.row + 1, body, ...(fallback ? { fallback } : {}) });
   }
   return out;
 }
@@ -1034,6 +1047,28 @@ export async function detectWeakeningShapes(
     }
   }
 
+  // Error handlers the diff removed from one file and not re-added in that same file: a new discard
+  // in ANOTHER file of the diff whose guarded code matches one was moved there, not added. Each file
+  // matches its own removals first, so the pool never depends on the order of the files.
+  const movedSwallowPool = new Map<string, number>();
+  for (const f of files) {
+    const language = detectLanguage(f.path);
+    if (f.tooLarge || f.base === null || checkConfigKind(f.path) || !ASSESSED_LANGUAGES.has(language)) continue;
+    const { baseRoot, curRoot } = await rootsOf(f, language);
+    if (!baseRoot || baseRoot.hasError || curRoot?.hasError) continue;
+    const base = swallowedHandlers(language, baseRoot);
+    const cur = curRoot ? swallowedHandlers(language, curRoot) : [];
+    const curKeys = new Set(cur.map(c => c.key));
+    const baseKeys = new Set(base.map(b => b.key));
+    const gone = new Map<string, number>();
+    for (const b of base) if (!curKeys.has(b.key)) gone.set(b.body, (gone.get(b.body) ?? 0) + 1);
+    for (const c of cur) {
+      const n = baseKeys.has(c.key) ? 0 : gone.get(c.body) ?? 0;
+      if (n > 0) gone.set(c.body, n - 1);
+    }
+    for (const [body, n] of gone) if (n > 0) movedSwallowPool.set(body, (movedSwallowPool.get(body) ?? 0) + n);
+  }
+
   for (const f of files) {
     const fileFindings: CheckWeakeningFinding[] = [];
     const push = (): void => {
@@ -1103,17 +1138,20 @@ export async function detectWeakeningShapes(
       const extra = new Map([...curPerFn].map(([fn, n]) => [fn, n - (perFn.get(fn) ?? 0)]));
       // The same guarded code already discarded at the baseline, under another function name: a
       // renamed or moved function, not a new discard. Matched as a multiset over the file, so a
-      // second copy of a once-swallowed body is still reported.
+      // second copy of a once-swallowed body is still reported; then against the handlers other
+      // files of the diff removed (moved across files).
       const baseBodies = new Map<string, number>();
       for (const s of baseSwallows) if (!curSwallows.some(c => c.key === s.key)) baseBodies.set(s.body, (baseBodies.get(s.body) ?? 0) + 1);
       for (const s of curSwallows) {
         if (wrapped.has(s.key)) continue;
         const moved = baseBodies.get(s.body) ?? 0;
         if (moved > 0) { baseBodies.set(s.body, moved - 1); continue; }
+        const movedIn = movedSwallowPool.get(s.body) ?? 0;
+        if (movedIn > 0) { movedSwallowPool.set(s.body, movedIn - 1); continue; }
         if ((extra.get(s.fn) ?? 0) <= 0) continue;
         extra.set(s.fn, extra.get(s.fn)! - 1);
         fileFindings.push(finding('error-swallowed', 'warning', `${f.path}:${s.line}`,
-          `An error from ${quote(s.call)} in ${quote(s.fn)} is now caught and only logged or ignored (${f.path}:${s.line}).`, f.path, s.line, s.key));
+          `An error from ${quote(s.call)} in ${quote(s.fn)} is now caught and ${s.fallback ? `replaced by ${quote(s.fallback)}` : 'only logged or ignored'} (${f.path}:${s.line}).`, f.path, s.line, s.key));
       }
     }
 
