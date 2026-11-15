@@ -349,12 +349,13 @@ describe('agent-loop enforcement hook', () => {
     expect(output).not.toContain('Action:');
   });
 
-  it('renders a source-default blocking finding as advisory when no policy configured it', () => {
+  it('renders a corpus-integrity finding as advisory when no policy names it', () => {
     const result = classifyFindings([{
       code: 'corpus-reference-unresolved', severity: 'error', source: 'corpus-integrity',
       subject: 'ADR-1', message: 'target is missing',
     }], {});
-    expect(result.blocking).toHaveLength(1);
+    expect(result.blocking).toHaveLength(0);
+    expect(result.advisory).toHaveLength(1);
     expect(renderAgentHook(result, [], false, new Set())).toContain('[advisory]');
   });
 
@@ -772,7 +773,7 @@ describe('enforce gate decision', () => {
     expect(collected.failedCodes.has('scenario-unverifiable-shape')).toBe(true);
     expect(collected.assessedCodes.has('scenario-unverifiable-shape')).toBe(false);
   });
-  it('applies corpus source defaults and honors an explicit advisory downgrade', async () => {
+  it('reports a corpus finding as advisory with no policy and blocks only when the policy names it', async () => {
     const root = await mkRepo();
     await initializeGitHead(root);
     const specDir = join(root, 'openspec', 'specs', 'demo');
@@ -781,15 +782,20 @@ describe('enforce gate decision', () => {
       '# Demo\n\n## Requirements\n\n### Requirement: Broken\n\n> Decision recorded: deadbeef\n');
     await execFileAsync('git', ['add', 'openspec/specs/demo/spec.md'], { cwd: root });
 
+    const advisory = await gateJson(root, true);
+    expect(advisory.code).toBe(0);
+    expect(advisory.json.blocking).toEqual([]);
+    expect(advisory.json.advisory.map((finding) => finding.code)).toContain('corpus-reference-unresolved');
+    const hook = await gateHookHuman(root);
+    expect(hook.code).toBe(0);
+    expect(hook.stderr).toContain('corpus-reference-unresolved');
+
+    await writePolicy(root, { 'corpus-reference-unresolved': 'blocking' });
+    await execFileAsync('git', ['add', '.openlore/config.json'], { cwd: root });
     const blocked = await gateJson(root, true);
     expect(blocked.code).toBe(1);
     expect(blocked.json.blocking.map((finding) => finding.code)).toContain('corpus-reference-unresolved');
-
-    await writePolicy(root, { 'corpus-reference-unresolved': 'advisory' });
-    await execFileAsync('git', ['add', '.openlore/config.json'], { cwd: root });
-    const downgraded = await gateJson(root, true);
-    expect(downgraded.code).toBe(0);
-    expect(downgraded.json.advisory.map((finding) => finding.code)).toContain('corpus-reference-unresolved');
+    expect((await gateHookHuman(root)).code).toBe(1);
   });
 
   it('does not gate when undeclared-reference advice is the only corpus finding', async () => {
@@ -810,9 +816,11 @@ describe('enforce gate decision', () => {
     expect(result.json.advisory.map((finding) => finding.code)).toEqual(['corpus-reference-undeclared']);
   });
 
-  it('checks index/worktree parity for source-default blocking corpus findings', async () => {
+  it('checks index/worktree parity for policy-blocking corpus findings', async () => {
     const root = await mkRepo();
     await initializeGitHead(root);
+    await writePolicy(root, { 'corpus-reference-unresolved': 'blocking' });
+    await execFileAsync('git', ['add', '.openlore/config.json'], { cwd: root });
     const specDir = join(root, 'openspec', 'specs', 'demo');
     await mkdir(specDir, { recursive: true });
     const bad = '# Demo\n\n## Requirements\n\n### Requirement: Broken\n\nThe system SHALL fail closed.\n\n> Decision recorded: deadbeef\n';
@@ -830,6 +838,8 @@ describe('enforce gate decision', () => {
   it('sanitizes repository-authored control bytes in hook output', async () => {
     const root = await mkRepo();
     await initializeGitHead(root);
+    await writePolicy(root, { 'corpus-reference-unresolved': 'blocking' });
+    await execFileAsync('git', ['add', '.openlore/config.json'], { cwd: root });
     const specDir = join(root, 'openspec', 'specs', 'demo');
     await mkdir(specDir, { recursive: true });
     await writeFile(join(specDir, 'spec.md'),

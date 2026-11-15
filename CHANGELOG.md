@@ -26,6 +26,24 @@ All notable changes to OpenLore are documented here. This project adheres to
   (`--preset configuration`). Nothing changes for a repository without `filePolicies`: the corpus,
   fingerprints, default MCP surface and default config stamp are the same as before.
 
+### Changed
+
+- **Corpus-integrity findings no longer block a commit by default.** `corpus-reference-unresolved`,
+  `corpus-reference-ambiguous`, `corpus-self-reference`, `corpus-duplicate-identifier`,
+  `corpus-edge-unsupported`, `corpus-target-type-mismatch` and `corpus-supersession-cycle` now
+  default to `advisory`, like every other finding code: only `enforcement.policy` makes a finding
+  block. Their severity stays `error`, `openlore doctor` still reports them as failures, and a
+  supersession cycle still makes no decision in the cycle authoritative. To keep the old behavior,
+  add this to `.openlore/config.json`:
+
+  ```json
+  { "enforcement": { "policy": {
+    "corpus-reference-unresolved": "blocking", "corpus-reference-ambiguous": "blocking",
+    "corpus-self-reference": "blocking", "corpus-duplicate-identifier": "blocking",
+    "corpus-edge-unsupported": "blocking", "corpus-target-type-mismatch": "blocking",
+    "corpus-supersession-cycle": "blocking" } } }
+  ```
+
 ### Fixed
 
 - **Index build progress for you, silence for the agent.** While an index builds, `openlore
