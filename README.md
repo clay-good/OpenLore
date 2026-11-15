@@ -1,9 +1,9 @@
 <h1 align="center">OpenLore</h1>
 
 <p align="center">
-  <strong>Deterministic, local-first memory and guardrails for AI coding agents — no LLM in the hot path.</strong><br>
-  Install once. From then on it runs in the background, keeping your agent oriented and its changes safe.<br>
-  No API key. Same answer every time.
+  <strong>Your coding agent forgets your codebase between tasks. OpenLore remembers it for them.</strong><br>
+  Local, deterministic facts about your code, delivered to the agent at the moment it can use them.<br>
+  No API key. No LLM in the loop. Your code never leaves your machine.
 </p>
 
 <p align="center">
@@ -20,213 +20,274 @@
 </p>
 
 <p align="center">
-  <code>install</code> wires your agent and indexes the repo → <code>orient</code> returns the code a task touches → <code>review</code> catches the change that breaks a contract. All local, no API key.
-</p>
-
-<p align="center">
-  <strong><a href="#install-once-then-forget-it">Install</a> · <a href="#what-you-get">What you get</a> · <a href="#value-scorecard--does-it-pay-for-itself">Benchmarks</a> · <a href="#openlore-vs-alternatives">vs. Alternatives</a> · <a href="#documentation">Docs</a></strong>
+  <strong><a href="#install">Install</a> · <a href="#what-the-agent-gets">What the agent gets</a> · <a href="#value-scorecard">Benchmarks</a> · <a href="#how-it-compares">Comparison</a> · <a href="#documentation">Docs</a></strong>
 </p>
 
 ---
 
-AI coding agents are **amnesiac and ungoverned**. Every task restarts by re-reading the same files, long sessions drift onto stale assumptions, and nothing warns the agent when a change is about to break a contract or cross a boundary.
+## The problem
 
-OpenLore fixes both halves, and then gets out of your way. A **one-time static analysis** builds a live knowledge graph of your repo — call structure, types, tests, decisions, IaC. From then on your agent is **already oriented at the start of every task** and its changes are **certified before they land** — automatically, deterministically, with **no LLM in the hot path**, so the same question returns the same grounded answer and the agent is *told when a fact goes stale* instead of served a confident guess.
+Every time you start a task, your agent rediscovers your codebase. It greps, opens a dozen files,
+and builds a picture of how things fit together. Then the session ends and the picture is gone.
 
-## Install once, then forget it
+The rediscovery costs time and tokens, but that is not the expensive part. The expensive part is
+what happens when the agent is confident and wrong. It believes a function has no other callers.
+It renames an export that three services import. It weakens a test to get it green. It calls a
+helper that does not exist. You find out at review time, or later.
 
-```bash
-npm install -g openlore && openlore install
-```
+## What OpenLore does
 
-**Claude Code only?** Install it as a plugin instead, with no global npm install and no config
-([what the plugin runs and writes](plugin/README.md)):
+OpenLore builds a map of your repository once: every function, who calls it, which tests reach
+it, which specs and decisions govern it, and which infrastructure deploys it. It keeps that map
+current as you edit.
+
+Then it stays out of the way. It does not ask you to learn new commands. It hands your agent
+short, specific facts at four points in a session:
+
+| When | What the agent sees |
+|------|---------------------|
+| A session starts | A short primer on the repository. After a context compaction, a handoff of what the session already did. |
+| You submit a prompt | The functions, callers, specs, and insertion points that matter for that prompt. |
+| The agent edits a file or runs a command | Anything new and real: a call to a symbol that does not exist, a test that just got weaker, an edit to a generated file. |
+| The agent is about to stop | One receipt: what changed, which tests reach it, and which specs drifted. |
+
+Every finding comes with proof: a file, a line, a call edge. If there is nothing new to say,
+OpenLore says nothing.
+
+The agent can also ask questions directly, over MCP. "Who calls this?" "What breaks if I change
+this?" "Is this function really dead?" Each answer is computed from the map, not guessed by a
+model, so the same question gets the same answer every time.
+
+## Install
+
+**Claude Code** (recommended). One plugin, no config:
 
 ```bash
 claude plugin marketplace add clay-good/OpenLore
 claude plugin install openlore@openlore
 ```
 
-`npm install -g openlore && openlore install` is the only command most people ever run. It **auto-detects your agent** (Claude Code, Cursor, Cline, Continue, Pi, AGENTS.md), wires it, registers the MCP server, and builds the index — no API key, no config, no prompts. After that, **it's on in the background and you don't think about it:**
+The plugin brings the hooks and the MCP server. On first use it installs its runtime in the
+background, and the first prompt in each repository starts the index build. The
+[plugin README](plugin/README.md) lists exactly what it runs, writes, and fetches.
 
-- 🔄 **Every task starts oriented, automatically** — a compact architecture digest is injected into your agent's context at the start of each session, and your agent calls `orient()` and the other tools itself over MCP. You don't type anything.
-- 🌱 **Every repo, not just this one** — `install` wires your user account too, so each new git repo you open indexes itself in the background on first touch. "Install once" is literal.
-- 🩹 **Always fresh** — a file watcher re-indexes as you edit and converges to a full analysis; anything it can't recompute in time is marked explicitly stale, never silently wrong.
-- 🛡️ **Changes get checked before they land** — the governance tools (and `openlore review` on a PR) run deterministically with no API key.
+**Any other agent** (Cursor, Cline, Continue, Codex, Pi, or anything that reads `AGENTS.md`):
 
-The CLI below exists for humans and CI — `prove`, `review`, `doctor`, `features`. The everyday path is: install, then let your agent use it.
+```bash
+npm install -g openlore && openlore install
+```
 
-> **Zero config.** Run **`openlore features`** to see every opt-in capability (embeddings, the commit gate, the spec store…), whether it's on, and the one command to enable it. `openlore doctor` verifies the wiring.
+`openlore install` detects the agents on your machine, wires each one, and builds the index. It
+also wires your user account, so each new repository you open indexes itself the first time you
+use it there.
 
----
+**Any MCP client.** OpenLore is a standard stdio MCP server:
 
-## What you get
+```json
+{
+  "mcpServers": {
+    "openlore": { "command": "npx", "args": ["-y", "openlore", "mcp"] }
+  }
+}
+```
 
-Two things, both deterministic and local:
+**Pi.** Pi loads extensions rather than MCP servers. Use `pi install npm:openlore`, or
+`openlore install --agent pi`. See [the Pi guide](docs/install.md#pi-pidev).
 
-**🧠 Memory — your agent starts every task already oriented**
+Requires Node.js 22.22 or later. Run `openlore doctor` to check the wiring and `openlore features`
+to see what is on and how to turn on the rest.
 
-- **Orient in one call** — `orient(task)` returns the relevant functions, callers, specs, tests, and insertion points (**~430µs p50** on a 15k-node graph) instead of a dozen exploratory file reads.
-- **Survives refactors** — anchored notes and decisions carry forward when a symbol is renamed or moved, instead of orphaning.
-- **One graph for everything** — application code, Infrastructure-as-Code, and architectural decisions share one graph, so a single query spans all three.
-- **Told when a fact is stale** — every response carries a brief, **factual freshness note** (the Epistemic Lease) once a cached fact has aged or the repo moved, so a long session can't drift onto a confident guess.
+## What the agent gets
 
-**🛡️ Governance — guardrails on what the agent changes**
+### It starts every task oriented
 
-- **Breaking-change verdict** — `certify_public_surface` classifies every changed export `breaking / non-breaking / potentially-breaking` and **names the consumers each break hits**. Never silently "safe."
-- **Sensitive-boundary check** — `change_impact_certificate` flags when a diff **opens a new path into a boundary you declared** (reachable after the change, not before).
-- **Grounded claims** — `verify_claim` returns `confirmed / refuted / unverifiable` with a citation, before an agent asserts "X is dead" or "Y is safe to change."
-- **One commit gate** — `openlore enforce` blocks on findings you mark `blocking`. Advisory by default, no API key.
+`orient(task)` returns the code a task touches in one call, about 430 microseconds at the median
+on a 15k-node graph. The agent gets the relevant functions, their callers and callees, the
+tests that reach them, and the best places to add new code. It skips the exploratory file reads.
 
-**The one line to remember:** an agent's expensive failure mode isn't ignorance — it's *confidence*. A model that doesn't know a function exists will go look. A model that "knows" a stale fact builds on it, and you pay at review time. OpenLore is built so the agent can be told *"that fact is stale"* and *"this change opens a path you said was sensitive"* — deterministically, with no second model guessing about the first.
+### It knows when a fact has gone stale
 
----
+Long sessions drift. A fact that was true an hour ago may not be true now. Each response carries a
+short, factual freshness note (the Epistemic Lease) once the agent's cached picture has aged or the
+repository has moved. The agent re-checks instead of building on a stale belief.
 
-## Value Scorecard — does it pay for itself?
+### Its notes survive refactors
 
-OpenLore only earns its place if an agent **with** it reaches a correct answer for less total cost than the same agent **without** it. We measure that and publish it — wins **and** losses. Numbers from the Spec 14 benchmark (`claude -p`, sonnet, N=4 medians, pinned SHAs), measured **2026-06-01**.
+Decisions and notes are anchored to code. When a function is renamed or moved, the note follows
+it. When the code it describes changes, the note is marked stale instead of quietly misleading the
+next session.
 
-| Scenario | Cost Δ | Round-trips Δ | Verdict |
+### It checks a change before claiming it is done
+
+- `blast_radius` lists the callers, tests, and specs a diff affects.
+- `verify_claim` returns `confirmed`, `refuted`, or `unverifiable` for a statement like "this
+  function is unused," with the evidence.
+- `certify_public_surface` classifies each changed export as breaking or not and names the
+  consumers it breaks.
+- `change_impact_certificate` flags a diff that opens a new path into a boundary you marked as
+  sensitive.
+- `openlore review` posts the same checks on a pull request, with no API key.
+
+All of this is advisory by default. If you want a hard gate, mark the findings you care about as
+blocking and run `openlore enforce` before commit.
+
+### Application code, infrastructure, and contracts in one graph
+
+Terraform resources, Kubernetes manifests, CI jobs, and Dockerfiles sit in the same graph as your
+functions. So do the operations declared in OpenAPI, protobuf, and GraphQL files, linked to the
+handlers that serve them and the code that calls them. One question, such as "what is affected if
+I change this IAM role?", reaches across all of it.
+
+## Value Scorecard
+
+OpenLore is only worth it if an agent with it reaches a correct answer for less than the same
+agent without it. We measured that and we publish the losses next to the wins. Numbers are from the
+Spec 14 benchmark (`claude -p`, sonnet, N=4 medians, pinned SHAs), measured 2026-06-01.
+
+| Scenario | Cost change | Round-trips change | Verdict |
 |---|---|---|---|
-| **Large/unfamiliar repo · deep "how does X flow through Y"** *(its target)* | **−7% to −21%** | **−26%** | ✅ helps — and the win grows with repo size |
-| Small/familiar repo · shallow "who calls X" | task-dependent *(Round 1: +43%)* | +38% | ❌ often **adds overhead** — measure first |
+| Large or unfamiliar repo, deep "how does X flow through Y" | -7% to -21% | -26% | Helps, and the win grows with repo size |
+| Small or familiar repo, shallow "who calls X" | Task-dependent (Round 1: +43%) | +38% | Often adds overhead. Measure first. |
 
-The win scales with codebase size (round-trips without → with):
+Round-trips per task, without OpenLore and then with it:
 
-| Repo (size) | Cost Δ | Round-trips |
+| Repo (size) | Cost change | Round-trips |
 |---|---|---|
-| excalidraw (~640 files) | **−21%** | 25 → 16 |
-| tokio (~790 files) | **−21%** | 17 → 13 |
-| okhttp | **−13%** | 13 → 11 |
-| django (~3k files) | **−7%** | 21 → 15 |
-| gin (110 files, smallest) | +4% *(≈even)* | 10 → 9 |
+| excalidraw (~640 files) | -21% | 25 → 16 |
+| tokio (~790 files) | -21% | 17 → 13 |
+| okhttp | -13% | 13 → 11 |
+| django (~3k files) | -7% | 21 → 15 |
+| gin (110 files, the smallest) | +4% (about even) | 10 → 9 |
 
-> **Re-confirmed live 2026-06-03:** the deep-task win reproduces (okhttp **−13%**); the small/familiar case is task-dependent, not a flat loss (chalk **−32%** win vs. express **+59%** loss). Don't guess from our repos — run **`openlore prove --estimate`** on yours (seconds, no API key).
+We re-ran it live on 2026-06-03. The deep-task win held (okhttp -13%). On small repos the result
+depends on the task: chalk came out 32% cheaper and express 59% more expensive.
 
-> **Honesty contract.** We never publish a savings number the benchmark didn't produce, we always show the losses next to the wins, and every claim traces to a command you can run. Methodology: [docs/AGENT-BENCHMARKS.md](docs/AGENT-BENCHMARKS.md).
+Your repo is not ours. Run `openlore prove --estimate` to get an estimate for your own code in a
+few seconds, with no API key. The method is in [docs/AGENT-BENCHMARKS.md](docs/AGENT-BENCHMARKS.md).
+Every number here traces to a command you can run.
 
----
+## Is it for you?
 
-## Is OpenLore for you?
+**A strong fit** if your codebase is too big to hold in your head, if it is private or niche code a
+model never saw in training, if your sessions run long, or if your repo mixes languages or ships its
+own infrastructure.
 
-| | |
-|---|---|
-| ✅ **Strong fit** | A codebase too big to hold in your head — and the model's. Private or niche code the model never memorized. Long sessions where stale assumptions compound. Polyglot repos, or code plus the IaC that deploys it. |
-| 🤔 **Try it, measure** | Mid-size repos and mixed workloads. Run **`openlore prove --estimate`** (seconds, no key) before you commit. |
-| ❌ **Probably not** | A small repo the model already knows, answering shallow questions — your agent's built-in search is cheaper, and we [publish the measurement that says so](#value-scorecard--does-it-pay-for-itself). Also: OpenLore locates and certifies, it never edits your code. |
+**Try it and measure** on mid-size repos and mixed work.
 
----
+**Probably not** for a small repo the model already knows well, with mostly shallow questions.
+Your agent's built-in search is cheaper there, and the scorecard above says so.
 
-## What your agent reaches for (you rarely type these)
+OpenLore reads and reports. It never edits your code.
 
-Once wired, your agent calls these over MCP on its own. The default surface is the **`substrate`** preset — **15 tools**: the navigation core, the highest-value governance reads (`recall`, `verify_claim`, `blast_radius`), and the spec composites. The lean **`navigation`** preset (10 tools) and the full **84 tools** (`--preset full`) are one flag away.
+## How it compares
 
-| When the agent needs to… | Tool |
-|-----------|------|
-| Start any task | `orient(task)` — functions, callers, specs, insertion points in one call |
-| Find which file/function handles X | `search_code` |
-| Know the blast radius of a change | `analyze_impact` — risk + up/downstream chain + governing decisions |
-| Trace how request X reaches function Y | `trace_execution_path` |
-| Pick the tests a change should run | `select_tests` — backward reachability to the reaching tests |
-| Find dead code / what dies if X is deleted | `find_dead_code` — cross-language reachability |
-| Check a whole diff before commit | `blast_radius` — callers, tests, specs that drift |
-| Tell if a diff opens a sensitive boundary | `change_impact_certificate` |
-| Tell if a change breaks a consumer's API | `certify_public_surface` — verdict, consumers named |
-| Verify a fact before asserting it | `verify_claim` — deterministic verdict + citation |
-| Record an architectural choice | `record_decision` **before** writing the code |
+Most tools in this space solve the first half: give the agent a way to see the codebase without
+reading every file. OpenLore does that too. It also covers the second half, which few tools touch:
+checking what the agent changes against the same map.
 
-Full reference — all 84 tools: [docs/mcp-tools.md](docs/mcp-tools.md). Ships as a Claude Code [Skill](https://docs.claude.com/en/docs/claude-code/skills) at [`skills/openlore-orient/`](skills/openlore-orient/).
-
----
-
-## OpenLore vs. alternatives
-
-Everyone in this category answers the same first question: **how does the agent see the codebase without reading it file by file?** LSP toolkits answer with symbols, graph MCP servers with a parsed graph, search platforms with an index. OpenLore answers it too — then keeps going into the **second question almost nobody answers: what happens when the agent starts writing?** A retrieval layer makes an agent *informed*; it doesn't make it *safe*. That second half — **governance on the same graph, no LLM in the loop** — is what OpenLore is for.
-
-| | Agent built-ins | LSP toolkits | Graph MCP | Search platforms | **OpenLore** |
+| | Agent built-ins | LSP toolkits | Graph MCP servers | Hosted search | OpenLore |
 |---|---|---|---|---|---|
-| Structural context instead of file reads | ❌ grep | ✓ symbols | ✓ graph | ✓ index | ✓ call graph + **IaC + decisions on one graph** |
-| Local, no API key, deterministic | Partial | ✓ | ✓ | ❌ hosted | ✓ no LLM in the hot path |
-| Cross-session memory anchored to code | ❌ | Partial | ✓ notes | ❌ | ✓ **carried across renames** |
-| Told when a cached fact goes **stale** | ❌ | ❌ | ❌ | ❌ | ✓ Epistemic Lease |
-| Breaking-change **verdict** over a diff | ❌ | ❌ | Partial | ❌ | ✓ per export, **consumers named** |
-| "Did this diff open a sensitive path?" | ❌ | ❌ | ❌ | ❌ | ✓ differential, pre-commit |
-| Cost effect **published with the losses** | ❌ | ❌ | ❌ | ❌ | ✓ −26% round-trips on deep tasks |
+| Structure instead of file reads | grep | symbols | graph | index | call graph, infrastructure, and decisions in one graph |
+| Local, no API key, deterministic | partly | yes | yes | no | yes |
+| Memory that survives renames | no | partly | notes | no | yes |
+| Says when a cached fact is stale | no | no | no | no | yes |
+| Breaking-change verdict on a diff | no | no | partly | no | yes, with consumers named |
+| Flags a new path into a sensitive area | no | no | no | no | yes |
+| Publishes its losses | no | no | no | no | yes |
 
-**Use the other tool when it's the right one:** symbol-level *edits* (rename across files) are an LSP toolkit's home turf — OpenLore is deliberately read-only, and the two compose. Org-wide search across hundreds of repos is a search platform. Just-fast-graph-retrieval is a smaller graph MCP server. And a small, familiar repo with shallow questions is cheaper with your agent's built-in search. OpenLore also [exports SCIP](docs/scip-export.md), so it sits alongside these tools, not against them.
+Use the other tool when it fits better. An LSP toolkit is the right choice for edits like a
+cross-file rename, and it works well next to OpenLore. Hosted search wins for searching hundreds of
+repositories at once. OpenLore also [exports SCIP](docs/scip-export.md), so it fits next to the tools
+you already use.
 
-*Comparisons reflect each project's publicly documented capabilities as of July 2026; a correction PR is always welcome.*
-
----
+*Comparisons reflect each project's public documentation as of July 2026. Corrections are welcome.*
 
 ## What it costs
 
-Measured on a fresh clone of [ripgrep](https://github.com/BurntSushi/ripgrep) with published `openlore@2.1.6`:
+Measured on a fresh clone of [ripgrep](https://github.com/BurntSushi/ripgrep) (232 files):
 
-| What it costs | On ripgrep (232 files) |
+| | |
 |---|---|
-| **One-time index build** | **13.6 s**, entirely local — no API key, no network |
-| **Disk** | **27 MB** under `.openlore/` (gitignorable; rebuildable from source) |
-| **Per-query latency** | **~430 µs p50** in-process via the MCP server |
-| **Your source code** | never leaves the machine — no account, no telemetry (opt-in only) |
-| **Lock-in** | none — delete `.openlore/` and nothing about your repo has changed |
+| First index build | 13.6 seconds, all local |
+| Disk | 27 MB in `.openlore/`, which you can delete and rebuild |
+| Query time | about 430 microseconds at the median |
+| Network | none. No account, no telemetry. |
+| Lock-in | none. Delete `.openlore/` and your repo is as it was. |
 
-Large monorepos take minutes rather than seconds, stated plainly in [Known limitations](#known-limitations). Platform: Linux and Windows are exercised in CI; macOS is supported.
+Large monorepos take minutes for the first build, not seconds.
 
-> **Fully local — nothing phones home.** No account, no network call; your source, the index, and every query stay on your machine. The only diagnostics that exist are **opt-in and local-only**, off by default and never transmitted: `OPENLORE_TELEMETRY=1` records tool calls, agent identity, latency, error messages, decision titles, and lease events to the gitignored `.openlore/telemetry/` directory, and `OPENLORE_LLM_LOGS=1` stores prompts and responses (after secret redaction) in the gitignored `.openlore/logs/` directory. → [docs/configuration.md](docs/configuration.md)
+Nothing is sent anywhere. There are two diagnostics, both off by default and both stored only on
+your machine. `OPENLORE_TELEMETRY=1` records tool calls, agent identity, latency, error messages,
+decision titles, and lease events to `.openlore/telemetry/`. `OPENLORE_LLM_LOGS=1` stores the
+prompts and responses of the optional spec-generation commands, after secret redaction, in
+`.openlore/logs/`. Both folders are gitignored. See [docs/configuration.md](docs/configuration.md).
 
----
+## The tools
 
-## Languages, Infrastructure-as-Code & contracts
+Your agent calls these on its own. You rarely type them. The default set is the `substrate`
+preset, 15 tools: the navigation core, the spec preparation tools, and three governance reads
+(`recall`, `verify_claim`, `blast_radius`). A leaner `navigation` preset has 10 tools, and
+`--preset full` exposes all 84 tools.
 
-**Languages**: TypeScript · JavaScript · Python · Go · Rust · Ruby · Java · C++ · Swift · C# · Kotlin · PHP · C · Scala · Dart · Lua · Elixir · Bash — call graphs ride the same primitives for every language. → [docs/language-support.md](docs/language-support.md)
+| When the agent needs to | Tool |
+|---|---|
+| Start a task | `orient` |
+| Find the code that handles something | `search_code` |
+| See what a change to a function affects | `analyze_impact` |
+| Trace how a request reaches a function | `trace_execution_path` |
+| Check a whole diff before commit | `blast_radius` |
+| Confirm a fact before stating it | `verify_claim` |
+| Recall what earlier sessions learned | `recall` |
+| Pick the tests a change needs (full preset) | `select_tests` |
+| Find dead code (full preset) | `find_dead_code` |
 
-**Infrastructure-as-Code**: Terraform/HCL · Kubernetes · Helm · CloudFormation · Ansible · Pulumi · AWS CDK · CDKTF · Dockerfile · Docker Compose · GitHub Actions · Azure Bicep · Serverless Framework — IaC resources project onto the **same graph** as application code, so `orient`, `search_code`, and `analyze_impact` answer "what's the blast radius of changing this security group / IAM role / base image / CI job?" with zero new tooling. → [docs/iac.md](docs/iac.md)
+The full reference is in [docs/mcp-tools.md](docs/mcp-tools.md).
 
-**Interface contracts**: OpenAPI 3.x · Swagger 2.0 — each declared operation projects onto the **same graph**, bound to the route handler that serves it and the function that calls it, so `orient` and `analyze_impact` cross the API boundary. Matching is literal, and everything unbound is disclosed. → [docs/contracts.md](docs/contracts.md)
+## Languages
 
----
+**Code:** TypeScript, JavaScript, Python, Go, Rust, Ruby, Java, Kotlin, PHP, C#, C++, C, Swift,
+Scala, Dart, Lua, Elixir, Bash, Vue, Svelte, Astro. See [docs/language-support.md](docs/language-support.md)
+for what each one supports.
+
+**Infrastructure:** Terraform, Kubernetes, Helm, CloudFormation, Ansible, Pulumi, AWS CDK, CDKTF,
+Dockerfile, Docker Compose, GitHub Actions, Azure Bicep, Serverless Framework. See [docs/iac.md](docs/iac.md).
+
+**Contracts:** OpenAPI 3.x, Swagger 2.0, protobuf, GraphQL. See [docs/contracts.md](docs/contracts.md).
+
+**Spec workflows:** OpenSpec is supported first-class, but none is required. A repo with no specs
+still gets the full value from its code, tests, and decisions.
 
 ## Known limitations
 
-We'd rather you know these up front.
-
-- **Static analysis only.** Polymorphic dispatch, event channels, and route→handler bindings *are* recovered (provenance-labeled `synthesized`). What isn't: reflective invocation with a non-literal target (`getattr(o, name)()`), `eval`, and DI/plugin registries with no visible binding — silently absent from the graph.
-- **LLM spec quality varies.** Generated spec *prose* reflects the model's understanding — review complex business logic. Structure, format, coverage, and drift are checked deterministically.
-- **Keyword (BM25) search answers first; local semantic follows in the background.** `orient`/`search_code` work immediately with no key. Background builds then add on-device vectors (CPU-only, ~23 MB model) when the optional package is installed; opt out with `"embedding": { "provider": "none" }`.
-- **Large monorepos** analyze one package at a time after the first full build (`openlore analyze --shard <name>`); the initial index is still a full analysis.
-- **Incremental updates converge or flag, never silently diverge.** When a change exceeds the per-save budget, the rest is marked explicitly stale and self-heals on later edits or a background re-analyze.
-
----
+- **Static analysis only.** OpenLore recovers polymorphic dispatch, event channels, and route
+  handlers. It cannot see calls made through `eval`, through reflection with a computed name, or
+  through a plugin registry with no visible binding. Where it knows it cannot see, it says so.
+- **Generated spec prose is written by an LLM** and should be reviewed. Only the optional
+  spec-generation commands use a model. Structure, coverage, and drift checks are deterministic.
+- **Keyword search answers first.** Local semantic search can be added in the background with an
+  optional package. Turn it off with `"embedding": { "provider": "none" }`.
+- **Large monorepos** need one full build first. After that, `openlore analyze --shard <name>`
+  rebuilds one package at a time.
+- **Incremental updates converge or flag.** When an edit is too large to re-index in time, the
+  affected parts are marked stale and catch up on the next edit or background build.
 
 ## Documentation
 
-**Start here:** the [documentation index](docs/README.md) maps every task to the one canonical page that answers it. The essentials:
+Start with the [documentation index](docs/README.md). The most used pages:
 
-| I want to… | Doc |
-|------------|-----|
-| **Install & wire my agent** (one command) | [install.md](docs/install.md) |
-| Understand *why* wiring an agent helps | [agent-setup.md](docs/agent-setup.md) |
-| See all **84 MCP tools** + parameters | [mcp-tools.md](docs/mcp-tools.md) |
-| Run the full **CLI reference** | [cli-reference.md](docs/cli-reference.md) |
-| Configure `.openlore/config.json` (incl. `enforcement.policy`) | [configuration.md](docs/configuration.md) |
-| Choose / configure an LLM provider (optional) | [providers.md](docs/providers.md) |
+| I want to | Read |
+|---|---|
+| Install and wire my agent | [install.md](docs/install.md) |
+| See every MCP tool | [mcp-tools.md](docs/mcp-tools.md) |
+| Use the CLI | [cli-reference.md](docs/cli-reference.md) |
+| Configure `.openlore/config.json` | [configuration.md](docs/configuration.md) |
 | Fix a setup problem | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
-| Read the **benchmark methodology** + per-task numbers | [AGENT-BENCHMARKS.md](docs/AGENT-BENCHMARKS.md) |
-| Search code by meaning (semantic / GraphRAG) | [semantic-search.md](docs/semantic-search.md) |
-| Pick the tests a change should run | [test-impact-selection.md](docs/test-impact-selection.md) |
-| Find dead code / coverage gaps | [reachability-dead-code.md](docs/reachability-dead-code.md) · [coverage-gaps.md](docs/coverage-gaps.md) |
-| Detect spec ↔ code drift | [drift-detection.md](docs/drift-detection.md) |
-| Enforce architecture / import rules | [architecture-invariants.md](docs/architecture-invariants.md) |
-| Gate commits / wire CI & PR review | [ci-cd.md](docs/ci-cd.md) · [preflight.md](docs/preflight.md) |
-| Understand IaC & cross-domain impact | [iac.md](docs/iac.md) · [cross-domain-impact.md](docs/cross-domain-impact.md) |
-| See declared API contracts in the graph | [contracts.md](docs/contracts.md) |
-| Query across repos (federation) | [federation.md](docs/federation.md) |
-| Share the index as a bundle | [shareable-bundle.md](docs/shareable-bundle.md) |
-| Export to Sourcegraph / SCIP tools | [scip-export.md](docs/scip-export.md) |
-| Read the internals | [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [ALGORITHMS.md](docs/ALGORITHMS.md) · [PHILOSOPHY.md](docs/PHILOSOPHY.md) |
-
----
+| Read the benchmark method | [AGENT-BENCHMARKS.md](docs/AGENT-BENCHMARKS.md) |
+| Gate commits or review pull requests | [ci-cd.md](docs/ci-cd.md) |
+| Query across repositories | [federation.md](docs/federation.md) |
+| Let an agent help configure OpenLore | [configuration-assistant.md](docs/configuration-assistant.md) |
+| Understand the internals | [ARCHITECTURE.md](docs/ARCHITECTURE.md) and [PHILOSOPHY.md](docs/PHILOSOPHY.md) |
+| See where the project is going | [ROADMAP.md](ROADMAP.md) |
 
 ## Development
 
@@ -237,29 +298,16 @@ npm run test:run  # 5500+ unit tests, one-shot (npm test is watch mode)
 npm run typecheck
 ```
 
-New contributor? See **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup, MCP wiring, and the commit gate. Please also read our [Code of Conduct](CODE_OF_CONDUCT.md); to report a vulnerability, see [SECURITY.md](SECURITY.md).
-
----
+See [CONTRIBUTING.md](CONTRIBUTING.md) to get started, the [Code of Conduct](CODE_OF_CONDUCT.md),
+and [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## Community
 
-If OpenLore saves your agents from re-reading the same files — or catches one risky change before it lands — **star the repo**. It's the signal that tells us to keep building, and it helps other engineers find it.
+If OpenLore saves your agent a few wrong turns, a star helps other people find it.
 
-- ⭐ **Star** to follow along: [github.com/clay-good/OpenLore](https://github.com/clay-good/OpenLore)
-- 🐛 **Bug or idea?** Open an [issue](https://github.com/clay-good/OpenLore/issues).
-- 🤝 **Contribute?** Start with [CONTRIBUTING.md](CONTRIBUTING.md).
+- Star the repo: [github.com/clay-good/OpenLore](https://github.com/clay-good/OpenLore)
+- Report a bug or suggest an idea: [issues](https://github.com/clay-good/OpenLore/issues)
+- Related: [OpenSpec](https://github.com/Fission-AI/OpenSpec), the spec format OpenLore reads and
+  writes, and the [examples](examples/) for BMAD, Spec Kit, and other workflows.
 
----
-
-## Links
-
-- [OpenSpec](https://github.com/Fission-AI/OpenSpec) — spec-driven development framework
-- [AGENTS.md](AGENTS.md) — system prompt for direct LLM prompting
-- [Examples](examples/) — BMAD, Vibe, GSD, drift-demo, spec-kit integrations
-
-### Repository-aware configuration
-
-Use `/openlore configure assist` in Pi, or the opt-in MCP `configuration` preset, to inspect
-repository evidence and review independent index/watch/embed policies before applying a plan.
-The shared API is `openlore/configuration`; no global CLI or compatible daemon is required for
-inspection. [Workflow, authorization, rollback and notification controls](docs/configuration-assistant.md).
+MIT licensed.
