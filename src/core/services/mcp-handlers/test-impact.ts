@@ -286,6 +286,8 @@ export async function handleSelectTests(
   let seededUnchanged = 0;
   /** Changed production files, repository-relative: a test that names one by its path reads it. */
   const changedSourcePaths: string[] = [];
+  /** Files where the diff adds a symbol the index does not hold yet: nothing can seed it. */
+  const newSymbolFiles = new Set<string>();
   if (hasSymbols) {
     const resolution = resolveSymbolSeeds(cg, input.changedSymbols!);
     seeds = resolution.seeds;
@@ -301,6 +303,14 @@ export async function handleSelectTests(
       seeds = narrowed.seeds;
       changeGranularity = narrowed.receipt;
       seededUnchanged = narrowed.seededUnchanged ?? 0;
+      // Only a file the index already holds functions in: a moved or brand-new file has no sibling
+      // whose tests could stand in, and keeps the "not in the index" answer.
+      const indexedIds = new Set(cg.nodes.map(n => n.id));
+      const indexedFiles = new Set(cg.nodes.filter(n => !n.isTest && !n.isExternal).map(n => normalizeRelative(n.filePath)));
+      for (const [file, change] of narrowed.set?.byFile ?? []) {
+        if (change.granularity === 'symbol' && indexedFiles.has(normalizeRelative(file))
+            && change.appeared.some(id => !indexedIds.has(id))) newSymbolFiles.add(normalizeRelative(file));
+      }
       // A test file the diff touched, or a new untracked one, is selected on its own standing — not
       // only if reachability happens to reach it. Only a file the analyzer's own rule calls a test, inside
       // the analyzed directory, and still on disk: a fixture under `test/`, another package's test, or a
@@ -340,7 +350,7 @@ export async function handleSelectTests(
   // Tests that read a changed file by its path (source-text guards): no call edge reaches them.
   const pathReaders = await testsNamingPaths(absDir, cg, changedSourcePaths);
 
-  if (seeds.length === 0 && tierFiles.length === 0 && pathReaders.files.length === 0) {
+  if (seeds.length === 0 && tierFiles.length === 0 && pathReaders.files.length === 0 && newSymbolFiles.size === 0) {
     // Honesty: if federation was opted into, say why no cross-repo selection ran
     // rather than silently omitting the federation block an active scope implies.
     const federationRequested = input.federation === true || (input.federationRepos?.length ?? 0) > 0;
@@ -537,6 +547,25 @@ export async function handleSelectTests(
       if (!depthOf.has(neighbor) || coveredByTest.has(neighbor)) continue;
       coveredByTest.set(neighbor, depth + 1);
       coverageQueue.push(neighbor);
+    }
+  }
+  // A new function has no test edge yet; the tests of its file's other functions are the nearest
+  // evidence of what exercises that file.
+  for (const file of newSymbolFiles) {
+    const inFile = (id: string) => { const n = nodeMap.get(id); return !!n && !n.isTest && normalizeRelative(n.filePath) === file; };
+    for (const e of cg.edges) {
+      if (input.directResolvedOnly && e.confidence === 'synthesized') continue;
+      const via = `(same file as a new symbol in ${file})`;
+      if (e.kind === 'tested_by' && inFile(e.callerId)) {
+        // tested_by points production → test, the test being a node or a whole file (`file::*`).
+        const testFile = e.calleeId.includes('::') ? e.calleeId.split('::')[0] : e.calleeId;
+        add(testFile, e.calleeName, [e.calleeName, via], 'low', SELECTION_REASON.sameFile);
+        usedFileFallback = true;
+      } else if ((!e.kind || e.kind === 'calls') && inFile(e.calleeId) && nodeMap.get(e.callerId)?.isTest) {
+        const test = nodeMap.get(e.callerId)!;
+        add(test.filePath, test.name, [test.name, via], 'low', SELECTION_REASON.sameFile);
+        usedFileFallback = true;
+      }
     }
   }
   for (const s of seeds) {
