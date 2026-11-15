@@ -131,6 +131,8 @@ export interface OpenLoreConfig {
 
 /** Each agent-loop moment wired by `openlore install`; absent or `true` is on, `false` is off. */
 export interface HooksConfig {
+  /** `openlore orient --inject` on a submitted prompt (change: hook-reliability). */
+  'prompt-submitted'?: boolean;
   'before-edit'?: boolean;
   'after-tools'?: boolean;
   'before-stop'?: boolean;

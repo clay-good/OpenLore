@@ -56,6 +56,7 @@ export type {
   RelevanceGateEvaluation,
   TurnIntent,
   WithholdReason,
+  PointerReason,
 } from './orient-inject-render.js';
 
 /**
@@ -100,17 +101,17 @@ export async function buildProposalOnlyInjection(directory: string, prompt: stri
  * Top-level injection builder. Returns the string to emit on stdout:
  *   - '' when injection is disabled (`mode: "off"`) — the caller emits nothing,
  *   - the full block when both gates pass,
- *   - a reason-bearing pointer line on every other path (management intent,
- *     weak match, no graph, error, or empty prompt).
+ *   - a reason-bearing pointer line on every gate withhold (management intent,
+ *     weak match, no graph, or empty prompt),
+ *   - '' when the lookup fails.
  *
- * NEVER SILENT while injection is enabled: `mode: "off"` is the only path that
- * returns ''. Every withhold — including every failure — emits a line that names
- * its cause and the manual `orient` call, so the agent can always tell "nothing
- * relevant was found" from "no lookup was performed" (change:
- * scope-advisory-noise-to-touched-code).
+ * Every gate withhold emits a line that names its cause and the manual `orient`
+ * call, so the agent can always tell "nothing relevant was found" from "no
+ * lookup was performed" (change: scope-advisory-noise-to-touched-code). A failed
+ * lookup is silent instead: the agent is told nothing about OpenLore's own
+ * failure, and the operator sees it in the hook's health (change: hook-reliability).
  *
- * Never throws: every failure path resolves to the pointer line so a hook that
- * invokes it cannot break the user's turn.
+ * Never throws, so a hook that invokes it cannot break the user's turn.
  */
 export async function buildInjection(
   directory: string,
@@ -145,7 +146,7 @@ async function buildTaskInjection(
     const evaluation: RelevanceGateEvaluation = { passes: false, passedCriteria: [], failedCriteria, reason };
     onGateEvaluation?.(evaluation);
     recordInjectionVerdict(directory, evaluation);
-    return pointerLineFor(reason);
+    return reason === 'error' ? '' : pointerLineFor(reason);
   };
 
   const task = prompt.trim();
@@ -172,9 +173,14 @@ async function buildTaskInjection(
     const evaluation = evaluateRelevanceGate(result, cfg);
     onGateEvaluation?.(evaluation);
     recordInjectionVerdict(directory, evaluation);
-    if (!evaluation.passes) return pointerLineFor(evaluation.reason ?? 'weak-relevance');
+    if (!evaluation.passes) {
+      // An orientation error result is silent, like a thrown one (change: hook-reliability).
+      return evaluation.reason === 'error' ? '' : pointerLineFor(evaluation.reason ?? 'weak-relevance');
+    }
     return renderInjectionBlock(result, cfg);
   } catch {
+    // A failed lookup is silent: a hook says nothing about OpenLore's own failure, and the agent
+    // keeps its turn (change: hook-reliability). The verdict is still recorded for telemetry.
     return withhold('error', ['orient-error']);
   }
 }

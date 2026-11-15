@@ -35,27 +35,32 @@ nothing outside its own folder; every file below is edited when the group is bui
 
 ## 3. Prompt-submitted moment under the contract
 
-- [ ] 3.1 Move `deliveredDir`, `deliveredPath`, `readSession`, `writeSession`
+- [x] 3.1 Move `deliveredDir`, `deliveredPath`, `readSession`, `writeSession`
   (`src/cli/commands/hook.ts:222-262`) unchanged into `src/core/services/hook-session.ts` (new);
   export `LOOP_MOMENTS = ['prompt-submitted', ...HOOK_MOMENTS]`. Test:
   `src/core/services/hook-session.test.ts` (new) and the existing `src/cli/commands/hook.test.ts`.
   Done when: `hook.test.ts` passes with no change to its assertions.
-- [ ] 3.2 Wrap `runInject` (`src/cli/commands/orient.ts:66`) in the moment wrapper: off switch,
+- [x] 3.2 Wrap `runInject` (`src/cli/commands/orient.ts:66`) in the moment wrapper: off switch,
   runtime limit from task 1.1, silent on a thrown error or the limit, `session_id` read from the
   stdin payload (`extractPrompt` in `src/cli/commands/orient-inject-render.ts`). The `error` pointer
   line is no longer printed. Test: `src/cli/commands/orient-inject.test.ts` and the prompt-submitted
   cases added to `hook-fail-open.test.ts`. Done when: a throwing `buildInjection` gives empty stdout
   and exit 0; a strong match still prints the block; the gate pointer lines are unchanged.
-- [ ] 3.3 Add `'prompt-submitted'?: boolean` to `HooksConfig` (`src/types/index.ts:130`) and to
+  Built (2026-11-14): the limit (3 s, in-process) covers the whole moment, index bootstrap
+  included; past it the process exits 0 with nothing printed. The off switch is checked first, so
+  an off moment also starts no build. An `error` *result* from the lookup is silent too, not only a
+  throw, and the logger is quiet, so stderr stays empty. Reading `session_id` moves to 4.3, its
+  first use.
+- [x] 3.3 Add `'prompt-submitted'?: boolean` to `HooksConfig` (`src/types/index.ts:130`) and to
   `hooksRule` (`src/core/services/config-schema.ts:289`). Test:
   `src/core/services/config-schema.test.ts`. Done when: `hooks: { "prompt-submitted": false }`
   validates, and `orient --inject` then prints nothing.
-- [ ] 3.4 List the moment in `collectHookMoments` (`src/cli/commands/status.ts:104-120`): wired when
+- [x] 3.4 List the moment in `collectHookMoments` (`src/cli/commands/status.ts:104-120`): wired when
   `UserPromptSubmit` has an `_openlore` group with no `_openloreHook`; off when
   `hooks.prompt-submitted` is false or `contextInjection.mode` is `off`. Do not change
   `MANAGED_HOOKS`. Test: `src/cli/commands/status.test.ts`. Done when: `openlore status` lists
   `prompt-submitted` after `openlore install`, and `(off)` after either switch.
-- [ ] 3.5 Docs: `docs/install.md` ("Agent-loop hooks" and "Performance and activation notes") and
+- [x] 3.5 Docs: `docs/install.md` ("Agent-loop hooks" and "Performance and activation notes") and
   `docs/configuration.md` ("Agent-loop hooks"): the fourth moment, its off switch, silence on
   failure. Test: `src/doc-claim-sync.test.ts` still passes. Done when: both pages
   name `hooks.prompt-submitted`.

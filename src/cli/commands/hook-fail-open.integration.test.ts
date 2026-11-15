@@ -10,7 +10,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { HOOK_MOMENTS } from './hook.js';
@@ -98,5 +98,34 @@ describe('openlore hook on a corrupt .openlore/', () => {
   it('an unknown moment exits 0 silently', () => {
     const r = run(['hook', 'no-such-moment'], payload('before-stop'));
     expect({ status: r.status, stdout: r.stdout, stderr: r.stderr }).toEqual({ status: 0, stdout: '', stderr: '' });
+  });
+});
+
+describe('openlore orient --inject (the prompt-submitted moment)', () => {
+  const prompt = (cwd: string) => JSON.stringify({ session_id: 's1', cwd, hook_event_name: 'UserPromptSubmit', prompt: 'change f to return 3 and update its test' });
+  const inject = (cwd: string) => spawnSync(process.execPath, [CLI, 'orient', '--inject'], { cwd, input: prompt(cwd), encoding: 'utf8', timeout: 60_000 });
+
+  it('on a corrupt store: exits 0, empty stderr, and says nothing about a failure', () => {
+    const r = inject(root);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toBe('');
+    expect(r.stdout).not.toMatch(/orientation failed|error|exception|SyntaxError/i);
+    if (r.stdout.trim()) expect(r.stdout.trim()).toMatch(/^\[OpenLore\]/);
+  });
+
+  it('with hooks.prompt-submitted false: prints nothing and starts no index build', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'olpromptoff-')));
+    try {
+      mkdirSync(join(dir, '.openlore'));
+      writeFileSync(join(dir, '.openlore', 'config.json'), JSON.stringify({ hooks: { 'prompt-submitted': false } }));
+      writeFileSync(join(dir, 'f.ts'), 'export const f = 1;\n');
+      execFileSync('git', ['init', '-q'], { cwd: dir, env: GIT_ENV });
+      const r = inject(dir);
+      expect({ status: r.status, stdout: r.stdout, stderr: r.stderr }).toEqual({ status: 0, stdout: '', stderr: '' });
+      // No build was started: nothing beyond the config was written into .openlore/.
+      expect(readdirSync(join(dir, '.openlore'))).toEqual(['config.json']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
   });
 });

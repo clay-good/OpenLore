@@ -330,15 +330,19 @@ The governable finding codes (the **finding-code catalogue** — every code defa
 
 ### Agent-loop hooks
 
-`openlore install` wires four agent-loop moments in a repository's Claude Code settings (see
+`openlore install` wires the agent-loop moments in a repository's Claude Code settings (see
 [install](install.md#agent-loop-hooks)). Each is on unless turned off here:
 
 ```json
-{ "hooks": { "before-edit": true, "after-tools": true, "before-stop": false } }
+{ "hooks": { "prompt-submitted": true, "before-edit": true, "after-tools": true, "before-stop": false } }
 ```
+
+A moment that is off does nothing and prints nothing. A moment that fails (a check throws, its time
+limit passes, the store or index is unreadable) also prints nothing.
 
 | Key | Moment |
 |-----|--------|
+| `prompt-submitted` | when a prompt is submitted (`openlore orient --inject`): the task-scoped briefing. `contextInjection.mode: "off"` also turns it off |
 | `before-edit` | before an edit tool runs: generated, vendored, or lockfile target; unresolved references in the pending text |
 | `after-tools` | after an edit: session-ledger record and facts, check weakening, phantom references, peer changes to declared or served symbols |
 | `before-stop` | before the agent stops: the `verify_change` receipt (blocks only on policy-blocking findings) |

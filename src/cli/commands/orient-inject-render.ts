@@ -66,6 +66,12 @@ export type WithholdReason =
   | 'error';
 
 /**
+ * The withhold causes the agent is told about. `error` is not one: a failed lookup is silent to
+ * the agent (change: hook-reliability); telemetry still counts it.
+ */
+export type PointerReason = Exclude<WithholdReason, 'error'>;
+
+/**
  * The agent-visible pointer line for each withhold cause.
  *
  * Absence must never be ambiguous. An agent that cannot tell "nothing relevant
@@ -74,7 +80,7 @@ export type WithholdReason =
  * therefore states the cause AND names the manual call, so a misclassified turn
  * costs the pre-computed briefing — never the knowledge that one was skipped.
  */
-export function pointerLineFor(reason: WithholdReason): string {
+export function pointerLineFor(reason: PointerReason): string {
   const call = 'Call `orient "<your task>"` if you want the briefing now.';
   switch (reason) {
     case 'management-intent':
@@ -88,9 +94,6 @@ export function pointerLineFor(reason: WithholdReason): string {
         'Run `openlore analyze` to build one, then orient will work.';
     case 'empty-prompt':
       return '[OpenLore] No briefing: no task text was supplied to orient on. ' + call;
-    case 'error':
-      return '[OpenLore] No briefing: orientation failed for this turn (the index may be mid-rebuild). ' +
-        `${call}`;
   }
 }
 

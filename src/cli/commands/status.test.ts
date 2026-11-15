@@ -10,7 +10,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { collectIndexStatus, collectWiringScope, statusCommand } from './status.js';
+import { collectHookMoments, collectIndexStatus, collectWiringScope, statusCommand } from './status.js';
 import { _resetVectorIndexCachesForTesting } from '../../core/analyzer/vector-index.js';
 
 const ANALYSIS = join('.openlore', 'analysis');
@@ -315,5 +315,57 @@ describe('openlore status — what the index is', () => {
     expect(status.staleFiles).toContain('removed.ts');
     expect(status.staleFiles).toContain('before-rename.ts');
     expect(status.staleFiles).toContain('after-rename.ts');
+  });
+});
+
+describe('openlore status — loop hook moments (change: hook-reliability)', () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'openlore-status-hooks-')); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  /** The groups `openlore install` writes: the prompt group has no `_openloreHook`. */
+  const installed = async (): Promise<void> => {
+    await mkdir(join(root, '.claude'), { recursive: true });
+    await writeFile(join(root, '.claude', 'settings.json'), JSON.stringify({ hooks: {
+      UserPromptSubmit: [
+        { hooks: [{ type: 'command', command: 'my-own-hook' }] },
+        { _openlore: true, hooks: [{ type: 'command', command: 'openlore orient --inject', timeout: 15 }] },
+      ],
+      PreToolUse: [{ _openlore: true, _openloreHook: 'before-edit', matcher: 'Edit|Write', hooks: [{ type: 'command', command: 'openlore hook before-edit' }] }],
+      Stop: [{ _openlore: true, _openloreHook: 'before-stop', hooks: [{ type: 'command', command: 'openlore hook before-stop' }] }],
+    } }));
+  };
+  const config = async (cfg: Record<string, unknown>): Promise<void> => {
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'config.json'), JSON.stringify(cfg));
+  };
+  const wired = () => collectHookMoments(root).filter(m => m.wired).map(m => `${m.moment}${m.enabled ? '' : ' (off)'}`);
+
+  it('lists prompt-submitted first among the wired moments', async () => {
+    await installed();
+    expect(wired()).toEqual(['prompt-submitted', 'before-edit', 'before-stop']);
+  });
+
+  it('a user hook on UserPromptSubmit is not the moment', async () => {
+    await mkdir(join(root, '.claude'), { recursive: true });
+    await writeFile(join(root, '.claude', 'settings.json'), JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'x' }] }, { _openlore: 'yes', hooks: [] }] } }));
+    expect(wired()).toEqual([]);
+  });
+
+  it('marks it off by its own switch or by contextInjection.mode "off"', async () => {
+    await installed();
+    await config({ hooks: { 'prompt-submitted': false } });
+    expect(wired()).toEqual(['prompt-submitted (off)', 'before-edit', 'before-stop']);
+    await config({ contextInjection: { mode: 'off' } });
+    expect(wired()).toEqual(['prompt-submitted (off)', 'before-edit', 'before-stop']);
+    await config({ hooks: { 'before-stop': false } });
+    expect(wired()).toEqual(['prompt-submitted', 'before-edit', 'before-stop (off)']);
+  });
+
+  it('reads an unreadable config as every moment on', async () => {
+    await installed();
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'config.json'), '{"hooks": {');
+    expect(wired()).toEqual(['prompt-submitted', 'before-edit', 'before-stop']);
   });
 });

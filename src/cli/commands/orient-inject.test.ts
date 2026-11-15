@@ -21,7 +21,7 @@ import {
   classifyTurnIntent,
   pointerLineFor,
   type ResolvedInjectionConfig,
-  type WithholdReason,
+  type PointerReason,
 } from './orient-inject.js';
 
 const cfg = (over: Partial<ResolvedInjectionConfig> = {}): ResolvedInjectionConfig => ({
@@ -573,8 +573,8 @@ describe('classifyTurnIntent', () => {
 });
 
 describe('pointerLineFor (absence is never ambiguous)', () => {
-  const reasons: WithholdReason[] = [
-    'management-intent', 'weak-relevance', 'no-graph', 'empty-prompt', 'error',
+  const reasons: PointerReason[] = [
+    'management-intent', 'weak-relevance', 'no-graph', 'empty-prompt',
   ];
 
   it('emits a non-empty, OpenLore-attributed line for every cause', () => {
