@@ -52,7 +52,13 @@ beforeAll(() => {
   appendFileSync(file, '\nexport function benchAdded(n: number): number {\n  return n + 1;\n}\n');
 }, 300_000);
 
-afterAll(() => { if (root) rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
+// A hook may leave a detached child (the background index build) still writing in the fixture, so
+// removal can race it (ENOTEMPTY on CI). A leftover temp folder is not a test result: retry for up to
+// 5 s, then leave it.
+afterAll(() => {
+  if (!root) return;
+  try { rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); } catch { /* left in the temp dir */ }
+});
 
 function spawnMoment(moment: Moment, session: string): number {
   const base = { session_id: session, cwd: root };

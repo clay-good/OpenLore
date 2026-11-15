@@ -66,7 +66,28 @@ const SEVERITY_RANK: Record<string, number> = { critical: 0, error: 1, warning: 
  * dedupe (`findingIdentity`; without a code, the `key` is the identity); `key` is still recorded
  * for an older CLI reading the same session record.
  */
-export interface HookItem { key: string; severity: string; text: string; next?: string; code?: string; subject?: string; proof?: FindingProof; id?: string; check?: string; file?: string }
+/**
+ * What the agent does with a finding (change: reframe-governance-as-agent-evidence, design 4):
+ * `fix` — the repair is in its own diff; `decide` — a trade-off it may take (and record);
+ * `raise` — only a human can accept it.
+ */
+export type HookAction = 'fix' | 'decide' | 'raise';
+// A disclosure (severity `info`: what was not observed) states a limit, not a problem, so it
+// carries no action.
+export interface HookItem { key: string; severity: string; text: string; next?: string; action?: HookAction; code?: string; subject?: string; proof?: FindingProof; id?: string; check?: string; file?: string }
+
+/** A finding item states its evidence: a file, a cited line, or a receipt discriminator. */
+export function hasProof(item: HookItem): boolean {
+  return !!(item.proof && (item.proof.path || item.proof.lineText !== undefined || item.proof.discriminator));
+}
+
+/** The proof as printed: the file, and the cited line when the text does not already quote it. */
+function proofLabel(item: HookItem): string | undefined {
+  const p = item.proof;
+  if (!p?.path) return undefined;
+  const line = p.lineText?.trim();
+  return line && !item.text.includes(line) ? `proof: ${p.path}: ${line.length > 80 ? `${line.slice(0, 79)}…` : line}` : `proof: ${p.path}`;
+}
 
 export interface HookPayload {
   sessionId?: string;
@@ -215,7 +236,9 @@ function renderShown(moment: HookMoment, items: HookItem[], budgetChars = BUDGET
   let omitted = 0;
   const shown: HookItem[] = [];
   for (const it of sorted) {
-    const line = `- ${it.text}${it.next ? ` (next action: ${it.next})` : ''}${it.id ? ` [f:${it.id}]` : ''}`;
+    // Proof and action are labeled data beside the next action, never an imperative of the hook's own.
+    const labels = [it.next && `next action: ${it.next}`, it.action && `action: ${it.action}`, proofLabel(it)].filter(Boolean);
+    const line = sanitizeForTerminal(`- ${it.text}${labels.length ? ` (${labels.join('; ')})` : ''}${it.id ? ` [f:${it.id}]` : ''}`);
     if (used + line.length + 1 > budgetChars) { omitted++; continue; }
     lines.push(line);
     shown.push(it);
@@ -290,7 +313,7 @@ async function beforeEdit(root: string, files: string[], edit?: HookPayload['edi
   const items: HookItem[] = [...facts.values()].map(f => ({
     key: `generated:${f.file}`,
     code: 'generated-file', subject: f.file, proof: { path: f.file, discriminator: f.kind }, check: 'generated', file: f.file,
-    severity: 'warning',
+    severity: 'warning', action: 'fix' as const,
     text: generatedText(f),
     ...(f.kind !== 'lockfile' ? { next: f.regenerateWith !== 'unknown' ? `regenerate with \`${f.regenerateWith}\`` : 'edit the source and regenerate' } : {}),
   }));
@@ -340,8 +363,8 @@ async function pendingReferences(root: string, file: string, edit: NonNullable<H
   });
   return (r?.findings ?? []).slice(0, MAX_PENDING_FACTS).map(f => f.code === 'unresolved-internal-import'
     // The module may be the agent's next write: a pending state, not yet an error.
-    ? { key: `pending:${f.code}:${f.location?.path ?? ''}:${f.subject}`, ...ident(f), severity: 'warning', text: `Before the write: ${f.message.replace(/, which is not a module in this repository/, ', which does not exist yet')}`, next: 'create that module, or fix the path' }
-    : { key: `pending:${f.code}:${f.location?.path ?? ''}:${f.subject}`, ...ident(f), severity: f.severity, text: `Before the write: ${f.message}`, ...(f.remediation ? { next: f.remediation } : {}) });
+    ? { key: `pending:${f.code}:${f.location?.path ?? ''}:${f.subject}`, ...ident(f), action: 'fix' as const, severity: 'warning', text: `Before the write: ${f.message.replace(/, which is not a module in this repository/, ', which does not exist yet')}`, next: 'create that module, or fix the path' }
+    : { key: `pending:${f.code}:${f.location?.path ?? ''}:${f.subject}`, ...ident(f), action: 'fix' as const, severity: f.severity, text: `Before the write: ${f.message}`, ...(f.remediation ? { next: f.remediation } : {}) });
 }
 
 function generatedText(f: { file: string; kind: string; generatedFrom: string[] | 'unknown'; matched: string }): string {
@@ -363,10 +386,10 @@ async function afterTools(root: string, files: string[], baseline: string | unde
   const live = readLiveLedger(root);
   if ('ledger' in live) {
     for (const c of live.ledger.backgroundChanges) {
-      items.push({ key: `bg:${c.id}@${c.changedAt}`, code: 'background-change', subject: c.id, proof: { discriminator: String(c.changedAt) }, severity: 'warning', text: `${c.name} (${c.file}) changed since this session read it (another process's edit).` });
+      items.push({ key: `bg:${c.id}@${c.changedAt}`, code: 'background-change', subject: c.id, proof: { path: c.file, discriminator: String(c.changedAt) }, action: 'decide', severity: 'warning', text: `${c.name} (${c.file}) changed since this session read it (another process's edit).` });
     }
     for (const o of live.ledger.editOscillation) {
-      items.push({ key: `loop:${o.id}#${o.returns}`, code: 'edit-loop', subject: o.id, proof: { discriminator: String(o.returns) }, severity: 'warning', text: `${o.name} (${o.file}) returned to an earlier version ${o.returns} times this session.` });
+      items.push({ key: `loop:${o.id}#${o.returns}`, code: 'edit-loop', subject: o.id, proof: { path: o.file, discriminator: String(o.returns) }, action: 'decide', severity: 'warning', text: `${o.name} (${o.file}) returned to an earlier version ${o.returns} times this session.` });
     }
   }
   // A peer changed a symbol this worktree's agent declared it reads or was served (changes:
@@ -378,7 +401,7 @@ async function afterTools(root: string, files: string[], baseline: string | unde
       items.push({
         key: `peer:${n.peer.actorId}:${n.repoPath}#${n.symbol}`,
         code: 'peer-change', subject: `${n.peer.actorId}:${n.repoPath}#${n.symbol}`,
-        severity: 'warning',
+        proof: { path: n.file, discriminator: n.at }, action: 'decide', severity: 'warning',
         // Board fields are peer-written: screened before they reach the agent.
         text: sanitizeForTerminal(`Peer ${t(n.peer.actorId)} (${t(n.peer.branch || 'detached')} in ${t(n.peer.worktree)}) changed ${t(n.symbol)} (${t(n.file)}), which ${n.via === 'served' ? 'was served in this worktree' : 'an agent in this worktree declared reading'} at ${t(n.at).slice(11, 16)} UTC.`),
         next: `re-read ${t(n.symbol)} before relying on it`,
@@ -407,7 +430,7 @@ async function afterTools(root: string, files: string[], baseline: string | unde
     items.push({
       key: `${f.code}:${f.location?.path ?? ''}:${f.subject}`, code: f.code, subject: f.subject, check: 'phantom', file: rel(f.location?.path),
       proof: lineText !== undefined ? { path: f.location!.path, lineText } : { path: f.location?.path, discriminator: f.discriminator },
-      severity: f.severity, text: f.message, ...(f.remediation ? { next: f.remediation } : {}),
+      action: 'fix', severity: f.severity, text: f.message, ...(f.remediation ? { next: f.remediation } : {}),
     });
   }
 
@@ -418,7 +441,7 @@ async function afterTools(root: string, files: string[], baseline: string | unde
   const weak = top ? await checkWeakening({ root: top, baseRef: baseline, files: repoFiles }).catch(() => undefined) : undefined;
   if (weak) ran.add('weakening');
   // Check-weakening discriminators are text-based (the added ignore line, the step), not line numbers.
-  for (const f of weak?.findings ?? []) items.push({ key: `${f.code}:${f.subject}:${f.discriminator ?? ''}`, code: f.code, subject: f.subject, proof: { path: f.location?.path, discriminator: f.discriminator }, check: 'weakening', file: rel(f.location?.path), severity: f.severity, text: f.message });
+  for (const f of weak?.findings ?? []) items.push({ key: `${f.code}:${f.subject}:${f.discriminator ?? ''}`, code: f.code, subject: f.subject, proof: { path: f.location?.path, discriminator: f.discriminator }, check: 'weakening', file: rel(f.location?.path), action: 'decide', severity: f.severity, text: f.message });
   return items;
 }
 
@@ -438,12 +461,12 @@ async function testRunItem(root: string, sessionId: string | undefined): Promise
   const when = (t: number) => new Date(t).toISOString().slice(11, 16);
   const shellNote = 'Edits made through shell commands are not tracked.';
   if (r.kind === 'not-observed') {
-    return { key: 'test-runs:not-observed', code: 'test-runs', subject: 'not-observed', severity: 'info', text: 'Test runs are not observed in this session (no shell command reached the after-tools hook), so edits after the last run are not stated.' };
+    return { key: 'test-runs:not-observed', code: 'test-runs', subject: 'not-observed', proof: { discriminator: 'no-shell-command-observed' }, severity: 'info', text: 'Test runs are not observed in this session (no shell command reached the after-tools hook), so edits after the last run are not stated.' };
   }
   if (r.kind === 'no-run') {
     const files = r.files!.slice(0, 5).join(', ');
     return {
-      key: `test-runs:none:${r.files!.length}`, code: 'test-runs', subject: 'no-run', proof: { discriminator: String(r.files!.length) }, severity: 'warning',
+      key: `test-runs:none:${r.files!.length}`, code: 'test-runs', subject: 'no-run', proof: { discriminator: String(r.files!.length) }, action: 'fix', severity: 'warning',
       text: `No completed test run was observed this session after editing ${files}${r.files!.length > 5 ? ` and ${r.files!.length - 5} more` : ''}${r.interruptedSince ? ` (${r.interruptedSince} run(s) were interrupted)` : ''}.`,
       next: 'run the tests that reach these files',
     };
@@ -452,7 +475,7 @@ async function testRunItem(root: string, sessionId: string | undefined): Promise
   const runText = `\`${run.command.slice(0, 80)}\` at ${when(run.at)} UTC${run.exit !== undefined ? `, exit ${run.exit}` : ''}`;
   if (r.kind === 'clean') {
     return run.exit !== undefined && run.exit !== 0
-      ? { key: `test-runs:failed:${run.at}`, code: 'test-runs', subject: 'failed', proof: { discriminator: String(run.at) }, severity: 'warning', text: `The last test run (${runText}) failed, and nothing was edited after it.`, next: 'fix the failure and rerun' }
+      ? { key: `test-runs:failed:${run.at}`, code: 'test-runs', subject: 'failed', proof: { discriminator: String(run.at) }, action: 'fix', severity: 'warning', text: `The last test run (${runText}) failed, and nothing was edited after it.`, next: 'fix the failure and rerun' }
       : undefined;
   }
   const symbols = r.symbols ?? [];
@@ -487,7 +510,7 @@ async function testRunItem(root: string, sessionId: string | undefined): Promise
   const keyBase = [...symbols.map(s => `${s.file}#${s.name}`), ...(r.undetermined ?? [])].join('\0');
   return {
     key: `test-runs:after:${run.at}:${createHash('sha256').update(keyBase).digest('hex').slice(0, 12)}`,
-    code: 'test-runs', subject: 'edited-after-run', proof: { discriminator: `${run.at}:${createHash('sha256').update(keyBase).digest('hex')}` },
+    code: 'test-runs', subject: 'edited-after-run', proof: { discriminator: `${run.at}:${createHash('sha256').update(keyBase).digest('hex')}` }, action: 'fix',
     severity: 'warning',
     text: sanitizeForTerminal(`Edited after the last test run (${runText}): ${parts.join('; ')}.${testText}${r.interruptedSince ? ` ${r.interruptedSince} later run(s) were interrupted.` : ''} ${shellNote}`),
     next: 'rerun the tests that reach these edits',
@@ -542,7 +565,7 @@ async function certificateItems(root: string, baseRef: string): Promise<HookItem
       };
       return (r.breaking ?? []).filter(b => b.class === 'breaking').map(b => ({
         key: `public-surface:${b.file}::${b.name}`, code: b.ruleCodes[0] ?? 'export-removed', subject: `${b.file}::${b.name}`,
-        check: 'public_surface', file: b.file, severity: 'error',
+        check: 'public_surface', file: b.file, severity: 'error', action: 'decide' as const,
         proof: { path: b.file, discriminator: `${b.changeKind}:${b.ruleCodes.join(',')}` },
         text: sanitizeForTerminal(`exported ${b.name} (${b.file}) ${b.changeKind.replace(/-/g, ' ')}: breaks ${b.ruleCodes.join(', ')}; ${consumersText(b.consumers)}`),
         next: 'update the consumers or keep the export compatible',
@@ -557,7 +580,7 @@ async function certificateItems(root: string, baseRef: string): Promise<HookItem
       };
       return (r.findings ?? []).filter(f => f.code === 'contract-breaking').map(f => ({
         key: `service-contract:${f.subject}:${f.discriminator ?? ''}`, code: f.code, subject: f.subject,
-        check: 'service_contract', file: f.location?.path, severity: f.severity === 'error' ? 'error' : 'warning',
+        check: 'service_contract', file: f.location?.path, severity: f.severity === 'error' ? 'error' : 'warning', action: 'decide' as const,
         proof: { path: f.location?.path, discriminator: f.discriminator },
         text: sanitizeForTerminal(`${f.subject}: ${f.message}`),
         next: 'update the callers or keep the contract compatible',
@@ -576,7 +599,7 @@ async function certificateItems(root: string, baseRef: string): Promise<HookItem
       return (r.findings ?? []).filter(f => f.code === 'surface-critical' || f.code === 'surface-newly-reached').map(f => {
         const edge = r.newlyOpenedPaths?.find(p => p.surface === f.subject)?.openingEdge;
         return {
-          key: `impact:${f.subject}`, code: f.code, subject: f.subject, check: 'impact_certificate',
+          key: `impact:${f.subject}`, code: f.code, subject: f.subject, check: 'impact_certificate', action: 'raise' as const,
           severity: f.severity === 'error' ? 'error' : 'warning',
           proof: { discriminator: edge ? `${edge.from}->${edge.to}` : f.message },
           text: sanitizeForTerminal(f.message), next: f.remediation,
@@ -586,6 +609,8 @@ async function certificateItems(root: string, baseRef: string): Promise<HookItem
   }
   return Promise.all(slices);
 }
+
+const VERIFY_CHANGE_ACTION: Record<string, HookAction> = { blast_radius: 'decide', check_weakening: 'decide' };
 
 async function beforeStop(root: string, baseline: string | undefined, sessionId?: string): Promise<{ items: HookItem[]; block?: string }> {
   const runItem = await testRunItem(root, sessionId).catch(() => undefined);
@@ -608,14 +633,21 @@ async function beforeStop(root: string, baseline: string | undefined, sessionId?
   const sameFinding: Record<string, string> = { phantom_references: 'phantom', check_weakening: 'weakening' };
   const items: HookItem[] = [];
   for (const i of r.items ?? []) {
-    const item: HookItem = { key: `${i.check}:${i.subject}`, code: i.check, subject: i.subject, severity: i.severity, text: `${i.subject} [${i.check}]`, next: i.nextAction };
+    // The verify_change receipt is the proof of its own items; a trade-off (who else this reaches)
+    // is the agent's to weigh, everything else is repaired in its diff.
+    const item: HookItem = {
+      key: `${i.check}:${i.subject}`, code: i.check, subject: i.subject, severity: i.severity, text: `${i.subject} [${i.check}]`, next: i.nextAction,
+      proof: { discriminator: `verify_change:${i.check}` }, action: VERIFY_CHANGE_ACTION[i.check] ?? 'fix',
+    };
     const check = sameFinding[i.check];
     const f = check ? (r.findings ?? []).find(x => x.message === i.subject) : undefined;
     if (check && f) {
       const lineText = check === 'phantom' && f.location?.line ? await citedLine(root, prefix, f.location.path, f.location.line) : undefined;
       Object.assign(item, {
         code: f.code, subject: f.subject, check, file: rel(f.location?.path),
-        proof: lineText !== undefined ? { path: f.location!.path, lineText } : { path: f.location?.path, discriminator: f.discriminator },
+        // A finding that carries no location or discriminator keeps the receipt as its proof.
+        proof: lineText !== undefined ? { path: f.location!.path, lineText }
+          : f.location?.path || f.discriminator ? { path: f.location?.path, discriminator: f.discriminator } : item.proof,
       });
     }
     items.push(item);
@@ -824,7 +856,8 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
     // Once per session per audience: the before-stop receipt is the user's, every other moment
     // speaks to the agent (design section 3).
     const audience = moment === 'before-stop' ? 'user' : 'agent';
-    const all = done.items.map(i => ({ ...i, ...withIdentity(i) }));
+    // A finding with no proof is not stated (design section 4); briefings are other moments.
+    const all = done.items.filter(hasProof).map(i => ({ ...i, ...withIdentity(i) }));
     const reported = new Set(all.map(i => i.identity));
     // Acted-on states (design section 4): after an agent edit, a check that ran to completion and
     // no longer reports a finding on the edited file fixed it; the stop receipt marks what is open.

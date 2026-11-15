@@ -347,12 +347,16 @@ The governable finding codes (the **finding-code catalogue** — every code defa
 A moment that is off does nothing and prints nothing. A moment that fails (a check throws, its time
 limit passes, the store or index is unreadable) also prints nothing.
 
+Each finding from `before-edit`, `after-tools` and `before-stop` carries its proof and one action:
+`fix`, `decide`, or `raise` (see [install](install.md#agent-loop-hooks)). `hooks.before-stop: false`
+turns off the receipt and its certificates together.
+
 | Key | Moment |
 |-----|--------|
 | `prompt-submitted` | when a prompt is submitted (`openlore orient --inject`): the task-scoped briefing. `contextInjection.mode: "off"` also turns it off |
 | `before-edit` | before an edit tool runs: generated, vendored, or lockfile target; unresolved references in the pending text |
 | `after-tools` | after an edit: session-ledger record and facts, check weakening, phantom references, peer changes to declared or served symbols |
-| `before-stop` | before the agent stops: the `verify_change` receipt (blocks only on policy-blocking findings) |
+| `before-stop` | before the agent stops: the `verify_change` receipt, plus the public-surface, service-contract and change-impact certificates when the diff can trigger them (blocks only on policy-blocking findings) |
 | `after-compact` | after the conversation is compacted: the handoff briefing of the in-flight change |
 | `before-subagent` | before an `Agent`/`Task` call: queues the sub-agent's task (prints nothing) |
 | `subagent-start` | when a sub-agent starts: its task-scoped briefing and the live peers on the board |
