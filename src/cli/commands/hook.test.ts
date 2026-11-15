@@ -471,7 +471,7 @@ describe('the run report for hook health (change: hook-reliability, task 6.1)', 
   const capture = async (moment: Parameters<typeof runHook>[0], raw: string, opts: { timeoutMs?: number } = {}) => {
     let report: unknown;
     const r = await runHook(moment, raw, { ...opts, onRun: rep => { report = rep; } });
-    return { r, report: report as { root?: string; outcome: string; shown: number } };
+    return { r, report: report as { root?: string; outcome: string; shown: number; reason?: string } };
   };
 
   it('ok, with the number of findings shown', async () => {
