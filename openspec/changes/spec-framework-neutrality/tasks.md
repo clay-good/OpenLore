@@ -43,11 +43,11 @@ builders edit `src/`, `docs/`, `skills/`, `examples/`, `plugin/` later. Lines ar
 
 ## 3. Config
 
-- [ ] 3.1 `openspecPath` optional: `src/types/index.ts:22, 426`, `config-schema.ts:333` (not
+- [x] 3.1 `openspecPath` optional: `src/types/index.ts:22, 426`, `config-schema.ts:333` (not
   `required`), `config-manager.ts:115-119, 146-149, 283` (no backfill without an OpenSpec corpus),
   `src/pi/extension.ts:104, 609`. Tests: beside. Done when: a config without the key validates with 0
   findings, one with it reads as before, and `tsc` passes with every reader handling `undefined`.
-- [ ] 3.2 New optional `adrPaths: string[]` (read-only ADR folders, confined to the repo):
+- [x] 3.2 New optional `adrPaths: string[]` (read-only ADR folders, confined to the repo):
   `src/types/index.ts`, `config-schema.ts:302-331, 346`. Test: `config-schema.test.ts`. Done when: a
   wrong type and an outside path each give a named finding; listed in `docs/configuration.md` (11.4).
 

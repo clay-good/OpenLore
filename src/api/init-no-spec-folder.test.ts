@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openloreInit } from './init.js';
+import { readOpenLoreConfig } from '../core/services/config-manager.js';
 
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
@@ -24,6 +25,9 @@ describe('openloreInit on a real directory', () => {
     expect(r.created).toBe(true);
     expect(existsSync(join(root, '.openlore', 'config.json'))).toBe(true);
     expect(existsSync(join(root, 'openspec'))).toBe(false);
+    // No corpus, so no spec path is recorded, and reading the config adds none back.
+    expect(JSON.parse(readFileSync(join(root, '.openlore', 'config.json'), 'utf8'))).not.toHaveProperty('openspecPath');
+    expect((await readOpenLoreConfig(root))?.openspecPath).toBeUndefined();
   });
 
   it('leaves an existing openspec/ exactly as it was', async () => {
@@ -31,6 +35,7 @@ describe('openloreInit on a real directory', () => {
     mkdirSync(join(root, 'openspec', 'specs', 'billing'), { recursive: true });
     writeFileSync(join(root, 'openspec', 'specs', 'billing', 'spec.md'), '# Billing\n');
     await openloreInit({ rootPath: root });
+    expect(JSON.parse(readFileSync(join(root, '.openlore', 'config.json'), 'utf8')).openspecPath).toBe('openspec');
     expect(readdirSync(join(root, 'openspec'))).toEqual(['specs']);
     expect(readdirSync(join(root, 'openspec', 'specs'))).toEqual(['billing']);
     expect(readFileSync(join(root, 'openspec', 'specs', 'billing', 'spec.md'), 'utf8')).toBe('# Billing\n');

@@ -30,6 +30,7 @@ vi.mock('../../core/services/project-detector.js', () => ({
 vi.mock('../../core/services/config-manager.js', () => ({
   openloreConfigExists: vi.fn().mockResolvedValue(false),
   openspecDirExists: vi.fn().mockResolvedValue(false),
+  detectExistingSpecDir: vi.fn().mockResolvedValue(null),
   openspecConfigExists: vi.fn().mockResolvedValue(false),
   getDefaultConfig: vi.fn().mockReturnValue({ projectType: 'nodejs', createdAt: '2024-01-01' }),
   readOpenLoreConfig: vi.fn().mockResolvedValue(null),
@@ -66,10 +67,14 @@ describe('init command', () => {
       expect(forceOption?.defaultValue).toBe(false);
     });
 
-    it('should have --openspec-path option with default', () => {
+    it('has --openspec-path with no default, so detection runs and no path is recorded unasked', async () => {
       const pathOption = initCommand.options.find(o => o.long === '--openspec-path');
       expect(pathOption).toBeDefined();
-      expect(pathOption?.defaultValue).toBe('./openspec');
+      expect(pathOption?.defaultValue).toBeUndefined();
+      const configManager = await import('../../core/services/config-manager.js');
+      await initCommand.parseAsync([], { from: 'user' });
+      expect(configManager.detectExistingSpecDir).toHaveBeenCalled();
+      expect(configManager.getDefaultConfig).toHaveBeenCalledWith(expect.any(String), undefined);
     });
   });
 

@@ -30,6 +30,7 @@ const FULLY_POPULATED: Required<OpenLoreConfig> = {
   version: CONFIG_SCHEMA_VERSION,
   projectType: 'nodejs',
   openspecPath: 'openspec',
+  adrPaths: ['docs/architecture/decisions'],
   analysis: { maxFiles: 1, includePatterns: [], excludePatterns: [] },
   generation: { domains: 'auto' },
   llm: {},
@@ -80,7 +81,7 @@ describe('config-schema — type-completeness bind', () => {
 
   it('every validator kind is a recognized shape', () => {
     for (const kind of Object.values(CONFIG_FIELD_KINDS)) {
-      expect(['string', 'string-or-null', 'boolean', 'object']).toContain(kind);
+      expect(['string', 'string-or-null', 'boolean', 'object', 'array']).toContain(kind);
     }
   });
 
@@ -182,13 +183,37 @@ describe('config-schema — type-completeness bind', () => {
     ]));
   });
 
+  it('adrPaths: a wrong type and a path outside the repository each give a named finding', () => {
+    const base = {
+      version: '1.2.0', projectType: 'nodejs', analysis: { maxFiles: 10, includePatterns: [], excludePatterns: [] },
+      generation: { model: 'x', domains: 'auto' }, createdAt: '2026-11-15T00:00:00.000Z', lastRun: null,
+    };
+    expect(validateOpenLoreConfig({ ...base, adrPaths: ['docs/adr', 'architecture/decisions'] })).toEqual([]);
+    expect(validateOpenLoreConfig({ ...base, adrPaths: 'docs/adr' }).map(f => f.key)).toEqual(['adrPaths']);
+    expect(validateOpenLoreConfig({ ...base, adrPaths: [3] }).map(f => f.key)).toEqual(['adrPaths[0]']);
+    for (const outside of ['../other/adr', '/etc/adr', 'C:/adr', 'docs/../../adr', '']) {
+      const findings = validateOpenLoreConfig({ ...base, adrPaths: ['docs/adr', outside] });
+      expect(findings.map(f => f.key), outside).toEqual(['adrPaths[1]']);
+      expect(findings[0].fatal, outside).toBeUndefined();
+    }
+  });
+
+  it('a config without openspecPath validates with no finding; one with it reads as before', () => {
+    const base = {
+      version: '1.2.0', projectType: 'nodejs', analysis: { maxFiles: 10, includePatterns: [], excludePatterns: [] },
+      generation: { model: 'x', domains: 'auto' }, createdAt: '2026-11-15T00:00:00.000Z', lastRun: null,
+    };
+    expect(validateOpenLoreConfig(base)).toEqual([]);
+    expect(validateOpenLoreConfig({ ...base, openspecPath: './openspec' })).toEqual([]);
+    expect(validateOpenLoreConfig({ ...base, openspecPath: 7 }).map(f => f.key)).toContain('openspecPath');
+  });
+
   it('requires every non-optional top-level config field', () => {
     const findings = validateOpenLoreConfig({});
 
     expect(findings.filter(f => f.kind === 'missing-required').map(f => f.key)).toEqual([
       'version',
       'projectType',
-      'openspecPath',
       'analysis',
       'generation',
       'createdAt',

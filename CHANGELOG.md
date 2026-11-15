@@ -45,6 +45,14 @@ All notable changes to OpenLore are documented here. This project adheres to
   exits 2 with "spec drift not assessed"; `openlore doctor` shows `Spec source: none` as ok; decision
   sync names the skip and creates no folder. No answer tells the agent to run `openlore generate`.
   `doctor --json` names the check `Spec source` (was `OpenSpec directory`).
+- **`openspecPath` is optional, and a new `adrPaths` key is validated.** `openlore init` records
+  `openspecPath` only when it finds an OpenSpec corpus or you pass `--openspec-path`; reading a
+  config no longer adds one back. `init --openspec-path` lost its built-in default, which also makes
+  `openlore init` detect an existing `docs/specs` or `specs` corpus again (the default had silently
+  skipped that detection). `adrPaths` (folders of decision records, repository-relative) is
+  accepted and checked; an absolute path or one with `..` is named and ignored. No feature reads it
+  yet.
+
 - **First run creates no spec folder.** `openlore init` and `openlore install` no longer create an
   empty `openspec/`; OpenLore works without one, and `openlore generate` creates the folders it
   writes. An existing `openspec/` is left untouched. The `.gitignore` entry is now exactly

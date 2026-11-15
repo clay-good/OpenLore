@@ -112,11 +112,13 @@ async function ensureDir(dirPath: string): Promise<void> {
 /**
  * Get default openlore configuration
  */
-export function getDefaultConfig(projectType: ProjectType, openspecPath: string): OpenLoreConfig {
+export function getDefaultConfig(projectType: ProjectType, openspecPath?: string): OpenLoreConfig {
   return {
     version: CONFIG_DEFAULT_STAMP_VERSION,
     projectType,
-    openspecPath,
+    // Recorded only for an OpenSpec corpus that exists or was named: no corpus is a supported
+    // state, and readers default to `openspec` (change: spec-framework-neutrality, task 3.1).
+    ...(openspecPath !== undefined ? { openspecPath } : {}),
     analysis: {
       maxFiles: DEFAULT_MAX_FILES,
       includePatterns: [],
@@ -143,9 +145,8 @@ export function normalizeOpenLoreConfig(parsed: unknown): {
   const projectType = typeof record.projectType === 'string'
     ? record.projectType as ProjectType
     : 'unknown';
-  const openspecPath = typeof record.openspecPath === 'string'
-    ? record.openspecPath
-    : './openspec';
+  // No `openspecPath` backfill: a config without one has no OpenSpec corpus recorded.
+  const openspecPath = typeof record.openspecPath === 'string' ? record.openspecPath : undefined;
   return backfillRequiredConfigDefaults(parsed, getDefaultConfig(projectType, openspecPath));
 }
 
@@ -280,7 +281,7 @@ export async function readOpenLoreConfigData(rootPath: string, explicitPath?: st
   const path = resolveOpenLoreConfigPath(rootPath, explicitPath);
   const hasOverride = explicitPath || (primaryConfigOverride?.root === resolve(rootPath));
   return hasOverride ? readConfigObject(path) : readLayeredConfig(
-    path, getDefaultConfig('unknown', './openspec') as unknown as Record<string, unknown>,
+    path, getDefaultConfig('unknown') as unknown as Record<string, unknown>,
     (block, userPath) => warnWithheldCredential(path, block, userPath),
   );
 }

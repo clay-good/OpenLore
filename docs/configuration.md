@@ -10,7 +10,6 @@
 {
   "version": "1.2.0",
   "projectType": "nodejs",
-  "openspecPath": "./openspec",
   "analysis": {
     "maxFiles": 500,
     "includePatterns": [],
@@ -22,6 +21,18 @@
   }
 }
 ```
+
+### Spec sources
+
+OpenLore needs no spec folder. Two keys point it at specs you already keep; both are optional.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `openspecPath` | string | The OpenSpec folder. `init` writes it only when it finds an OpenSpec corpus or you pass `--openspec-path`; without it, readers use `openspec`. |
+| `adrPaths` | string[] | Folders of architecture decision records, read-only. Each must be inside the repository (no absolute path, no `..`); an entry that is not is named in the config check and ignored. Validated now; no OpenLore feature reads ADR folders yet. |
+
+With no spec source, spec answers say `no spec source found (looked for: …)` instead of an empty or
+failed result; code answers work in full.
 
 ### Workspace shards
 
