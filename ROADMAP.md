@@ -25,14 +25,23 @@
 
 ## Build next
 
-**Core accuracy first (owner, 2026-11-15):** the P0 items below that make the evidence agents receive
-wrong or noisy, one PR each, before more P1 work. Then [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality)
-group 5 (every `openspec/` site honors `openspecPath`).
+**Core accuracy first (owner, 2026-11-15):** fix what makes the evidence agents receive wrong or
+noisy, one PR each, before more P1 work. Next: [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality)
+group 5 (the remaining `openspec/` sites honor `openspecPath`), then the P0 row below.
 
-Shipped since 3.6.0 for the same reason: the prompt briefing names only code the prompt names
-exactly (#758; replay with `npm run bench:briefing`), TypeScript grammar gaps no longer leave parse
-errors (#759), "no index" is said only when there is none (#760), and a user-scope install wires the
-edit-time hooks, guarded to OpenLore projects (#762).
+Shipped since 3.6.0 for the same reason:
+
+- **Prompt briefing:** names only code the prompt names exactly (#758; replay with
+  `npm run bench:briefing`); "no index" is said only when there is none (#760).
+- **Call graph:** TypeScript grammar gaps no longer leave parse errors (#759); JavaScript is labeled
+  JavaScript (#764); Java and C# field calls use the field's declared type (#765).
+- **Freshness and scope:** the watcher honors `.openlore-ignore` and `excludePatterns` (#766); the
+  hooks, status line and Pi find the project by one rule (#768).
+- **Served text:** OpenAPI enum changes read as values (#767); every MCP tool input has a
+  description (#769); spec text is labeled reviewed only when it is, and spec paths follow
+  `openspecPath` (#771, #773).
+- **Install and CI:** a user-scope install wires the edit-time hooks (#762); CI runs every
+  integration test that can check something there (#770).
 
 ## P0: 3.6.0 follow-ups (small fixes, any time)
 
@@ -47,7 +56,7 @@ edit-time hooks, guarded to OpenLore projects (#762).
 | 1 | [`ship-claude-code-plugin`](openspec/changes/ship-claude-code-plugin) ([PR #727](https://github.com/clay-good/OpenLore/pull/727), merged; dogfooding, the 3.7.0 pin, and the directory submission remain) | Hooks and tools arrive with one install and stay current | — |
 | 2 | `hook-reliability` (shipped; [archived](openspec/changes/archive/2026-11-15-hook-reliability)) | Hooks never slow or break a session, each finding is said once, and index progress goes to the status line, not the agent | — |
 | 3 | `reframe-governance-as-agent-evidence` (shipped; [archived](openspec/changes/archive/2026-11-15-reframe-governance-as-agent-evidence); task 2.1 not doing) | One small plugin set; governance arrives as quiet findings with proof and one action | — |
-| 4 | [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality) (groups 1-4.2 merged: #751, #753, #754, #756) | OpenSpec, Spec Kit and BMAD are detected; none is required; "no specs" is an honest state, never a zero | can start any time |
+| 4 | [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality) (groups 1-4 merged: #751, #753, #754, #756, #772; group 5 in progress: #771, #773) | OpenSpec, Spec Kit and BMAD are detected; none is required; "no specs" is an honest state, never a zero | can start any time |
 | 5 | [`curate-product-surface`](openspec/changes/curate-product-surface) | Fewer, current skills and docs, so nothing stale misleads the agent | 1, 3 |
 
 ## P2: next, after P1 ships
