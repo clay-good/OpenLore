@@ -249,7 +249,15 @@ export async function handleOrient(
    * Lean mode only: also push triggered and pinned memories (the prompt-hook injection path), so
    * the one briefing an agent gets unasked carries them (change: add-memory-trigger-predicates).
    */
-  opts: { pushMemories?: boolean } = {},
+  opts: {
+    pushMemories?: boolean;
+    /**
+     * Include the repository-wide readability sentence (default true). It qualifies a SEARCH over
+     * the whole index; the prompt hook's exact-anchor briefing makes no absence claim, so it
+     * passes false (change: anchor-gated-prompt-briefing).
+     */
+    repoWideParseHealth?: boolean;
+  } = {},
 ): Promise<unknown> {
   const tooLong = queryTooLongError(task, 'task'); if (tooLong) return tooLong;
   // A JSON `null` budget means no budget, as before.
@@ -1176,7 +1184,7 @@ export async function handleOrient(
   // `repoWide`: the per-file half of this boundary is scoped to the files orient SURFACED, so it
   // can never fire for the worst case — a file that produced zero symbols never surfaces.
   const parseHealthNote = parseHealthBoundary(parseHealth.report, relevantFiles, {
-    repoWide: true,
+    repoWide: opts.repoWideParseHealth !== false,
     artifactUnreadable: parseHealth.artifactUnreadable,
   });
 

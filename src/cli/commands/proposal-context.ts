@@ -27,7 +27,9 @@ const EXPLICIT_PROPOSE_COMMAND = /(?:^|\s)\/(?:opsx|openspec)(?::|-)propose\b|(?
  * the original slash command, so also recognize a narrowly phrased OpenSpec change-authoring task.
  */
 export function isOpenSpecProposalInvocation(prompt: string): boolean {
-  const text = (prompt ?? '').trim();
+  // Pasted material is not the user's request: a pasted plan that mentions OpenSpec changes set
+  // this off on a turn that asked for none (change: anchor-gated-prompt-briefing).
+  const text = (prompt ?? '').replace(/<pasted_content\b[^>]*>[\s\S]*?<\/pasted_content>/g, ' ').trim();
   if (!text) return false;
   if (EXPLICIT_PROPOSE_COMMAND.test(text)) return true;
   return /\bopenspec\b/i.test(text)
