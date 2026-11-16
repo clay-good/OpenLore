@@ -380,7 +380,6 @@ export async function handleSelectTests(
   // chains below are reconstructed from, so the payload is unchanged.
   const nodeMap = new Map(cg.nodes.map(n => [n.id, n]));
   const traversal = await loadTraversalIndex(absDir, cg);
-  const seedIds = new Set(seeds.map(s => s.id));
   const { depth: depthOf, parent } = traversal.bfsWithParents(
     seeds.map(s => s.id),
     'backward',
@@ -513,12 +512,14 @@ export async function handleSelectTests(
     // this very test; selecting the test again via that node would serve a cyclic path.
     if (idPath.includes(e.calleeId) || crossesTestedBy(idPath)) continue;
     const testFile = e.calleeId.includes('::') ? e.calleeId.split('::')[0] : e.calleeId;
-    const onSeed = seedIds.has(e.callerId);
-    const confidence: Confidence = onSeed ? 'high' : 'medium';
+    // The same depth rule as a reaching test node: one hop from the change is high, up to three is
+    // medium, deeper is low. A tested_by link twelve calls away is not medium evidence.
+    const depth = (depthOf.get(e.callerId) ?? 0) + 1;
+    const confidence: Confidence = depth === 1 ? 'high' : depth <= 3 ? 'medium' : 'low';
     const basis = withEdgeBasis(basisOfPath(idPath), e);
     add(
       testFile, e.calleeName, [e.calleeName, ...pathToSeed(e.callerId)], confidence,
-      SELECTION_REASON.reaches((depthOf.get(e.callerId) ?? 0) + 1, basis?.synthesizedBy),
+      SELECTION_REASON.reaches(depth, basis?.synthesizedBy),
       basis,
     );
   }

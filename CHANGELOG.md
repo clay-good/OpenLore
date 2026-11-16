@@ -102,6 +102,13 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **A test linked twelve calls from a change is no longer "medium" confidence.** A test that reaches
+  the change through a `tested_by` link was medium at any depth, while a test reaching it by calls
+  follows the depth rule (1 high, 2–3 medium, deeper low). Both now follow the depth rule. On
+  `bench:select-tests` (20 commits), running only medium-and-above tests now means 64 files
+  instead of 114, finding 94% of the tests the changes had to touch (was 96%); the full selection
+  is unchanged.
+
 - **`select_tests` selects tests for a function just added to a file.** The index predates a new
   function, so nothing seeded it and the file's own tests were not selected. Now the tests of the
   file's other functions are selected at low confidence, with the same-file reason. On the
