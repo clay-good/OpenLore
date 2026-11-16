@@ -773,7 +773,12 @@ function renderHeadline(b: BlastRadiusBriefing): string {
   else if (b.tests.count > 0) parts.push(`${b.tests.count} test${b.tests.count === 1 ? '' : 's'} to run`);
   const willDrift = b.memory.drifted + b.memory.orphaned;
   if (willDrift > 0) parts.push(`${willDrift} anchored memor${willDrift === 1 ? 'y' : 'ies'} will drift/orphan`);
-  if (b.decisions.affected > 0) parts.push(`${b.decisions.affected} decision${b.decisions.affected === 1 ? '' : 's'} affected`);
+  // An orphaned decision names a domain that is gone: an issue. A domain-level gap only says an ADR
+  // names a domain the change touches, which a one-line change in a broad domain hits for most ADRs;
+  // it is counted apart so it never reads as that many decisions broken.
+  if (b.decisions.orphaned > 0) parts.push(`${b.decisions.orphaned} decision${b.decisions.orphaned === 1 ? '' : 's'} name${b.decisions.orphaned === 1 ? 's' : ''} a missing domain`);
+  const domainGaps = b.decisions.affected - b.decisions.orphaned;
+  if (domainGaps > 0) parts.push(`${domainGaps} ADR${domainGaps === 1 ? '' : 's'} name${domainGaps === 1 ? 's' : ''} a touched domain`);
   if (b.specs.willGoStale > 0) parts.push(`${b.specs.willGoStale} spec${b.specs.willGoStale === 1 ? '' : 's'} may go stale`);
   if (gen) parts.push(`${gen} changed`);
   if (refs > 0) parts.push(`${refs} added reference${refs === 1 ? '' : 's'} resolve${refs === 1 ? 's' : ''} to nothing`);
