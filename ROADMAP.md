@@ -42,6 +42,18 @@ Shipped since 3.6.0 for the same reason:
   `openspecPath` (#771, #773).
 - **Install and CI:** a user-scope install wires the edit-time hooks (#762); CI runs every
   integration test that can check something there (#770).
+- **Test selection, measured:** `npm run bench:select-tests` replays recent commits and checks
+  whether `select_tests` names the tests each one had to touch (#780, tiers #785). Over 20 commits,
+  recall went from 84% to 98%: dynamic imports, source guards named by path, a function added to a
+  file, imported classes and object literals, and renamed imports (#776, #781–#783). The 22
+  high-confidence files find 79% of them; medium and above finds 94% in 64 files (#786), and
+  `blast_radius` lists every file to run (#775). A rule for tests that run the CLI as a process was
+  measured and dropped: it added files and found nothing new.
+- **Dogfooding `blast_radius`:** an empty ADR `**Domains**:` line no longer names `## Context`
+  (#787); domain-level ADR matches are one line, not one per ADR (#788); the diff itself is not
+  reported as index staleness (#789).
+- **Hook findings and health:** a swallowed error moved across files counts as moved, and its
+  fallback is named (#777); a failed hook run records why (#778).
 
 ## P0: 3.6.0 follow-ups (small fixes, any time)
 
