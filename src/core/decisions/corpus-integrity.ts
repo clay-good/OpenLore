@@ -725,7 +725,7 @@ function durableDecision(
 ): DurableDecision {
   const parsedStatus = durableStatus(status);
   const title = text.match(/^###\s+(.+)$/m)?.[1]?.trim()
-    ?? text.match(/^#\s+ADR-[^:]+:\s*(.+)$/m)?.[1]?.trim()
+    ?? text.match(/^#\s+ADR-[^:]+:[ \t]*(.+)$/m)?.[1]?.trim()
     ?? '';
   const rationale = text.match(/^## Context\s*\n\s*\n([\s\S]*?)(?=^##\s)/m)?.[1]?.trim()
     ?? text.match(/^> OpenLore constraints:[^\n]*\n\s*\n([\s\S]*?)(?=^\*\*Consequences:\*\*)/m)?.[1]?.trim()
