@@ -61,8 +61,8 @@ Shipped since 3.6.0 for the same reason:
 
 ## P2: next, after P1 ships
 
-Four items get their own change folder only when P1 has shipped. Each names the existing change
-that carries it today.
+Five items get their own change folder only when P1 has shipped. Each names the existing change
+that carries it today, or what it builds on.
 
 | Item (no folder yet) | What it does for the agent | Carried by |
 |------|----------------------------|------------|
@@ -70,6 +70,7 @@ that carries it today.
 | `intent-check-at-stop` | Before stop, the change is checked against the intent it touches: requirements, asserting tests, decisions | `add-test-evidence-claims`, `adopt-spec-link-status-vocabulary` |
 | `test-failure-localization` | A failed test or command points at the line that emitted the error and the changed code that reaches it | `add-log-anchor-conclusions` |
 | `first-session-experience` | The first prompt in a repo gets a short digest; a plan prompt is oriented. Build progress is `hook-reliability` group 9 | `adopt-agent-context-interop`, `add-openspec-proposal-orientation` |
+| `proven-fact-memory` | Durable facts are kept because a session proved them (a failing test and the change that fixed it, a recorded decision, a reverted change), not only when an agent calls `remember`; each is kept or retired by whether later sessions use it. Today memory is code-anchored and goes stale on its own, but what is remembered depends on an opt-in tool | builds on `remember`/`recall` (memory triggers, claim verdicts, anchor verdicts) and the session ledger |
 
 | Change | Why it helps the agent |
 |--------|------------------------|
