@@ -5,369 +5,71 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
-### Added
+## [3.7.0] - 2026-11-15
 
-- **`npm run bench:select-tests`: does test selection name the tests real changes had to touch?**
-  It replays recent commits: index the parent, apply only the production changes, ask
-  `select_tests`, and compare with the test files the commit modified. Local and deterministic.
-  First run over 20 commits: 46 of 55 modified tests selected (84%), 82 test files selected on
-  average out of about 700.
+OpenLore now ships as a Claude Code plugin, and most of this release makes its answers to agents
+more accurate. Test selection finds more of the tests a change breaks, `blast_radius` reports less
+noise, and the prompt hook only speaks when you name code. Your existing configuration keeps
+working as it is.
 
-- **The before-stop receipt carries three certificates.** When the session diff touches a
-  `.ts/.tsx/.js/.jsx/.py` file, the receipt names each exported symbol the change breaks and the
-  files that use it (`certify_public_surface`). When it touches an OpenAPI, protobuf or GraphQL file,
-  it names each breaking or dangerous contract change and its in-repo call sites
-  (`certify_service_contract`). When `impactCertificate.surfaces` is declared, it names each path
-  the change newly opens into a surface (`change_impact_certificate`, never persisted). Each runs
-  beside `verify_change` with its own 10 s limit and at most 3 lines, says nothing when it fails or
-  runs out of time, and is not repeated when `verify_change` already names the same symbol.
+### Highlights
 
-- **OpenLore is a Claude Code plugin.** `claude plugin marketplace add clay-good/OpenLore`, then
-  `claude plugin install openlore@openlore`, wires the MCP server (the default `substrate` tools) and
-  the session-start, prompt, after-edit, and before-stop hooks, with no global npm install and no
-  config. The plugin ships a small launcher: on first use it installs the pinned `openlore` package
-  once into the plugin's data folder, without the embeddings and viewer packages, while hooks keep
-  returning at once. When `openlore install` hooks are present, the plugin's hooks stay silent, so
-  nothing runs twice. A real install is tested on Linux, Windows, and macOS in CI. Its README lists
-  everything it runs, writes, and fetches. The npm CLI, the Pi extension, and the MCP registry
-  listing are unchanged.
-- **Optional per-lane file rules and an agent-driven configuration workflow** (#719). A new optional
-  `filePolicies` block in `.openlore/config.json` holds rules that include or exclude a path
-  separately for indexing, live watching and embedding, so a tracked generated tree can stay out of
-  the watcher while still being analyzed. The workflow inspects repository evidence, previews an
-  exact config diff, applies it only with host authorization, verifies, and can revert. It is
-  reachable from Pi (`openlore_configure` actions, `/openlore configure assist`), the
-  `openlore configure` CLI, the `openlore/configuration` API, and an opt-in MCP preset
-  (`--preset configuration`). Nothing changes for a repository without `filePolicies`: the corpus,
-  fingerprints, default MCP surface and default config stamp are the same as before.
+- **Claude Code plugin.** Run `claude plugin marketplace add clay-good/OpenLore`, then
+  `claude plugin install openlore@openlore`. It sets up the MCP server and the hooks with no global
+  npm install and no config. (#727)
+- **Better test selection.** `select_tests` now finds tests that load their module with a dynamic
+  import, guard tests that read a source file by its path, tests for a function you just added, and
+  tests that import a class or an object. Replayed over the last 20 commits, it found 98% of the
+  tests each change had to edit, up from 84%. The high-confidence part alone, about 22 files on
+  average, found 79%. (#776, #781, #782, #783, #786)
+- **`blast_radius` lists every test file to run**, not only the first 15 tests. (#775)
+- **`npm run bench:select-tests`** replays recent commits and reports how well test selection did,
+  per confidence tier. (#780, #785)
+- **The prompt hook only briefs code you name exactly**: a backticked name, a file path, or an
+  identifier. A prose prompt gets no briefing. (#758, #760)
+- **`openlore install --scope user` also sets up the edit and stop hooks**, and they only run in
+  projects that use OpenLore. (#762)
+- **Spec frameworks are optional.** A repository without specs gets a plain "no spec source" answer
+  instead of an error or a 0% score. `openspecPath` is optional, and `adrPaths` is a new setting.
+  (#751, #753, #754, #756)
+- **Per-lane file rules** (`filePolicies`) can keep a path out of indexing, watching or embeddings
+  separately, with a guided `openlore configure` workflow. (#720)
+- **The before-stop receipt names breaking changes** to exported functions and to OpenAPI,
+  protobuf and GraphQL contracts. (#749)
 
-### Changed
+### Behavior changes
 
-- **A user-scope install now wires the agent-loop hooks too.** `openlore install --scope user`
-  gives every repository and git worktree the before-edit, after-tools, before-stop and sub-agent
-  receipts, not only the prompt briefing. Each command exits before Node starts in a project
-  without `.openlore/`, and every user-scope hook stands down where the repository wires the same
-  hook itself, which also ends the double prompt briefing a user-scope plus repo-scope install
-  gave. Re-run `openlore install --scope user` to get it; nothing changes until you do.
+- `openlore init` and `openlore install` no longer create an empty `openspec/` folder, and the
+  `.gitignore` entry is just `.openlore/`. (#751)
+- Corpus-integrity findings are advisory by default. To keep them blocking, list them in
+  `enforcement.policy` in `.openlore/config.json`. (#747)
+- Hook time limits are shorter and measured: before-edit stops after 3 s (was 8 s). Each finding
+  is shown once per session, and hooks stay silent when something inside them fails. (#733, #736–#743)
+- `openlore doctor --json` calls the spec check `Spec source` (was `OpenSpec directory`). (#753)
 
-- **The prompt briefing is given only for code the prompt names exactly.** `orient --inject` (the
-  `UserPromptSubmit` hook) now looks only at `backticked` names, file paths and identifier-shaped
-  words in your own words (pasted content excluded), and shows only what those resolve to exactly,
-  with callers. Prose prompts are not searched. Withheld turns print nothing, except one line per
-  session that explains this, and the once-per-session no-index line. On 68 real prompts from this
-  repository the briefing went from 25 blocks with 4% of named files relevant to 2 blocks, both
-  relevant, about a quarter of the size. The `relevanceMin*` settings are accepted and no longer
-  used. Pasted content also no longer starts the OpenSpec proposal instruction.
+### Fixes
 
-- **"No spec source" is stated, not hidden or failed.** In a repository with no spec corpus,
-  `orient` and `get_handoff_briefing` add `specSources: { found: [], lookedFor: ["openspec"] }`;
-  `list_spec_domains`, `search_specs`, `check_spec_drift` and the link index return
-  `reason: "no-spec-source"` with `lookedFor` (`search_specs` returns an empty answer, not an
-  error); `get_test_coverage` returns `coveragePercent: null` with a note, never 0%; `openlore drift`
-  exits 2 with "spec drift not assessed"; `openlore doctor` shows `Spec source: none` as ok; decision
-  sync names the skip and creates no folder. No answer tells the agent to run `openlore generate`.
-  `doctor --json` names the check `Spec source` (was `OpenSpec directory`).
-- **`openspecPath` is optional, and a new `adrPaths` key is validated.** `openlore init` records
-  `openspecPath` only when it finds an OpenSpec corpus or you pass `--openspec-path`; reading a
-  config no longer adds one back. `init --openspec-path` lost its built-in default, which also makes
-  `openlore init` detect an existing `docs/specs` or `specs` corpus again (the default had silently
-  skipped that detection). `adrPaths` (folders of decision records, repository-relative) is
-  accepted and checked; an absolute path or one with `..` is named and ignored. No feature reads it
-  yet.
-
-- **First run creates no spec folder.** `openlore init` and `openlore install` no longer create an
-  empty `openspec/`; OpenLore works without one, and `openlore generate` creates the folders it
-  writes. An existing `openspec/` is left untouched. The `.gitignore` entry is now exactly
-  `.openlore/` (no comment, no blank line), and it is not written when git already ignores
-  `.openlore/` another way. `openlore change-status` reports `validates: not assessed (…)` and
-  `"assessed": false` when the `openspec` CLI is missing or not executable, instead of a failure;
-  such a change is never an archivable candidate.
-
-
-- **Corpus-integrity findings no longer block a commit by default.** `corpus-reference-unresolved`,
-  `corpus-reference-ambiguous`, `corpus-self-reference`, `corpus-duplicate-identifier`,
-  `corpus-edge-unsupported`, `corpus-target-type-mismatch` and `corpus-supersession-cycle` now
-  default to `advisory`, like every other finding code: only `enforcement.policy` makes a finding
-  block. Their severity stays `error`, `openlore doctor` still reports them as failures, and a
-  supersession cycle still makes no decision in the cycle authoritative. To keep the old behavior,
-  add this to `.openlore/config.json`:
-
-  ```json
-  { "enforcement": { "policy": {
-    "corpus-reference-unresolved": "blocking", "corpus-reference-ambiguous": "blocking",
-    "corpus-self-reference": "blocking", "corpus-duplicate-identifier": "blocking",
-    "corpus-edge-unsupported": "blocking", "corpus-target-type-mismatch": "blocking",
-    "corpus-supersession-cycle": "blocking" } } }
-  ```
-
-### Fixed
-
-- **An empty `**Domains**:` line in an ADR no longer names `## Context` as a domain.** The parser
-  let the value run onto the next line, so three of this repository's ADRs reported a missing domain
-  `## Context` in every `blast_radius` and drift answer (`adr-orphaned`). The same fix applies to
-  an empty requirement heading, an empty ADR title, and an empty `gitdir:` pointer.
-
-- **`blast_radius` no longer reports a one-line change as "29 decisions affected".** Most of those
-  were domain-level matches: an ADR that names a domain the change touches (`adr-gap`, info). The
-  headline now counts decisions that name a missing domain apart from ADRs that name a touched
-  domain, and the CLI folds the domain-level matches into one line with their ids. The JSON is
-  unchanged.
-
-- **`blast_radius` no longer tells the agent to re-run analyze because of the change it is
-  briefing.** With the index built at the base (or later on the same history), every file changed
-  since the index is part of the diff, yet each briefing said "N source file(s) changed since.
-  Re-run analyze_codebase". The staleness note now appears only when the index is older than the
-  base or off this history.
-
-- **A test linked twelve calls from a change is no longer "medium" confidence.** A test that reaches
-  the change through a `tested_by` link was medium at any depth, while a test reaching it by calls
-  follows the depth rule (1 high, 2–3 medium, deeper low). Both now follow the depth rule. On
-  `bench:select-tests` (20 commits), running only medium-and-above tests now means 64 files
-  instead of 114, finding 94% of the tests the changes had to touch (was 96%); the full selection
-  is unchanged.
-
-- **`select_tests` selects tests for a function just added to a file.** The index predates a new
-  function, so nothing seeded it and the file's own tests were not selected. Now the tests of the
-  file's other functions are selected at low confidence, with the same-file reason. On the
-  `bench:select-tests` replay this found the one test #771 had to change, at one extra file.
-
-- **`select_tests` finds guard tests that name a file relative to its source root.** Guards such as
-  the user-config write guard list `'cli/commands/orient.ts'`, not `'src/cli/commands/orient.ts'`, so
-  the path rule missed them. Any trailing part of a changed path with at least two segments now
-  counts; a bare file name does not. On `bench:select-tests` (20 commits): 47 → 49 of 55 modified
-  tests found, 82 → 83 test files selected on average.
-
-- **A test that imports an object literal, or renames an import, is linked to the code it tests.**
-
-- **A test that imports a class or an object literal, or renames an import, is linked to the code
-  it tests.** A test that imports `McpWatcher` and calls `start()` linked to none of its methods
-  (calls inside anonymous `it` callbacks have no caller node); every method of an imported class is
-  now linked.
-  `import { adapter } from './a.js'`, where `adapter` is `{ apply() {…} }`, linked nothing: the
-  index names those methods by method name only. The methods inside the literal are now linked.
-  `import { foo as bar }` looked up the alias `bar` in the source file, so every renamed import
-  was missed; it now looks up `foo`. On `bench:select-tests`, #762's `user-scope.test` is found.
-
-- **`blast_radius` lists every test file to run.** It returned the first 15 single tests, cut per
-  test, so the files past them were only counted. On one change, `orient.test.ts` (it calls the
-  changed `handleOrient`) was outside the 15 shown. `tests.files` now lists every selected test file,
-  most confident first (up to 200, disclosed in `capped`); `verify_change` carries it, and the CLI
-  prints the files.
-
-- **`select_tests` finds tests that load their module dynamically or read it by path.** A test
-  that loads its module after setting up mocks (`const { f } = await import('./m.js')`, 110 of
-  this repository's 700 test files) got no `tested_by` association, and a source guard that reads a
-  file as text (`'src/pi/extension.ts'`) had no edge at all. Replayed against three real changes,
-  `select_tests` found 9 of the 12 tests they broke; it now finds all 12. Path readers are selected
-  at medium confidence with their own reason.
-
-- **The swallowed-error finding is quieter and says what happens to the error.** In a day of real
-  sessions it fired twice, both noise. One handler had been moved from another file in the same
-  change: it now counts as moved, in either file order, while a copy that leaves the original in
-  place is still reported. The other returned a deliberate fallback, but the message said "only
-  logged or ignored"; it now says "replaced by `return …`".
-
-- **A failed hook run records what failed.** A day of real sessions logged 24 prompt-hook errors
-  with no reason, so none could be diagnosed. Each `error` run in `hook-runs.jsonl` now keeps one
-  bounded, sanitized line (`TypeError: …`), and `openlore status` names the most recent one in its
-  `Hook health` line. The agent still sees nothing.
-
-- **Spec text under a configured `openspecPath` is labeled reviewed only when it is.** `orient`,
-  `blast_radius` and the Pi context checked git for a fixed `openspec/` folder. With
-  `openspecPath: "docs"`, an uncommitted edit under `docs/specs/` was served as `reviewed-corpus`.
-  They now check the configured folder, and an invalid config gives `local-unreviewed`.
-
-- **Spec search results can be labeled reviewed again, and spec paths follow `openspecPath`.**
-  `search_specs` and `orient`'s spec matches required the indexed text to appear in the spec file,
-  but the index adds its own `[spec:<domain>] <title>` line, so every result in every repository was
-  `local-unreviewed`. The check now skips that line; an uncommitted edit still gives
-  `local-unreviewed`. These results, `search_unified` and `CODEBASE.md` also used
-  `openspec/specs/…` paths when `openspecPath` points elsewhere: `CODEBASE.md` listed no spec
-  domains for a `docs/specs` corpus.
-
-- **JavaScript functions are labeled JavaScript.** Functions in `.js`, `.mjs`, `.cjs` and `.jsx`
-  files were stored with `language: "TypeScript"`, so per-language answers (language support,
-  filters, summaries) counted them as TypeScript. Extraction itself is unchanged. (#724 follow-up)
-
-- **Java and C# calls through a field use the field's declared type.** `log.info(…)` on a `Logger`
-  field was wired to every in-repo method named `info`, `cache.get(…)` on a `Map` field to every
-  in-repo `get`, and `repo.save(…)` on an in-repo `Repo` field was only name-guessed and also listed
-  as an external call. A receiver its method does not declare now takes the type the file declares
-  for it (only when declared one way); generic declarations (`Map<K, V> cache`) count. (#724
-  follow-up)
-
-- **The live watcher honors `.openlore-ignore` and `analysis.excludePatterns`, and picks up an
-  edited ignore file.** `openlore analyze` excludes those paths, but the watcher (MCP server, Pi)
-  re-indexed them on every save unless `filePolicies` was configured, and read `.gitignore` only at
-  start. Now the watcher uses the same rules, and an edit to `.gitignore` or `.openlore-ignore`
-  applies to the next file event. A directory an edit newly includes is picked up at the next
-  watcher start. (#717 follow-up)
-
-- **OpenAPI enum changes read as their values, not as escaped JSON.** `certify_service_contract`,
-  `blast_radius` and the hook briefings printed an enum type as `string{["\"open\"","\"shipped\""]}`;
-  they now print `string enum "open" | "shipped"`, and a format as `string (date)`.
-
-- **The hooks, the status line and the Pi extension find the project by one rule.** A project is
-  the nearest directory whose `.openlore/` holds a `config.json` or an `analysis/`, found without
-  crossing a repository top or the home directory. Before, a `.openlore/` folder a tool left in a
-  subdirectory captured the hooks, so the project's own settings (such as a moment turned off) were
-  not read. The status line also crossed into a parent repository and reported its index for a
-  nested one, where the hooks stayed silent.
-
-- **Every MCP tool input now has a description.** 47 inputs across 7 tools had none (for example
-  `explain_retrieval_miss`'s `query`, `surface` and `target`, and `declare_footprint`'s `writeSet`),
-  so an agent had to guess the argument from its name. A new test fails when an input, nested
-  property or array-item property has no description. The `configuration`, `coordination` and `full`
-  token budgets were re-measured for the added text.
-
-- **TypeScript files that use `import('x').T` types, `typeof import(…)`, `using` as a variable, or
-  `export type *` no longer parse with errors.** The bundled grammar cannot parse these; a
-  length-preserving, parse-only mask now hides them from it. On this repository: files with parse
-  errors 57 → 0, call edges +87, functions +8; orient answers no longer carry the parse "lower
-  bound" warning for them.
-
-- **Index build progress for you, silence for the agent.** While an index builds, `openlore
-  statusline` and `openlore status` show `indexing 45% (1,310/2,900 files)`, then the phase name.
-  The prompt hook no longer puts a build note into the agent's context while a build runs. During a
-  first build, `openlore status` shows the build instead of "run openlore analyze". Plugin users can
-  wire `openlore statusline` themselves (see `docs/install.md`).
-- **Hooks survive a moved or removed install, and upgrades leave no stale hook.** Each hook
-  command `openlore install` writes now checks that its runtime exists and exits 0 silently when it
-  does not, instead of failing with `Cannot find module` on every event. Install and uninstall
-  remove any hook group for a moment the current version no longer has. Uninstall names the skills
-  `openlore setup` copied as kept. `openlore doctor` reports a hook whose runtime is gone, and an
-  event that runs two different OpenLore commands for the same step.
-- **`openlore status` says what happened to each hook finding.** A finding the hooks showed is
-  counted as fixed (the same check ran again after an edit to its file and no longer reports it),
-  decided (a recorded decision cites its id, such as `f:1a2b3c4d`), open (the stop receipt still
-  lists it), or not assessed. Local data only, never sent.
-- **No briefing for a background-task notice.** Claude Code delivers a finished background task as a
-  `<task-notification>` prompt; the prompt hook oriented on it and briefed the agent on unrelated
-  code that the notice's words happened to match. It now does no lookup and says nothing for such a
-  notice. Telemetry still counts it (`harness-event`).
-- **`openlore status` reports hook health.** Every hook run is recorded locally in
-  `.openlore/session-ledger/hook-runs.jsonl`, and a new `Hook health` line (and `hookHealth` in
-  `--json`) shows each moment's last run and p95, the errors and overruns, and the findings shown
-  over the last 7 days. A failed or timed-out hook is still silent to the agent, but now it is
-  counted for you.
-- **Tighter hook time limits, now tested.** From measurement: before-edit stops at 3 s (was 8 s),
-  after-edit at 6 s (was 15 s), and before-stop at 20 s (was 50 s). `npm run test:budgets` now times
-  each moment on a fixed 2,000-function fixture and fails when a p95 passes its budget, and CI
-  spawns the built CLI to check the whole-process median.
-- **Each hook finding is stated once per session, and carries an id.** A finding is identified by
-  its code, its subject, and the text of the line it cites (not the line number), and is printed
-  with an id such as `[f:1a2b3c4d]`. Lines added above it no longer repeat it; a change to the
-  cited line now does (before, it stayed hidden). The prompt hook states its no-index line and its
-  build note once per session instead of on every prompt.
-- **The prompt hook follows the same rules as the other hook moments.** `openlore orient --inject`
-  now has its own off switch, `hooks.prompt-submitted: false` (which also starts no index build), a
-  3 s time limit, and silence on a failed lookup: the "orientation failed for this turn" line is
-  gone, and nothing is written to stderr. `openlore status` lists it as `prompt-submitted`. Gate
-  pointer lines (no index, weak match, management turn, empty prompt) are unchanged.
-- **Agent-loop hooks stay silent when something breaks.** A check that failed to load on the
-  shell-command or sub-agent path threw out of the hook instead of ending in silence; it now ends
-  in silence, like every other failure. After a compaction, the handoff no longer pastes raw error text or temporary
-  paths into the agent's context (one summary line names `openlore handoff` instead). A sub-agent
-  briefing no longer tells the sub-agent to run `openlore analyze` when the index is missing. A new
-  test runs every moment against throwing checks, a time limit, and a missing, corrupt, or
-  read-only `.openlore/`, and CI now runs the built CLI's hooks on a corrupt store. On Node 22,
-  every command (each hook included) no longer prints Node's "SQLite is an experimental feature"
-  warning to stderr.
-- **`orient` and `search_code` stop claiming coverage over content they could not read.** With
-  unparseable files, an oversized contract schema, or an unreadable parse-health record in the
-  repository, both answered `covered` (or a confident empty `uncovered`). The verdict is now
-  `partial`, naming the cause, with the unobstructed verdict kept as `evidenceVerdict`. An index
-  whose artifacts no longer match their published generation is refused, as the graph tools already
-  refuse it. A hit matched only on a file's language marker is weak evidence and says so, and
-  `search --json` reports how many results were returned, matched and clamped.
-- **GraphQL schemas in a monorepo are graded per project.** Type identity was computed across the
-  whole repository, so two projects that each declare `type Query` voided each other and no root
-  operation of either was graded — a required argument added to one project's query went
-  unreported. A schema's identity is now scoped to its nearest enclosing project root (a
-  `package.json` or a GraphQL/Relay config), stated in `boundaries`; a collision inside one project
-  is still not assessed. A duplicate field now withholds only its own type, not the whole document,
-  and a capped `notAssessed` list carries `notAssessedOmitted`.
-- **The refactor report's cycles are real call cycles again.** It read three kinds of edge as
-  calls: the derived `tested_by` edge (production function → test), so each function closed a false
-  cycle with every test that calls it — 474 "cycles" on a 1,500-function Python repository; the
-  `overrides` edge, so every override that calls `super.m()` cycled with its base; and the
-  deliberately over-approximate `cha-name-only` guess, so unrelated same-named methods cycled.
-- **TypeScript/JavaScript `new C(…)` is now a call edge to `C`'s constructor.** It was never
-  extracted, so no constructor had a caller: `analyze_impact` and `blast_radius` could not see who
-  constructs a class, and constructors read as dead. The edge binds only to the class declared in
-  the caller's file or the file it imports `C` from; `new Map()` and classes without an explicit
-  constructor add nothing.
-- **Python `C(…)` of an in-repo class now reaches `C.__init__`.** It fell through to an
-  `external::C` leaf, listing the repository's own class as an external dependency and leaving
-  every `__init__` without a caller (0 of 172 on one sample project; 164 of 172 now). It binds on
-  the same proof as other calls; a class imported from a third-party module is never bound.
-- **A `super.m()` call is no longer fanned out to every same-named method.** In
-  `class HeaderMap extends Map`, `super.get(…)` was wired to each unrelated in-repo `get` (one in a
-  test file). A super call binds to the base class, which the direct resolver already follows.
-- **Renaming a function no longer reports its existing `try/catch` as a newly swallowed error.**
-  The `error-swallowed` check keyed each handler by its enclosing function's name, so the
-  after-edit hook flagged a plain method rename as a weakened check. A handler around code the
-  baseline already discarded, in any function of the file, is now matched first.
-- **`search_code`'s literal-text answers state their coverage.** When no indexed symbol matched —
-  including the few seconds while the watcher re-indexes a function just written — the text-index
-  fallback (and forced `mode: "text"`) returned results with no `coverage` verdict, which the
-  runtime contract check flags, and said the hits came "from markup/text files" when the top hit
-  was a TypeScript source line.
-- **`openlore change-status` no longer crashes on a repository with no open changes.** It failed
-  with a raw `ENOENT` when `openspec/changes/` did not exist — the state `openlore install` leaves.
-- **OpenLore's own `.openlore/` output no longer counts as a source change.** In a repository that
-  does not ignore it, `openlore import` warned "the checkout changed while the bundle was being
-  imported" on an untouched clone, and a first analysis recorded its own tree as dirty.
-- **`find_dead_code` no longer rates a package's entry point high-confidence dead** when that
-  package's `package.json` was never read (it is neither the root's nor a declared workspace
-  member's — a VS Code extension or web app inside a Python repository). Such a candidate is capped
-  at low with the manifest named, and `verify_claim` `dead` answers `unverifiable` instead of
-  `confirmed`.
-- **`find_dead_code` no longer rates Go, Rust, C# and other code high-confidence dead on a signal it
-  never collected.** "Not imported by name from any other file" comes from the dependency graph,
-  which extracts imports only for TypeScript, JavaScript, Python, Java and Kotlin. In a Rust
-  workspace 617 public functions were rated `high`, including a serde `default = "…"` callback.
-  Candidates in other languages now stop at `medium` and say why.
-- **`find_dead_code` no longer rates a function called from module scope high-confidence dead.**
-  Top-level code has no call-graph node, so `if (!arg) die("usage")` or `start().catch(…)` made no
-  edge and `die` / `start` read as uncalled. A candidate its own file names outside every indexed
-  function is now capped at `low`, with the line. On OpenLore's own index the high tier fell from 16
-  to 9.
-- **`find_dead_code` no longer rates closures, visitor methods or used constructors high-confidence
-  dead.** A function defined inside a live function is a value it hands out (a callback, a returned
-  visitor's `enter`/`leave`) whose caller is outside the graph; a constructor of a class with live
-  members has run even when no `new X()` edge reaches it (a class without an explicit constructor,
-  or a construction the binder cannot place). Both are capped at `low` with the reason.
-- **Every symbol-taking tool accepts a qualified symbol.** `EdgeStore.open` — the form the
-  generated `CODEBASE.md` prints for a hub — was answered "not found" by `get_subgraph`,
-  `analyze_impact`, `trace_execution_path`, `find_path`, `get_minimal_context`, `get_cluster` and
-  `locate_symbol_span`; `find_clones` and `analyze_error_propagation` resolved an external leaf
-  carrying the dotted call text and called the method uncomparable / unsupported; and a bare `open`
-  matched every `open` in the repository. `Class.method`,
-  `name::path`, `Class.method::path` and node ids now resolve; a plain or dotted name that is not a
-  `Class.method` keeps the existing lookup.
-- **`locate_symbol_span` serves `/`-separated paths on Windows.** Its `file` and `name::path`
-  were built with `path.relative`, so a Windows agent got `src\store.ts` beside node ids of
-  `src/store.ts`, and a symbol id no other tool would accept back.
-- **`verify_claim` can verify a symbol whose name is shared.** An ambiguous subject was answered
-  "Disambiguate before verifying", but no form was accepted — not `name::path` (which every other
-  symbol-taking tool accepts), `Class.method`, or the node id. All three now resolve, and the
-  ambiguity reason names the candidates in that form.
-- **A fresh `openlore install` no longer leaves its own index stale.** The decision-trail step
-  appended guidance to `CLAUDE.md` / `AGENTS.md` after the index was built, and both files are part
-  of the analyzed corpus, so the very next run re-analyzed an unchanged repository. The gate is now
-  wired between `init` and `analyze`.
-- **`detect_changes` and `search_specs` stopped sending agents to re-run `analyze` for nothing.**
-  `detect_changes` said "Re-run analyze_codebase" when the diff touched only non-code files, and
-  `search_specs` said "Run openlore analyze first" on a repository with no specs, which `analyze`
-  cannot fix. Both now say what is actually the case.
-
-### Docs
-
-- **The roadmap names one direction and one next step.** `ROADMAP.md` now plans OpenLore as
-  evidence delivered to the agent through hooks (ADR-0036, superseding ADR-0035), names the Claude
-  Code plugin as the next build, and lists cut work with the commit to restore it from. Shipped
-  changes are archived, and the main specs state only what the code does today.
+- `blast_radius`: an empty `**Domains**:` line in an ADR is no longer read as a domain named
+  `## Context` (#787). ADRs that only mention a touched area are summarized in one line (#788). The
+  change you are checking is no longer reported as a stale index (#789).
+- Spec text is labeled reviewed only when it is, and spec paths follow `openspecPath`. (#771, #773)
+- The file watcher honors `.openlore-ignore` and `excludePatterns`, and picks up edits to ignore
+  files. (#766)
+- The hooks, the status line and Pi use one rule to find the project root. (#768, #723)
+- Call graph: JavaScript files are labeled JavaScript (#764); Java and C# calls through a field use
+  the field's type (#765); TypeScript files with `import()` types or `using` parse cleanly (#759);
+  `new C()` and Python `C()` reach the constructor, and `super.m()` is no longer matched to every
+  method named `m` (#724).
+- OpenAPI enum changes show their values instead of escaped JSON. (#767)
+- Every MCP tool input has a description. (#769)
+- Hooks: a failed run records why (#778), and a `try/catch` moved to another file is no longer
+  reported as a new swallowed error (#777).
+- `find_dead_code` no longer rates package entry points, functions called from module scope,
+  closures, or code in languages without import data as certainly dead. (#724)
+- `orient` and `search_code` no longer claim coverage over content they could not read. (#725)
+- GraphQL schemas in a monorepo are graded per project. (#726)
+- `openlore change-status` no longer fails in a repository with no open changes, and a fresh
+  install no longer leaves its own index stale. (#724)
 
 ## [3.6.0] - 2026-11-09
 

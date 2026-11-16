@@ -1,0 +1,26 @@
+{
+  "version": "1.2.0",
+  "projectType": "nodejs",
+  "openspecPath": "docs",
+  "adrPaths": ["docs/adr"],
+  "analysis": {
+    "maxFiles": 100000,
+    "includePatterns": [],
+    "excludePatterns": ["build-cache/"]
+  },
+  "generation": {
+    "model": "claude-sonnet-4-6",
+    "domains": "auto"
+  },
+  "filePolicies": {
+    "rules": [
+      { "id": "generated-clients", "pattern": "src/generated/", "lanes": { "watch": "exclude", "embed": "exclude" }, "reason": "Regenerated on every build" }
+    ]
+  },
+  "configurationAssistant": { "reviewMode": "manual" },
+  "panicResponse": {
+    "mode": "off"
+  },
+  "createdAt": "2026-11-15T00:00:00.000Z",
+  "lastRun": null
+}
