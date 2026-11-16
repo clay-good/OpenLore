@@ -97,7 +97,7 @@ try {
   // 2. Every hook, exactly as the plugin declares it.
   const { hooks } = JSON.parse(readFileSync(join(pluginRoot, 'hooks', 'hooks.json'), 'utf8'));
   const payload = (event) => JSON.stringify({
-    session_id: 'plugin-smoke', cwd: repo, hook_event_name: event, prompt: 'change total to skip negative numbers',
+    session_id: 'plugin-smoke', cwd: repo, hook_event_name: event, prompt: 'change `total` to skip negative numbers',
     tool_name: 'Edit', tool_input: { file_path: join(repo, 'src', 'math.ts'), old_string: 'a + b', new_string: 'a + b' },
     tool_response: { success: true }, source: 'startup', stop_hook_active: false,
   });
@@ -152,7 +152,9 @@ try {
   const unannotated = (tools ?? []).filter((t) => !t.annotations?.title || !('readOnlyHint' in t.annotations)).map((t) => t.name);
   check(unannotated.length === 0, `every MCP tool has a title and readOnlyHint${unannotated.length ? `: missing on ${unannotated.join(', ')}` : ''}`);
 
-  // 4. Once the background build publishes, the prompt hook returns a briefing.
+  // 4. Once the background build publishes, the prompt hook returns a briefing. Since 3.7.0 it
+  // briefs only code the prompt names exactly (a backticked name, a path, an identifier), so the
+  // prompt names `total` in backticks; plain prose is silent by design.
   let briefed = false;
   for (let attempt = 0; attempt < 24 && !briefed; attempt += 1) {
     await new Promise((r) => setTimeout(r, 5_000));
