@@ -499,7 +499,9 @@ describe('McpWatcher — real fs watcher', () => {
     await writeFile(srcFile, 'export function after() {}', 'utf-8');
     await settle(join(outputPath, 'llm-context.json'));
 
-    // The real event path handed the patched context to the read cache.
+    // The real event path handed the patched context to the read cache. On a loaded runner the file
+    // event can land after `settle`'s budget, so wait for the priming itself, not a fixed time.
+    await vi.waitFor(() => expect(primeSpy).toHaveBeenCalled(), { timeout: 15_000, interval: 50 });
     expect(primeSpy, 'watcher must prime the read cache after a save').toHaveBeenCalled();
     const primed = primeSpy.mock.calls.at(-1)![1] as LLMContext;
     // Freshness (G6) landed in the primed object itself.
@@ -510,7 +512,7 @@ describe('McpWatcher — real fs watcher', () => {
     // re-parse would return a different object reference.
     const afterRead = await readCachedContext(rootPath);
     expect(afterRead, 'post-save read must be the primed object, not a fresh disk parse').toBe(primed);
-  }, 10_000);
+  }, 30_000);
 
   // The Windows half of this pair is the 8.3 test below; this one covers POSIX, where the
   // equivalent alias is a symlink. skipIf(win32) because creating a symlink there needs

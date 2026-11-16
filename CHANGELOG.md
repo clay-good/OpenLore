@@ -113,6 +113,12 @@ All notable changes to OpenLore are documented here. This project adheres to
   domain, and the CLI folds the domain-level matches into one line with their ids. The JSON is
   unchanged.
 
+- **`blast_radius` no longer tells the agent to re-run analyze because of the change it is
+  briefing.** With the index built at the base (or later on the same history), every file changed
+  since the index is part of the diff, yet each briefing said "N source file(s) changed since.
+  Re-run analyze_codebase". The staleness note now appears only when the index is older than the
+  base or off this history.
+
 - **A test linked twelve calls from a change is no longer "medium" confidence.** A test that reaches
   the change through a `tested_by` link was medium at any depth, while a test reaching it by calls
   follows the depth rule (1 high, 2–3 medium, deeper low). Both now follow the depth rule. On
