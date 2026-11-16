@@ -49,7 +49,7 @@ const home = join(work, 'home');
 mkdirSync(home);
 git(ROOT, 'worktree', 'add', '--detach', '--quiet', tree, `${cases[0].commit}^`);
 const { handleSelectTests } = await import(pathToFileURL(join(ROOT, 'dist', 'core', 'services', 'mcp-handlers', 'test-impact.js')).href) as {
-  handleSelectTests: (input: { directory: string; diffRef: string }) => Promise<{ selectedTests?: Array<{ file: string }>; error?: string }>;
+  handleSelectTests: (input: { directory: string; diffRef: string }) => Promise<{ selectedTests?: Array<{ file: string; confidence: string }>; error?: string }>;
 };
 const { withLoggerOptions } = await import(pathToFileURL(join(ROOT, 'dist', 'utils', 'logger.js')).href) as {
   withLoggerOptions: <T>(options: { quiet: boolean }, fn: () => Promise<T>) => Promise<T>;
@@ -69,7 +69,7 @@ try {
     git(tree, 'checkout', c.commit, '--', ...c.applied);
     const r = await withLoggerOptions({ quiet: true }, () => handleSelectTests({ directory: tree, diffRef: 'HEAD' }));
     if (r.error) { console.error(`${c.commit.slice(0, 9)}: ${r.error}; skipped`); continue; }
-    const s = scoreReplay(c, [...new Set((r.selectedTests ?? []).map(t => t.file))]);
+    const s = scoreReplay(c, r.selectedTests ?? []);
     scores.push(s);
     if (!json) console.log(`${s.commit.slice(0, 9)} ${s.hits}/${s.truth} found, ${s.selectedFiles} files selected  ${s.subject.slice(0, 70)}${s.misses.length ? `\n    missed: ${s.misses.join(', ')}` : ''}`);
   }
@@ -80,4 +80,9 @@ try {
 
 const summary = summarize(scores);
 if (json) console.log(JSON.stringify({ summary, scores }, null, 2));
-else console.log(`\n${summary.cases} commits: ${summary.hits}/${summary.truth} modified tests selected (recall ${(summary.recall * 100).toFixed(0)}%), ${summary.meanSelectedFiles} test files selected on average`);
+else {
+  console.log(`\n${summary.cases} commits: ${summary.hits}/${summary.truth} modified tests selected (recall ${(summary.recall * 100).toFixed(0)}%), ${summary.meanSelectedFiles} test files selected on average`);
+  for (const [tier, t] of Object.entries(summary.tiers ?? {})) {
+    console.log(`  running only ${tier}${tier === 'high' ? '' : ' and above'}: recall ${(t.recall * 100).toFixed(0)}%, ${t.meanFiles} files on average`);
+  }
+}
