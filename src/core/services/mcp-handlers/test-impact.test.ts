@@ -69,6 +69,22 @@ describe('handleSelectTests', () => {
     vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph(NODES, EDGES) } as never);
   });
 
+  it('a tested_by link takes its confidence from its depth, like a reaching test', async () => {
+    // a → b → c → d (changed). Each of a, c and d is tested_by its own test file.
+    const nodes = ['a', 'b', 'c', 'd'].map(n => node({ id: `src/m.ts::${n}` }));
+    const edges = [
+      edge('src/m.ts::a', 'src/m.ts::b'), edge('src/m.ts::b', 'src/m.ts::c'), edge('src/m.ts::c', 'src/m.ts::d'),
+      edge('src/m.ts::a', 'src/a.test.ts::*', 'tested_by', 'a.test'),
+      edge('src/m.ts::c', 'src/c.test.ts::*', 'tested_by', 'c.test'),
+      edge('src/m.ts::d', 'src/d.test.ts::*', 'tested_by', 'd.test'),
+    ];
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(nodes, edges) } as never);
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['d'] }) as { selectedTests: Array<{ file: string; confidence: string }> };
+    expect(Object.fromEntries(r.selectedTests.map(t => [t.file, t.confidence]))).toEqual({
+      'src/d.test.ts': 'high', 'src/c.test.ts': 'medium', 'src/a.test.ts': 'low',
+    });
+  });
+
   it('selects tests that transitively reach the changed symbol, with paths', async () => {
     const r = await handleSelectTests({ directory: '/p', changedSymbols: ['bar'] }) as {
       selectedTests: Array<{ test: string; file: string; viaPath: string[]; confidence: string }>;
