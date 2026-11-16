@@ -617,7 +617,13 @@ export async function computeBlastRadius(
   // Index-staleness disclosure: a risk headline computed from a graph that predates
   // the working tree must say so (fix-cli-conclusion-honesty). Same shared shape the
   // certification commands emit; absent when the index is current.
-  const staleness = await computeStaleness(absDir);
+  // The working tree is diffed against `resolvedBaseRef`. When the index was built at the base or
+  // later on this line of history (base ≤ index commit ≤ HEAD), every file changed since the index
+  // is a file of this diff: the change this briefing is about, not staleness. Telling the agent to
+  // re-analyze would be wrong advice. An index older than the base, or off this history, still is.
+  const indexStaleness = await computeStaleness(absDir);
+  const staleness = indexStaleness && await indexWithinDiff(absDir, indexStaleness.indexCommit, resolvedBaseRef)
+    ? undefined : indexStaleness;
   // Dynamic-boundary sites in the changed files and the caller closure this briefing computed
   // (change: disclose-dynamic-boundary-regions) — the constructs that make the radius a lower bound.
   const dynamicCrossing = dynamicBoundaryCrossing(
@@ -825,4 +831,30 @@ async function triggeredMemoriesForDiff(
 /** MCP dispatch entry. Returns the briefing object directly (additive-by-cast). */
 export async function handleBlastRadius(input: BlastRadiusInput): Promise<unknown> {
   return computeBlastRadius(input);
+}
+
+/**
+ * Whether the index commit lies between the base and HEAD (base ≤ index ≤ HEAD), so every change
+ * since the index is inside the diff. False when anything cannot be resolved: then the staleness
+ * marker stays.
+ */
+export async function indexWithinDiff(absDir: string, indexCommit: string, baseRef: string): Promise<boolean> {
+  // The index commit is read from a repository artifact: only a hash is accepted, and no ref may
+  // read as an option.
+  if (!/^[0-9a-f]{4,64}$/i.test(indexCommit) || baseRef.startsWith('-')) return false;
+  try {
+    const { execFileGit } = await import('../../../utils/git-exec.js');
+    const { gitPathArgs } = await import('../../../utils/git-args.js');
+    const isAncestor = async (a: string, b: string) => {
+      try {
+        await execFileGit('git', gitPathArgs('merge-base', '--is-ancestor', `${a}^{commit}`, `${b}^{commit}`), { cwd: absDir });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    return await isAncestor(baseRef, indexCommit) && await isAncestor(indexCommit, 'HEAD');
+  } catch {
+    return false;
+  }
 }
