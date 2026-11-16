@@ -102,6 +102,11 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ### Fixed
 
+- **An empty `**Domains**:` line in an ADR no longer names `## Context` as a domain.** The parser
+  let the value run onto the next line, so three of this repository's ADRs reported a missing domain
+  `## Context` in every `blast_radius` and drift answer (`adr-orphaned`). The same fix applies to
+  an empty requirement heading, an empty ADR title, and an empty `gitdir:` pointer.
+
 - **A test linked twelve calls from a change is no longer "medium" confidence.** A test that reaches
   the change through a `tested_by` link was medium at any depth, while a test reaching it by calls
   follows the depth rule (1 high, 2–3 medium, deeper low). Both now follow the depth rule. On

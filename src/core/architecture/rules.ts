@@ -419,7 +419,7 @@ async function loadDecisionInvariants(
       const footerText = recordedIndex >= 0
         ? text.slice(recordedIndex)
         : idMatch?.index === undefined ? '' : text.slice(idMatch.index);
-      const title = text.match(/^#\s+ADR-[^:]+:\s*(.+)$/m)?.[1]?.trim() ?? name;
+      const title = text.match(/^#\s+ADR-[^:]+:[ \t]*(.+)$/m)?.[1]?.trim() ?? name;
       const rationale = text.match(/^## Context\s*\n([\s\S]*?)(?=^##\s)/m)?.[1]?.trim() ?? '';
       records.push({
         name,

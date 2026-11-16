@@ -65,7 +65,7 @@ async function readSmallFile(path: string): Promise<string | undefined> {
  */
 async function mainCheckoutOf(rootPath: string): Promise<string | undefined> {
   const pointer = await readSmallFile(join(rootPath, '.git'));
-  const gitDir = pointer?.match(/^gitdir:\s*(.+)$/m)?.[1];
+  const gitDir = pointer?.match(/^gitdir:[ \t]*(.+)$/m)?.[1];
   if (!gitDir) return undefined;
   const worktreeGitDir = isAbsolute(gitDir) ? gitDir : resolve(rootPath, gitDir);
   const common = await readSmallFile(join(worktreeGitDir, 'commondir'));
