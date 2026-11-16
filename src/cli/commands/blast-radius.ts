@@ -202,8 +202,16 @@ function renderHuman(b: BlastRadiusBriefing): string {
     lines.push(sanitizeForTerminal(`   · contract ${c.operation} (${c.spec}), served by ${c.route.method} ${c.route.path} in ${c.route.file}${c.deprecated ? '; deprecated' : ''}${req.length ? `; requires ${req.join(', ')}` : ''}`));
   }
   if (b.contracts?.omitted) lines.push(`   … and ${b.contracts.omitted} more contract operation(s)`);
-  for (const d of b.decisions.items) lines.push(`   ⚠ decision [${d.provenance}] ${d.kind}: ${d.message}`);
-  if (b.decisions.affected > b.decisions.items.length) lines.push(`   … and ${b.decisions.affected - b.decisions.items.length} more decision issue(s)`);
+  // Issues one per line; domain-level gaps (an ADR names a touched domain) as one summary line.
+  const issues = b.decisions.items.filter(i => i.kind !== 'adr-gap');
+  for (const d of issues) lines.push(`   ⚠ decision [${d.provenance}] ${d.kind}: ${d.message}`);
+  if (b.decisions.orphaned > issues.length) lines.push(`   … and ${b.decisions.orphaned - issues.length} more decision issue(s)`);
+  const gapCount = b.decisions.affected - b.decisions.orphaned;
+  if (gapCount > 0) {
+    const ids = b.decisions.items.filter(i => i.kind === 'adr-gap').map(i => /referenced by (\S+?):/.exec(i.message)?.[1]).filter((id): id is string => !!id);
+    const shown = ids.slice(0, 8).join(', ');
+    lines.push(`   · ${gapCount} ADR(s) name a domain this change touches${shown ? `: ${shown}${gapCount > 8 ? ', …' : ''}` : ''} (review only if the change alters what they decide)`);
+  }
   const SPEC_SHOWN = 5;
   for (const s of b.specs.items.slice(0, SPEC_SHOWN)) lines.push(`   ⚠ spec ${s.kind}: ${s.message}`);
   if (b.specs.willGoStale > SPEC_SHOWN) lines.push(`   … and ${b.specs.willGoStale - SPEC_SHOWN} more spec issue(s)`);

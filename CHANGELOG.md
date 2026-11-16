@@ -107,6 +107,12 @@ All notable changes to OpenLore are documented here. This project adheres to
   `## Context` in every `blast_radius` and drift answer (`adr-orphaned`). The same fix applies to
   an empty requirement heading, an empty ADR title, and an empty `gitdir:` pointer.
 
+- **`blast_radius` no longer reports a one-line change as "29 decisions affected".** Most of those
+  were domain-level matches: an ADR that names a domain the change touches (`adr-gap`, info). The
+  headline now counts decisions that name a missing domain apart from ADRs that name a touched
+  domain, and the CLI folds the domain-level matches into one line with their ids. The JSON is
+  unchanged.
+
 - **A test linked twelve calls from a change is no longer "medium" confidence.** A test that reaches
   the change through a `tested_by` link was medium at any depth, while a test reaching it by calls
   follows the depth rule (1 high, 2–3 medium, deeper low). Both now follow the depth rule. On
