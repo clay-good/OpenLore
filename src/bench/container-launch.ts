@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PreregisteredRule } from './preregistered-rule.js';
+import { hideConsoleWindow } from '../utils/console-window.js';
 
 export interface BenchmarkContainerSpec {
   baseImage: string;
@@ -42,6 +43,7 @@ export function launchBenchmarkContainer(
   execFileSync('docker', ['build', '--file', join(root, 'bench', 'Dockerfile'), '--tag', spec.tag, join(root, 'bench')], {
     cwd: root,
     stdio: 'inherit',
+    windowsHide: hideConsoleWindow(),
   });
   const imageId = execFileSync('docker', ['image', 'inspect', '--format', '{{.Id}}', spec.tag], {
     cwd: root,
@@ -78,5 +80,5 @@ export function launchBenchmarkContainer(
     if (process.env[name]) dockerArgs.push('--env', name);
   }
   dockerArgs.push(imageId, ...args);
-  execFileSync('docker', dockerArgs, { cwd: root, stdio: 'inherit' });
+  execFileSync('docker', dockerArgs, { cwd: root, stdio: 'inherit', windowsHide: hideConsoleWindow() });
 }
