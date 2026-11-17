@@ -26,6 +26,16 @@ const ALLOWLIST = {
       'it only ever sees developer-authored glob input.',
     clearsWhen: 'braces publishes a fix, or @fission-ai/openspec stops depending on fast-glob 3.x.',
   },
+  'GHSA-fc5q-39xc-vjpf': {
+    package: 'picomatch',
+    reason:
+      'No patched release exists (every version <=4.0.7, the latest, is affected). Reached only ' +
+      'through vite (optional, the `openlore view` dev server), vitest and ' +
+      '@fission-ai/openspec -> fast-glob -> micromatch (dev); none of OpenLore\'s own code ' +
+      'imports it. The ReDoS needs an attacker-chosen glob PATTERN, and these paths only ' +
+      'compile developer-authored config globs.',
+    clearsWhen: 'picomatch publishes a fix (then bump it via vite/vitest or an override).',
+  },
 };
 
 const GATED = new Set(['high', 'critical']);
