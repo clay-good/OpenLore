@@ -4,32 +4,21 @@
 
 ### Requirement: CodeownersResolutionIsDeclarativeAndDialectHonest
 
-The system SHALL resolve declared file ownership from a repository's CODEOWNERS file as a pure
-function of the file path: GitHub-dialect gitignore-style patterns applied last-match-wins, with
-no git history, network, or LLM input. A repository with no CODEOWNERS file SHALL yield an
-explicit "ownership not assessed" disclosure — ownership SHALL never be inferred from authorship
-or any other signal. A CODEOWNERS file using an unsupported dialect (GitLab sections, Bitbucket)
-SHALL yield an explicit unsupported-dialect disclosure rather than a silently-wrong owner map,
-and an individually unrecognized rule SHALL be skipped with disclosure rather than aborting the
-parse. Declared ownership SHALL be kept distinct from mined authorship evidence.
+The system SHALL resolve declared file ownership from the repository's local CODEOWNERS file as a
+pure function of the file path: GitHub-format patterns applied last-match-wins, with no git
+history, no network call and no model. A repository with no CODEOWNERS file SHALL yield an explicit
+"not assessed" result, and ownership SHALL never be inferred from authorship. A file in an
+unsupported format SHALL yield an explicit unsupported-format result and no owner map. A single
+rule that cannot be parsed SHALL be skipped and counted.
 
-#### Scenario: Last-match-wins resolution is a pure function of the path
+#### Scenario: The last matching rule wins
 
 - **GIVEN** a CODEOWNERS with `* @org/core` followed by `src/api/ @org/api-team`
 - **WHEN** ownership is resolved for `src/api/routes.ts`
-- **THEN** the owner is `@org/api-team` (the last matching rule), deterministically, with no git
-  state consulted
+- **THEN** the owner is `@org/api-team`, and no git state is read
 
-#### Scenario: A missing CODEOWNERS is disclosed absence, not inference
+#### Scenario: An unsupported format is reported, not guessed
 
-- **GIVEN** a repository with no CODEOWNERS file in any recognized location
-- **WHEN** any ownership-consuming conclusion runs
-- **THEN** ownership fields are absent with an explicit "no CODEOWNERS found" disclosure
-- **AND** no owner is inferred from git authorship
-
-#### Scenario: An unsupported dialect is honestly unsupported
-
-- **GIVEN** a CODEOWNERS file using GitLab section syntax (`[Backend] ...`)
+- **GIVEN** a CODEOWNERS file that uses GitLab section syntax
 - **WHEN** the resolver parses it
-- **THEN** the result is an explicit unsupported-dialect disclosure naming the supported dialect
-- **AND** no partial or wrong owner map is served
+- **THEN** the result names the format as unsupported and serves no owner map

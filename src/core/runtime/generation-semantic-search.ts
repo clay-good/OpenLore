@@ -10,7 +10,7 @@ export async function resolveGenerationSemanticSearch(
   if (!VectorIndex.exists(analysisPath)) return undefined;
 
   const { resolveEmbedder } = await import('../analyzer/embedder.js');
-  const embedder = await resolveEmbedder(config);
+  const embedder = await resolveEmbedder(config, analysisPath);
   if (!embedder) return undefined;
 
   return (query, limit) => VectorIndex.search(analysisPath, query, embedder, {

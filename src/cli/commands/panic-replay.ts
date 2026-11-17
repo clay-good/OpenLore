@@ -15,6 +15,7 @@
 import { Command } from 'commander';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { replayBehavioralTrace, type ReplayStep } from '../../core/services/mcp-handlers/panic-replay.js';
+import { jsonOutput } from '../output.js';
 
 function readTrace(path: string): ReplayStep[] {
   const steps: ReplayStep[] = [];
@@ -51,7 +52,7 @@ export const panicReplayCommand = new Command('panic-replay')
       const result = replayBehavioralTrace(steps, { sourceRoots });
 
       if (options.json) {
-        process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+        process.stdout.write(jsonOutput(result) + '\n');
       } else {
         const L: string[] = [];
         L.push(`PANIC REPLAY — ${steps.length} steps`);

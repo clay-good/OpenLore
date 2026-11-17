@@ -337,16 +337,16 @@ export const DEFAULT_CHAT_OPENAI_MODEL = 'gpt-4o-mini';
 // ============================================================================
 
 /**
- * Minimum Node.js version required. The floor is 22.19, not 20: the EdgeStore
+ * Minimum Node.js version required. The floor is 22.22, not 20: the EdgeStore
  * uses `node:sqlite` / `DatabaseSync`, and runtime dependencies require Node
- * 22.19 or newer. `node:sqlite` was available only behind `--experimental-sqlite`
+ * 22.22 or newer (chokidar 6). `node:sqlite` was available only behind `--experimental-sqlite`
  * until Node 22.13.0 / 23.4.0 (unflagged in nodejs/node#55854), and nothing in the
  * tree passes that flag. Must equal the
  * FLOOR declared by `engines.node` in package.json and `MIN_NODE` in
  * node-version-guard.ts (a test asserts all three).
  *
- * `engines.node` is a two-branch range (`^22.19.0 || >=23.5.0`) rather than a bare
- * `>=22.19.0`, because that floor alone also admits 23.0-23.4, where `node:sqlite`
+ * `engines.node` is a two-branch range (`^22.22.0 || >=23.5.0`) rather than a bare
+ * `>=22.22.0`, because that floor alone also admits 23.0-23.4, where `node:sqlite`
  * was still flagged. The 23.x branch sits at 23.5 rather than 23.4 because
  * @inquirer/prompts requires it. This constant is the 22.x floor; the capability
  * probe below is what actually rejects a version that satisfies the arithmetic but
@@ -355,7 +355,7 @@ export const DEFAULT_CHAT_OPENAI_MODEL = 'gpt-4o-mini';
  * a cryptic module-load crash (Spec 26 B7).
  */
 export const MIN_NODE_MAJOR_VERSION = 22;
-export const MIN_NODE_MINOR_VERSION = 19;
+export const MIN_NODE_MINOR_VERSION = 22;
 
 /** Analysis age (hours) beyond which doctor warns it may be stale */
 export const ANALYSIS_AGE_WARNING_HOURS = 24;
@@ -872,8 +872,29 @@ export const EXTRACTION_POOL_REQUEST_TIMEOUT_MS = 120_000;
 export const EXTRACTION_POOL_TERMINATE_TIMEOUT_MS = 5_000;
 
 /**
- * Wall-clock ceiling on the tree-sitter PARSE of ONE file (change:
- * fix-analyze-native-abort-and-file-cost-budget).
+ * How many worker-reported FAILURES may be re-checked on the main thread before the pool is
+ * retired for the rest of the build (change: fix-recheck-failed-worker-extractions).
+ *
+ * A worker's failure is never a verdict about the FILE — only the main thread's own attempt is —
+ * so every worker failure costs a second extraction of that file. This is the bound on that
+ * DUPLICATED work, not a bound on completeness: past the cap the pool stops claiming files and
+ * the remainder runs on the main thread ONCE, so the worst case is roughly one serial pass plus
+ * this many double-extracted files, and never a file missing from the graph.
+ *
+ * Sized so no healthy build can reach it (a worker failure is a rare event) while a
+ * systematically broken lane is abandoned early rather than shadowing the whole repository.
+ *
+ * Approximate by one round of concurrency, deliberately: a worker already holding a file when the
+ * cap fires still answers for it, so the realized count can exceed this by up to one per worker.
+ * Serializing the decision would buy an exact number at the cost of the lane's parallelism, and
+ * the disclosure reports the count actually re-checked rather than this constant.
+ */
+export const EXTRACTION_POOL_FAILURE_RECHECK_CAP = 128;
+
+/**
+ * Wall-clock ceiling on the whole EXTRACTION of ONE file — the tree-sitter parse AND every
+ * post-parse phase the language extractor runs over the tree (changes:
+ * fix-analyze-native-abort-and-file-cost-budget, bound-large-literal-extraction).
  *
  * `MAX_READ_SIZE` bounds how much of a file is read; nothing bounded how long one file may
  * be *worked on*. A 300 KB file of a repeated unterminated block-comment opener parses for
@@ -884,16 +905,27 @@ export const EXTRACTION_POOL_TERMINATE_TIMEOUT_MS = 5_000;
  * parse (a `setTimeout` cannot preempt one, and terminating a worker mid-parse is what turns
  * the failure into a process-level abort).
  *
+ * It bounds the parse ALONE no longer, and the rename says so. A generated `demo.pb.go`
+ * parsed in milliseconds and then spent 82 s in a post-parse tree walk, so this constant
+ * read as a 20 s per-file bound while an 82 s file sailed through undisclosed. The clock now
+ * starts when the file enters `dispatchFileExtract` and is checked at cooperative checkpoints
+ * through every phase — see `extraction-budget.ts` for which, and for what a cooperative
+ * bound can and cannot promise.
+ *
  * Generous on purpose: it is a runaway bound, not a performance weight. The slowest file in
- * this repository parses in well under a second, and the largest ordinary generated files
+ * this repository extracts in well under a second, and the largest ordinary generated files
  * measured (1.5 MB) stay far below it — so no real source file is affected, and any file that
  * IS abandoned is disclosed with its elapsed time rather than silently dropped. Override with
  * `OPENLORE_PARSE_BUDGET_MS`; `0` disables the bound entirely.
+ *
+ * The OVERRIDE keeps its original name: it is an operator-facing contract that appears in
+ * documented runbooks, and renaming an environment variable to match an internal rename would
+ * silently ignore the setting of everyone who already uses it.
  */
-export const PER_FILE_PARSE_BUDGET_MS = 20_000;
+export const PER_FILE_EXTRACTION_BUDGET_MS = 20_000;
 
 /**
- * Operator override for {@link PER_FILE_PARSE_BUDGET_MS}, in milliseconds. `0` disables the
+ * Operator override for {@link PER_FILE_EXTRACTION_BUDGET_MS}, in milliseconds. `0` disables the
  * bound (restoring the pre-change unbounded behavior byte-for-byte).
  */
 export const PARSE_BUDGET_ENV = 'OPENLORE_PARSE_BUDGET_MS';
@@ -902,7 +934,7 @@ export const PARSE_BUDGET_ENV = 'OPENLORE_PARSE_BUDGET_MS';
  * How long ONE file's extraction may run before the CLI names it in progress output. Purely a
  * disclosure threshold — nothing is abandoned at this point — so a user waiting on a slow run
  * can identify the responsible file without attaching a debugger. Well below
- * {@link PER_FILE_PARSE_BUDGET_MS} so a file that will eventually be abandoned is named long
+ * {@link PER_FILE_EXTRACTION_BUDGET_MS} so a file that will eventually be abandoned is named long
  * before it is.
  */
 export const SLOW_FILE_DISCLOSURE_MS = 5_000;
@@ -977,3 +1009,50 @@ export const SOURCE_SCAN_MAX_CONCURRENCY = 32;
  * already resident. `bounded-computation.test.ts` fails the build if that wiring is undone.
  */
 export const SOURCE_SCAN_MAX_FILE_BYTES = 4 * 1024 * 1024;
+
+/** Configuration reviews are opt-in and coalesced at host idle points. */
+export const CONFIGURATION_REVIEW_INTERVAL_MS = 5 * 60 * 1000;
+/** Minimum observed declared-output directory subscriptions for a passive review. */
+export const CONFIGURATION_MATERIAL_WATCH_DIRECTORIES = 50;
+
+/** Bounded, provider-free repository configuration discovery. */
+export const CONFIGURATION_SURVEY_BUDGET = {
+  entries: 10_000,
+  depth: 8,
+  bytes: 1024 * 1024,
+  fileBytes: 64 * 1024,
+  milliseconds: 2000,
+};
+export const CONFIGURATION_HARD_BUDGET = {
+  entries: 50_000,
+  depth: 16,
+  bytes: 4 * 1024 * 1024,
+  fileBytes: 1024 * 1024,
+  milliseconds: 10_000,
+};
+export const CONFIGURATION_SOURCE =
+  /\.(?:[cm]?[jt]sx?|py|go|rs|rb|java|kt|php|cs|c|cpp|h|swift|vue|svelte|astro|graphql|proto)$/;
+export const CONFIGURATION_PRUNED = new Set([
+  '.git',
+  '.hg',
+  '.svn',
+  '.openlore',
+  'node_modules',
+  'target',
+  'dist',
+  'build',
+  'vendor',
+  '.venv',
+  'venv',
+  '__pycache__',
+  '.cache',
+  '.next',
+  'coverage',
+]);
+
+export const CONFIGURATION_POLICY_VERSION = 1;
+export const CONFIGURATION_MAX_RULES = 100;
+export const CONFIGURATION_MAX_STRING = 1024;
+
+/** A host-owned verification probe must stop waiting and disclose unknown cleanup after this deadline. */
+export const CONFIGURATION_CANARY_TIMEOUT_MS = 5000;

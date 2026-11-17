@@ -1113,7 +1113,7 @@ describe('handleCheckSpecDrift', () => {
     vi.mocked(readOpenLoreConfig).mockResolvedValue({ openspecPath: 'openspec' } as any);
     // openspec/specs does NOT exist in driftDir → stat throws
     const result = await handleCheckSpecDrift(driftDir);
-    expect(result).toMatchObject({ error: expect.stringContaining('openlore generate') });
+    expect(result).toMatchObject({ error: 'no spec source found (looked for: openspec); spec drift is not assessed.', reason: 'no-spec-source', lookedFor: ['openspec'] });
   });
 
   it('returns empty DriftResult when no files changed', async () => {

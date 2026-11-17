@@ -22,7 +22,7 @@ import { McpWatcher } from './mcp-watcher.js';
 import {
   ARTIFACT_PARSE_HEALTH,
   PARSE_BUDGET_ENV,
-  PER_FILE_PARSE_BUDGET_MS,
+  PER_FILE_EXTRACTION_BUDGET_MS,
   MAX_HTML_INLINE_SCRIPT_CHARS,
 } from '../../constants.js';
 import type { ParseHealthReport } from '../analyzer/parse-health.js';
@@ -188,7 +188,7 @@ describe('watcher parse-health lane — the exclusion vocabulary matches the ful
   it('CONTROL: an ordinary file is unaffected by the default budget', async () => {
     // Guards the direction that would be worst: a bound tight enough to start excluding real
     // source. The default is 20 s; nothing ordinary comes close.
-    expect(PER_FILE_PARSE_BUDGET_MS).toBeGreaterThanOrEqual(10_000);
+    expect(PER_FILE_EXTRACTION_BUDGET_MS).toBeGreaterThanOrEqual(10_000);
     const { watcher, outputPath } = watcherIn();
     const big = Array.from(
       { length: 4_000 },

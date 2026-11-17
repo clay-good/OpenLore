@@ -913,7 +913,7 @@ describe('EdgeStore', () => {
         ['src/a.ts', [{ file: 'src/b.ts', support: 4, confidence: 1 }]],
         ['src/b.ts', [{ file: 'src/a.ts', support: 4, confidence: 1 }]],
       ]),
-      stats: { commitsScanned: 5, bulkCommitsFiltered: 1, filesTracked: 3 },
+      stats: { commitsScanned: 5, bulkCommitsFiltered: 1, filesTracked: 3, couplingComputed: true, coPairsCounted: 4 },
     };
 
     beforeEach(() => store.insertChangeCoupling(result));
@@ -939,7 +939,7 @@ describe('EdgeStore', () => {
     });
 
     it('insertChangeCoupling replaces the prior snapshot; clearAll wipes it', () => {
-      store.insertChangeCoupling({ churn: new Map([['src/z.ts', 2]]), coupling: new Map(), stats: { commitsScanned: 1, bulkCommitsFiltered: 0, filesTracked: 1 } });
+      store.insertChangeCoupling({ churn: new Map([['src/z.ts', 2]]), coupling: new Map(), stats: { commitsScanned: 1, bulkCommitsFiltered: 0, filesTracked: 1, couplingComputed: true, coPairsCounted: 0 } });
       expect(store.countChangeCoupling()).toBe(1);
       expect(store.getChangeCouplingForFiles(['src/a.ts'])).toEqual([]);
       store.clearAll();

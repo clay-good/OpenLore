@@ -63,8 +63,9 @@ export const EXTENSION_TO_LANGUAGE: Readonly<Record<string, string>> = {
  */
 export function detectLanguage(filePath: string): string {
   const lower = filePath.toLowerCase();
-  // Terraform is unambiguous by extension (incl. the *.tf.json variant).
-  if (lower.endsWith('.tf') || lower.endsWith('.tfvars') || lower.endsWith('.tf.json')) {
+  // Terraform is unambiguous by extension (incl. the *.tf.json variant). OpenTofu's `.tofu` and
+  // `.tofu.json` are the same language (change: add-iac-code-binding).
+  if (lower.endsWith('.tf') || lower.endsWith('.tfvars') || lower.endsWith('.tf.json') || lower.endsWith('.tofu') || lower.endsWith('.tofu.json')) {
     return 'Terraform';
   }
   // Bicep is unambiguous by extension (Azure IaC DSL).
@@ -73,6 +74,22 @@ export function detectLanguage(filePath: string): string {
   }
   const ext = lower.split('.').pop() ?? '';
   return EXTENSION_TO_LANGUAGE[ext] ?? 'unknown';
+}
+
+/**
+ * Whether a path names a Dockerfile. It has no extension to switch on, so this lives beside the
+ * canonical extension map rather than in the Docker extractor, which pulls in a YAML parser —
+ * every reader that only needs the path test (the session ledger, `status`) would otherwise load
+ * it (change: add-ledger-contract-hashes).
+ */
+export function isDockerfilePath(path: string): boolean {
+  const base = path.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? '';
+  return (
+    base === 'dockerfile' ||
+    base === 'containerfile' ||
+    base.startsWith('dockerfile.') ||
+    base.endsWith('.dockerfile')
+  );
 }
 
 /**

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { YAML_QUIET } from './yaml-diagnostics.js';
 import { realpath } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { hasMagic } from 'glob';
@@ -367,7 +368,7 @@ export async function detectWorkspaceShards(
         } catch { /* malformed manifests are not workspace evidence */ }
       } else if (manifest.endsWith('pnpm-workspace.yaml')) {
         try {
-          const parsed = parseYaml(raw) as { packages?: unknown } | null;
+          const parsed = parseYaml(raw, { ...YAML_QUIET }) as { packages?: unknown } | null;
           members = Array.isArray(parsed?.packages) ? parsed.packages.filter((value): value is string => typeof value === 'string') : [];
         } catch { /* malformed manifests are not workspace evidence */ }
       } else if (manifest.endsWith('Cargo.toml')) {

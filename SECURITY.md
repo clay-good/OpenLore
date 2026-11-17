@@ -39,7 +39,17 @@ Deterministic output means the same bytes are returned; it does not mean those b
 Human review is the authority boundary. Served fields carry factual origin labels
 (`reviewed-corpus`, `local-unreviewed`, `foreign-actor`, `imported`, or `source-derived`), and
 composed agent-context blocks frame the original bytes as data rather than instructions. OpenLore
-does not sanitize, rewrite, or score the trustworthiness of recorded content.
+does not reword, rewrite, or score the trustworthiness of recorded content.
+
+One narrow class IS removed on the way out, on every agent-facing and machine-readable path
+(the composed context block, the loop hooks, MCP and daemon tool responses, `--json` output):
+characters that are rendering control rather than content — C0/C1 controls, complete terminal
+escape sequences, bidi overrides and marks, line/paragraph separators, and zero-width characters.
+A file name may legally contain ESC, so without this an analyzed repository can forge OpenLore's
+own output, make a name render as its reverse, or hide bytes from the instruction-shape check. The
+stored record keeps its bytes; the render is screened, and the subject stays identifiable.
+Screening runs before the lexical instruction-shape check, so that check sees the text the model
+will see.
 
 `openlore doctor` provides an advisory lexical check for common instruction-shaped text. It is
 incomplete, can miss unfamiliar phrasing, and can flag benign prose. It helps a human reviewer; it

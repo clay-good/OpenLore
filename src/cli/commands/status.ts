@@ -12,19 +12,27 @@
  */
 
 import { Command } from 'commander';
+import { formatAge } from '../../utils/command-helpers.js';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
+import { LOOP_MOMENTS } from '../../core/services/hook-session.js';
+import { formatBuildProgress, readBuildProgress, type BuildProgress } from '../../core/services/build-progress.js';
+import { readFindingOutcomes, readHookHealth, type FindingOutcomes, type MomentHealth } from '../../core/services/hook-health.js';
 import { logger } from '../../utils/logger.js';
 import { palette } from '../../utils/colors.js';
+import { readLiveLedger, type LedgerSnapshot } from '../../core/services/session-ledger.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
 import type { OpenLoreConfig } from '../../types/index.js';
 import type { Embedder } from '../../core/analyzer/embedding-service.js';
 import {
+  backgroundSemanticAllowed,
   indexCapabilityAgreement,
   resolveEmbedder,
   semanticProviderConfigured,
   servedRetrievalMode,
+  SEMANTIC_UPGRADE_HINT,
   type RetrievalMode,
 } from '../../core/analyzer/embedder.js';
 import { readIndexReceipt, type IndexEmbedFailure } from '../../core/analyzer/analysis-indexes.js';
@@ -32,6 +40,9 @@ import { VectorIndex } from '../../core/analyzer/vector-index.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { execFileGit } from '../../utils/git-exec.js';
+import { assessWiring, type WiringScope } from '../install/wiring-scope.js';
+import { collectGovernanceStatus, type GovernanceStatus } from '../../core/decisions/autopilot.js';
+import { jsonOutput } from '../output.js';
 
 
 /** Bound on the working-tree comparison: a status command must stay instant. */
@@ -42,10 +53,12 @@ const MAX_CHANGED_FILES_INSPECTED = 500;
  * unconfigured keyword index is the first-class default, a configured-but-unrealized one
  * is a finding.
  */
-export type KeywordCause = 'no-provider-configured' | 'configured-provider-unrealized' | null;
+export type KeywordCause = 'no-provider-configured' | 'configured-provider-unrealized' | 'keyword-by-configuration' | null;
 
 export interface IndexStatus {
   indexPresent: boolean;
+  /** An index build or repair running now, from `.openlore/build-progress.json` (change: hook-reliability, group 9). */
+  building?: BuildProgress;
   /** The mode a query would actually be served right now. */
   retrievalMode: RetrievalMode | null;
   /** Set only when the served mode is a keyword one. */
@@ -65,6 +78,77 @@ export interface IndexStatus {
   degraded: Array<{ index: string; reason: string }>;
   /** Present when the configuration could not be read at all. */
   configUnreadable?: true;
+  /**
+   * Where OpenLore is wired: the user scope (every repository), this repository only, or
+   * nowhere. Set by `openlore status` only, so the status line never reads `~/.claude.json`.
+   */
+  wiringScope?: WiringScope;
+  /** Decision autopilot mode and its trail (change: default-decision-autopilot-with-visible-trace). */
+  governance?: GovernanceStatus;
+  /**
+   * Agent-loop hook moments (change: add-agent-loop-hook-surfaces): each moment, whether this
+   * repository's `.claude/settings.json` wires it, and whether `hooks.<moment>` leaves it on.
+   * Set by `openlore status` only.
+   */
+  hookMoments?: Array<{ moment: string; wired: boolean; enabled: boolean }>;
+  /** Hook runs of the last 7 days, per moment (change: hook-reliability, task 6.2). Absent when none ran. */
+  hookHealth?: MomentHealth[];
+  /** What happened to the findings the hooks showed (change: hook-reliability, task 7.2). Absent with no hook run. */
+  hookOutcomes?: FindingOutcomes;
+  /**
+   * The live MCP session's ledger (change: add-session-structural-ledger): raw counts, named
+   * background changes and edit loops — or why they are withheld. Set by `openlore status` only.
+   */
+  session?: SessionStatus;
+}
+
+export type SessionStatus =
+  | { pid: number; startedAt: string; updatedAt: string; editSource: 'watcher' | 'sampled'; agentEditsReported: boolean;
+      counts: LedgerSnapshot['counts']; changeKinds?: LedgerSnapshot['changeKinds']; bulkBatches?: number; backgroundChanges: LedgerSnapshot['backgroundChanges'];
+      editOscillation: LedgerSnapshot['editOscillation']; withheld?: string }
+  | { withheld: string };
+
+/**
+ * The loop moments wired in this repository's Claude Code settings, and the config opt-outs. The
+ * prompt-submitted moment (`openlore orient --inject`) is the plain `_openlore` group on
+ * `UserPromptSubmit`; the others carry their moment in `_openloreHook` (change: hook-reliability).
+ */
+export function collectHookMoments(rootPath: string): Array<{ moment: string; wired: boolean; enabled: boolean }> {
+  const wired = new Set<string>();
+  try {
+    const settings = JSON.parse(readFileSync(join(rootPath, '.claude', 'settings.json'), 'utf-8')) as { hooks?: Record<string, unknown> };
+    for (const [event, groups] of Object.entries(settings?.hooks ?? {})) {
+      for (const g of Array.isArray(groups) ? groups : []) {
+        if (!g || typeof g !== 'object') continue;
+        const m = (g as Record<string, unknown>)._openloreHook;
+        if (typeof m === 'string') wired.add(m);
+        else if (event === 'UserPromptSubmit' && (g as Record<string, unknown>)._openlore === true) wired.add('prompt-submitted');
+      }
+    }
+  } catch { /* no settings: nothing wired */ }
+  let cfg: { hooks?: Record<string, unknown>; contextInjection?: { mode?: unknown } } = {};
+  try {
+    cfg = (JSON.parse(readFileSync(join(rootPath, OPENLORE_DIR, 'config.json'), 'utf-8')) as typeof cfg) ?? {};
+  } catch { /* unreadable config: every moment on */ }
+  const off = cfg.hooks ?? {};
+  const injectionOff = cfg.contextInjection?.mode === 'off';
+  return LOOP_MOMENTS.map(moment => ({
+    moment,
+    wired: wired.has(moment),
+    enabled: off[moment] !== false && !(moment === 'prompt-submitted' && injectionOff),
+  }));
+}
+
+function collectSessionStatus(rootPath: string): SessionStatus {
+  const live = readLiveLedger(rootPath);
+  if (!('ledger' in live)) return { withheld: live.withheld };
+  const l = live.ledger;
+  return {
+    pid: l.pid, startedAt: l.startedAt, updatedAt: l.updatedAt, editSource: l.editSource,
+    agentEditsReported: l.agentEditsReported, counts: l.counts, ...(l.changeKinds ? { changeKinds: l.changeKinds } : {}), ...(l.bulkBatches ? { bulkBatches: l.bulkBatches } : {}),
+    backgroundChanges: l.backgroundChanges, editOscillation: l.editOscillation,
+    ...(l.withheld ? { withheld: l.withheld } : {}),
+  };
 }
 
 interface IndexMetaShape {
@@ -133,7 +217,42 @@ async function changedSinceIndex(rootPath: string, builtAtMs: number | null): Pr
   return { files, truncated };
 }
 
+/**
+ * One line of hook health: each moment's last run and p95 (whole-process time), then the error and
+ * overrun totals and the findings shown, over the last 7 days.
+ */
+export function formatHookHealth(health: MomentHealth[], now = Date.now(), outcomes?: FindingOutcomes): string {
+  const secs = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
+  const moments = health.map(h => `${h.moment} ${formatAge(now - Date.parse(h.lastRun))}, p95 ${secs(h.p95Ms)}`);
+  const errors = health.reduce((n, h) => n + h.errors, 0);
+  const overruns = health.reduce((n, h) => n + h.overruns, 0);
+  const shown = health.reduce((n, h) => n + h.shown, 0);
+  // The outcome counts are per distinct finding, so they say how many were shown as well.
+  const findings = outcomes
+    ? `${outcomes.total} finding(s) shown: ${outcomes.fixed} fixed, ${outcomes.decided} decided, ${outcomes.open} open, ${outcomes.notAssessed} not assessed`
+    : `${shown} finding(s) shown`;
+  // The newest recorded failure, so an error count can be acted on.
+  const last = health.filter(h => h.lastError).sort((a, b) => b.lastError!.t.localeCompare(a.lastError!.t))[0];
+  const lastError = last ? `; last error: ${last.moment} ${formatAge(now - Date.parse(last.lastError!.t))}: ${last.lastError!.reason}` : '';
+  return `${moments.join('; ')} — ${errors} error(s), ${overruns} overrun(s), ${findings} (last 7 days)${lastError}`;
+}
+
 /** Collect the index's self-state without mutating anything. */
+/**
+ * "3 minutes ago (2026-11-01 20:30)" for an ISO timestamp, or the raw value when it cannot be
+ * parsed. Relative first, because that is the question a reader has; the local absolute time
+ * second, because a precise one is sometimes what they need.
+ */
+function describeBuiltAt(iso: string): string {
+  const at = Date.parse(iso);
+  if (!Number.isFinite(at)) return iso;
+  const local = new Date(at).toLocaleString(undefined, {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  });
+  const delta = Date.now() - at;
+  return delta < 0 ? local : `${formatAge(delta)} (${local})`;
+}
+
 export async function collectIndexStatus(rootPath: string): Promise<IndexStatus> {
   const analysisDir = join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
   let config: OpenLoreConfig | null = null;
@@ -141,10 +260,12 @@ export async function collectIndexStatus(rootPath: string): Promise<IndexStatus>
   try { config = await readOpenLoreConfig(rootPath); } catch { configUnreadable = true; }
 
   const receipt = await readIndexReceipt(analysisDir);
+  const building = readBuildProgress(rootPath);
   const base = {
     degraded: receipt?.degraded ?? [],
     ...(receipt?.embedFailure ? { embedFailure: receipt.embedFailure } : {}),
     ...(configUnreadable ? { configUnreadable: true as const } : {}),
+    ...(building ? { building } : {}),
   };
 
   if (!VectorIndex.exists(analysisDir)) {
@@ -164,14 +285,14 @@ export async function collectIndexStatus(rootPath: string): Promise<IndexStatus>
   let embedder: Embedder | null = null;
   // A resolver failure leaves the keyword default in place; `doctor` is where a broken
   // provider is diagnosed, and `status` only reports what is being served.
-  try { embedder = await resolveEmbedder(config); } catch { /* keyword default */ }
+  try { embedder = await resolveEmbedder(config, analysisDir); } catch { /* keyword default */ }
   const retrievalMode = servedRetrievalMode(embedder, analysisDir);
   const configured = !configUnreadable && semanticProviderConfigured(config);
   const agreement = indexCapabilityAgreement(config, analysisDir);
   const keywordCause: KeywordCause = retrievalMode === 'keyword' || retrievalMode === 'keyword+vocabulary'
     ? (!agreement.agrees && agreement.mismatch === 'configured-but-unrealized'
       ? 'configured-provider-unrealized'
-      : 'no-provider-configured')
+      : !configUnreadable && !backgroundSemanticAllowed(config) ? 'keyword-by-configuration' : 'no-provider-configured')
     : null;
 
   const builtAt = meta?.builtAt ?? null;
@@ -196,6 +317,11 @@ export async function collectIndexStatus(rootPath: string): Promise<IndexStatus>
   };
 }
 
+/** The wiring scope `openlore status` reports (change: upgrade-repo-only-wiring). Read-only. */
+export async function collectWiringScope(rootPath: string, home = process.env.OPENLORE_HOME || homedir()): Promise<WiringScope> {
+  return (await assessWiring(rootPath, home)).scope;
+}
+
 function describeKeywordCause(cause: KeywordCause): string {
   if (cause === 'configured-provider-unrealized') {
     return 'a semantic provider is configured, but this index carries no vectors';
@@ -203,11 +329,27 @@ function describeKeywordCause(cause: KeywordCause): string {
   if (cause === 'no-provider-configured') {
     return 'no embedding provider configured — the first-class default';
   }
+  if (cause === 'keyword-by-configuration') return 'keyword only, by configuration';
   return '';
 }
 
+/** The governance block: mode, counts, newest ledger entries, and where to review. */
+function printGovernance(governance: GovernanceStatus, c: ReturnType<typeof palette>): void {
+  const label = (text: string): string => text.padEnd(20);
+  console.log(`  ${label('Decision autopilot')} ${governance.autopilot ? c.green('on') : 'off'}${c.dim(` — ${safe(governance.reason)}`)}`);
+  const unreviewed = governance.unreviewed > 0 ? c.yellow(`${governance.unreviewed} unreviewed`) : '0 unreviewed';
+  console.log(`  ${label('Decisions')} ${governance.autoAccepted} auto-accepted, ${unreviewed}`);
+  for (const e of governance.recent) {
+    const commit = e.commit ? ` @${safe(e.commit)}` : '';
+    console.log(`  ${' '.repeat(20)} ${c.dim(`${safe(e.at.slice(0, 19).replace('T', ' '))} [${safe(e.id)}] ${safe(e.from ?? '∅')} → ${safe(e.to)} by ${safe(e.actor)}${commit}`)} ${safe(e.title)}`);
+  }
+  if (governance.autoAccepted > 0 || governance.recent.length > 0) {
+    console.log(`  ${' '.repeat(20)} ${c.dim(`→ Review: ${governance.review} · trail: openlore decisions log`)}`);
+  }
+}
+
 export const statusCommand = new Command('status')
-  .description("Report the search index's own state: retrieval mode served, when it was built, and whether it is behind the working tree")
+  .description("Report the search index's own state (retrieval mode, build time, freshness) and the decision autopilot trail")
   .option('--json', 'Output the status as JSON', false)
   .addHelpText(
     'after',
@@ -221,37 +363,86 @@ Read-only: this never builds, rebuilds, or locks the index.
   )
   .action(async (options: { json?: boolean }) => {
     const rootPath = process.cwd();
-    const status = await collectIndexStatus(rootPath);
+    const index = await collectIndexStatus(rootPath);
+    // Here and not in collectIndexStatus: the status line calls that on every render, and the
+    // governance block resolves the gate (git) and reads the whole ledger.
+    const governance = index.configUnreadable
+      ? undefined
+      : await readOpenLoreConfig(rootPath).then(config => collectGovernanceStatus(rootPath, config)).catch(() => undefined);
+    const health = readHookHealth(rootPath);
+    const status: IndexStatus = {
+      ...index,
+      ...(governance ? { governance } : {}),
+      wiringScope: await collectWiringScope(rootPath),
+      session: collectSessionStatus(rootPath),
+      hookMoments: collectHookMoments(rootPath),
+      ...(health.length ? { hookHealth: health, hookOutcomes: await readFindingOutcomes(rootPath) } : {}),
+    };
 
     if (options.json) {
-      console.log(JSON.stringify(status, null, 2));
+      console.log(jsonOutput(status));
       return;
     }
 
     const c = palette(Boolean(process.stdout.isTTY));
+    const label = (text: string): string => text.padEnd(20);
     logger.section('openlore status');
     console.log('');
+    const scope = status.wiringScope ?? 'none';
+    const wiringText = scope === 'user + repo'
+      ? c.green(scope)
+      : c.yellow(`${scope} — run "openlore ${scope === 'none' ? 'install' : 'doctor --fix'}"`);
+    console.log(`  ${label('Wiring scope')} ${wiringText}`);
+    const moments = (status.hookMoments ?? []).filter(m => m.wired);
+    if (moments.length) {
+      console.log(`  ${label('Loop hooks')} ${safe(moments.map(m => m.enabled ? m.moment : `${m.moment} (off)`).join(', '))}`);
+    }
+    if (status.hookHealth?.length) console.log(`  ${label('Hook health')} ${safe(formatHookHealth(status.hookHealth, Date.now(), status.hookOutcomes))}`);
+    const session = status.session;
+    if (session && 'pid' in session) {
+      // The ledger is a file in the repository: every value is sanitized before it reaches the terminal.
+      const line = `${String(session.counts.served)} served, ${String(session.counts.edited)} edited — ` +
+        `${String(session.backgroundChanges.length)} background change(s), ${String(session.editOscillation.length)} edit loop(s)` +
+        (session.withheld ? ' (background changes withheld)' : '');
+      console.log(`  ${label('Session ledger')} ${safe(line)}`);
+    } else if (session) {
+      console.log(`  ${label('Session ledger')} ${c.dim(safe(session.withheld))}`);
+    }
 
     // Everything printed below that came from the repository — its config, its index
     // sidecar, its receipt, its file names — is sanitized: a repository must not be able
     // to forge OpenLore's own output with terminal control sequences.
     if (!status.indexPresent) {
       console.log(`  ${c.yellow('No search index')} in ${OPENLORE_DIR}/${OPENLORE_ANALYSIS_SUBDIR}`);
-      console.log(`  ${c.dim('→ Run "openlore analyze" to build one')}`);
+      // A first build in flight: say so, not "run analyze" (change: hook-reliability, group 9).
+      if (status.building) {
+        console.log(`  ${label('Index build')} ${safe(`${formatBuildProgress(status.building)}, started ${formatAge(Date.now() - Date.parse(status.building.startedAt))}`)}`);
+      } else {
+        console.log(`  ${c.dim('→ Run "openlore analyze" to build one')}`);
+      }
+      if (status.governance) printGovernance(status.governance, c);
       console.log('');
       return;
     }
 
     const cause = describeKeywordCause(status.keywordCause);
-    const label = (text: string): string => text.padEnd(20);
     console.log(`  ${label('Retrieval mode')} ${c.bold(safe(status.retrievalMode ?? 'unknown'))}${cause ? c.dim(` — ${cause}`) : ''}`);
+    // Text output only: `--json` is read by agents, and the hint is for a human.
+    if (status.keywordCause === 'no-provider-configured') {
+      console.log(`  ${' '.repeat(20)} ${c.dim(SEMANTIC_UPGRADE_HINT)}`);
+    }
     if (status.configuredProvider) {
       console.log(`  ${label('Configured provider')} ${safe(status.configuredProvider)}`);
     }
     if (status.configUnreadable) {
       console.log(`  ${label('Configuration')} ${c.yellow('unreadable — run "openlore doctor"')}`);
     }
-    console.log(`  ${label('Index built')} ${status.builtAt ? safe(status.builtAt) : c.dim('unknown')}`);
+    // Relative, like every other line in this panel. A raw UTC ISO stamp read as TOMORROW's
+    // date for anyone west of UTC in the evening (change: fix-self-inflicted-spec-warning).
+    console.log(`  ${label('Index built')} ${status.builtAt ? safe(describeBuiltAt(status.builtAt)) : c.dim('unknown')}`);
+    if (status.building) {
+      console.log(`  ${label('Index build')} ${safe(`${formatBuildProgress(status.building)}, started ${formatAge(Date.now() - Date.parse(status.building.startedAt))}`)}`);
+    }
 
     const staleCount = status.staleFiles.length;
     const staleText = status.staleFilesUnknown
@@ -273,6 +464,8 @@ Read-only: this never builds, rebuilds, or locks the index.
     for (const entry of status.degraded) {
       console.log(`  ${label('Degraded')} ${c.yellow(`${safe(entry.index)}: ${safe(entry.reason)}`)}`);
     }
+
+    if (status.governance) printGovernance(status.governance, c);
 
     if (status.keywordCause === 'configured-provider-unrealized') {
       console.log('');

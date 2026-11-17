@@ -71,12 +71,34 @@ describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
     await initGit();
     await writeConfig(dir);
 
-    expect(await wireGovernanceGate(dir)).toBe('wired');
+    expect(await wireGovernanceGate(dir)).toMatchObject({ status: 'wired' });
 
     const hook = await readFile(join(dir, '.git', 'hooks', 'pre-commit'), 'utf8');
     expect(hook).toContain('decisions');
     const config = JSON.parse(await readFile(join(dir, OPENLORE_CONFIG_REL_PATH), 'utf8'));
     expect(config.governance.autopilot).toBe(true);
+  });
+
+  // An existing hook is the user's script, not ours to edit. Theirs may end with `exit 0` to
+  // swallow a non-zero status from a linter; an earlier version deleted that line so our
+  // appended block could be reached, silently changing what their hook does. The gate goes in
+  // first instead, and every other byte of their script survives.
+  it("keeps an existing pre-commit hook byte for byte, including a trailing exit 0", async () => {
+    await initGit();
+    await writeConfig(dir);
+    const hookPath = join(dir, '.git', 'hooks', 'pre-commit');
+    await mkdir(join(dir, '.git', 'hooks'), { recursive: true });
+    const theirs = '#!/bin/sh\n# my own hook\nnpm run lint\nexit 0\n';
+    await writeFile(hookPath, theirs, { mode: 0o755 });
+
+    expect(await wireGovernanceGate(dir)).toMatchObject({ status: 'wired' });
+
+    const hook = await readFile(hookPath, 'utf8');
+    expect(hook.startsWith('#!/bin/sh\n')).toBe(true);
+    // Their script is intact — the trailing `exit 0` above all.
+    expect(hook).toContain('# my own hook\nnpm run lint\nexit 0');
+    // And the gate runs before it, so the `exit 0` cannot skip it.
+    expect(hook.indexOf('openlore-decisions-hook')).toBeLessThan(hook.indexOf('npm run lint'));
   });
 
   it('writes autopilot into the project file without copying user-wide defaults into it', async () => {
@@ -87,7 +109,7 @@ describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
     const prior = process.env.OPENLORE_GLOBAL_CONFIG;
     process.env.OPENLORE_GLOBAL_CONFIG = userPath;
     try {
-      expect(await wireGovernanceGate(dir)).toBe('wired');
+      expect(await wireGovernanceGate(dir)).toMatchObject({ status: 'wired' });
     } finally {
       if (prior === undefined) delete process.env.OPENLORE_GLOBAL_CONFIG;
       else process.env.OPENLORE_GLOBAL_CONFIG = prior;
@@ -101,7 +123,7 @@ describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
     await initGit();
     await writeConfig(dir, { governance: { autopilot: false } });
 
-    expect(await wireGovernanceGate(dir)).toBe('wired');
+    expect(await wireGovernanceGate(dir)).toMatchObject({ status: 'wired' });
 
     const config = JSON.parse(await readFile(join(dir, OPENLORE_CONFIG_REL_PATH), 'utf8'));
     expect(config.governance.autopilot).toBe(false);
@@ -110,17 +132,20 @@ describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
 
   it('skips quietly outside a git repository, and never fails the install', async () => {
     await writeConfig(dir);
-    expect(await wireGovernanceGate(dir)).toBe('skipped');
+    expect(await wireGovernanceGate(dir)).toMatchObject({ status: 'skipped' });
     expect(await exists(join(dir, '.git'))).toBe(false);
   });
 
-  it('still installs the gate when there is no config yet, in blocking review mode', async () => {
-    // `openlore setup --tools claude` never runs init, and has always installed the
-    // gate. A missing config only means there is nowhere to record the non-blocking
-    // default — not that the gate should be skipped.
+  it('installs a NON-BLOCKING gate when there is no config yet, and says so', async () => {
+    // DELIBERATELY INVERTED (change: fix-install-never-blocks-by-default). This used to assert
+    // "in blocking review mode": `openlore install --no-analyze` and `openlore setup` both run no
+    // init, so both installed a gate that blocked every commit, while the install summary printed
+    // "no commit is blocked by default" one line later. A missing config means there is nowhere to
+    // record a mode — not that the strictest mode applies.
     await initGit();
-    expect(await wireGovernanceGate(dir)).toBe('wired');
+    expect(await wireGovernanceGate(dir)).toEqual({ status: 'wired', autopilot: true });
     expect(await exists(join(dir, '.git', 'hooks', 'pre-commit'))).toBe(true);
+    // Still no init performed: install does not create a config the user declined.
     expect(await exists(join(dir, OPENLORE_CONFIG_REL_PATH))).toBe(false);
   });
 
@@ -175,10 +200,10 @@ describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
   it('a re-install does not attribute the autopilot it wrote to the repository', async () => {
     await initGit();
     await writeConfig(dir);
-    expect(await wireGovernanceGate(dir)).toBe('wired');
+    expect(await wireGovernanceGate(dir)).toMatchObject({ status: 'wired' });
     const info = vi.spyOn(logger, 'info');
     try {
-      expect(await wireGovernanceGate(dir)).toBe('wired');
+      expect(await wireGovernanceGate(dir)).toMatchObject({ status: 'wired' });
       expect(info.mock.calls.flat().join(' ')).not.toContain('came from the repository');
     } finally {
       info.mockRestore();
@@ -211,7 +236,7 @@ describe.skipIf(!launcherAvailable)('install wires the decision trail', () => {
     expect(JSON.parse(await readFile(join(dir, OPENLORE_CONFIG_REL_PATH), 'utf8')).governance)
       .toBeUndefined();
 
-    expect(await wireGovernanceGate(dir)).toBe('wired');
+    expect(await wireGovernanceGate(dir)).toMatchObject({ status: 'wired' });
 
     const config = JSON.parse(await readFile(join(dir, OPENLORE_CONFIG_REL_PATH), 'utf8'));
     expect(config.governance?.autopilot).not.toBe(true);
@@ -248,7 +273,7 @@ describe.skipIf(!launcherAvailable)('the gate reports honestly when it cannot be
     // the exit code. That must not be mistaken for the gate's outcome.
     process.exitCode = 1;
 
-    expect(await wireGovernanceGate(dir)).toBe('wired');
+    expect(await wireGovernanceGate(dir)).toMatchObject({ status: 'wired' });
     expect(await exists(join(dir, '.git', 'hooks', 'pre-commit'))).toBe(true);
   });
 
@@ -262,24 +287,51 @@ describe.skipIf(!launcherAvailable)('the gate reports honestly when it cannot be
     await writeFile(join(dir, '.git', 'hooks'), 'not a directory');
     process.exitCode = 1;
 
-    expect(await wireGovernanceGate(dir)).toBe('skipped');
+    expect(await wireGovernanceGate(dir)).toMatchObject({ status: 'skipped' });
     // And the failure did not leak out as the command's exit code.
     expect(process.exitCode).toBe(1);
   });
 });
 
 describe('the trail is wired on a repository seeing OpenLore for the first time', () => {
-  it('wires the gate AFTER the index build, which is what creates the config', async () => {
-    // The ordering that matters: on a fresh repo `.openlore/config.json` does not
-    // exist until the install's own index build runs `init`. Wiring the gate before
-    // that meant the headline flow always reported "no config yet" and silently
-    // skipped the decision trail — invisible to any test that pre-creates a config.
+  it('wires the gate between init (which creates the config) and analyze (which fingerprints it)', async () => {
+    // Before init: a fresh repo has no `.openlore/config.json`, so the headline flow reported "no
+    // config yet" and skipped the decision trail. After analyze: the gate's CLAUDE.md / AGENTS.md
+    // guidance changed the fingerprinted corpus, so the index was stale on arrival.
     const source = readFileSync(fileURLToPath(new URL('./index.ts', import.meta.url)), 'utf8');
+    const build = source.slice(source.indexOf('export async function buildIndex'));
+    const initAt = build.indexOf('await openloreInit(');
+    const hookAt = build.indexOf('await opts.afterInit?.()');
+    const analyzeAt = build.indexOf('await analyzeCommand.parseAsync(');
+    expect(initAt).toBeGreaterThan(-1);
+    expect(hookAt).toBeGreaterThan(initAt);
+    expect(analyzeAt).toBeGreaterThan(hookAt);
     const analyzeBlock = source.slice(source.indexOf('const shouldAnalyze'));
-    const buildAt = analyzeBlock.indexOf('await buildIndex(cwd)');
-    const gateAt = analyzeBlock.indexOf('await wireGovernanceGate(cwd)');
-    expect(buildAt).toBeGreaterThan(-1);
-    expect(gateAt).toBeGreaterThan(-1);
-    expect(gateAt).toBeGreaterThan(buildAt);
+    expect(analyzeBlock).toContain('await buildIndex(cwd, { afterInit: wireGate })');
   });
+});
+
+describe.skipIf(!launcherAvailable)('a fresh install leaves a fresh index', () => {
+  let dir: string;
+  let home: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-gate-fresh-'));
+    home = await mkdtemp(join(tmpdir(), 'openlore-gate-fresh-home-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+
+  it('does not change the analyzed corpus after the index is built', async () => {
+    await execFileAsync('git', ['init', '-q'], { cwd: dir });
+    await mkdir(join(dir, 'src'), { recursive: true });
+    await writeFile(join(dir, 'src', 'index.ts'), 'export function greet(): string { return "hi"; }\n');
+    expect(await runInstall({ cwd: dir, agent: 'claude-code', home, repoOnly: true })).toBe(0);
+    // The gate did write its guidance…
+    expect(await readFile(join(dir, 'CLAUDE.md'), 'utf8')).toMatch(/decision/i);
+    // …and the index already accounts for it: a re-run would skip, not re-analyze.
+    const { isCacheFresh } = await import('../../core/services/mcp-handlers/utils.js');
+    expect(await isCacheFresh(dir)).toBe(true);
+  }, 60_000);
 });

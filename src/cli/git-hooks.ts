@@ -376,6 +376,33 @@ function isOpenLoreAuthoredHook(content: string): boolean {
     });
 }
 
+/**
+ * Insert an OpenLore-marked block into an existing hook script, or author a new one.
+ *
+ * The block goes in FIRST, directly after the shebang, and every other byte of the script is
+ * left alone. Appending it at the end instead meant a hook ending in `exit 0` — the usual way
+ * to swallow a non-zero status from a linter — never reached the block, and the fix for that
+ * was to delete the user's `exit 0`: a silent change to what their own script does, applied by
+ * four different installers. Going in first costs nothing (each OpenLore block exits non-zero
+ * only on its own verdict) and leaves their semantics intact.
+ *
+ * `legacyBlocks` are OpenLore's own superseded markers, which ARE removed.
+ */
+export function insertHookBlock(
+  existing: string | null,
+  block: string,
+  legacyBlocks: readonly RegExp[] = [],
+): string {
+  let kept = existing ?? '';
+  for (const pattern of legacyBlocks) kept = kept.replace(pattern, '');
+  kept = kept.trimEnd();
+  if (!kept) return '#!/bin/sh\n\n' + block;
+  const shebang = /^#![^\n]*\n/.exec(kept);
+  if (!shebang) return '#!/bin/sh\n\n' + block + '\n' + kept + '\n';
+  const body = kept.slice(shebang[0].length).replace(/^\n+/, '');
+  return shebang[0] + '\n' + block + (body ? '\n' + body + '\n' : '');
+}
+
 /** Serialize cross-process hook edits and publish each rewrite with one atomic rename. */
 export async function updateHookFile(
   hookPath: string,

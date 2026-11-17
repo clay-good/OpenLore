@@ -14,9 +14,34 @@ The result: a single `orient` or `search_code` call returns not just "functions 
 
 ### Retrieval modes
 
-Keyword (BM25) search is the **first-class default** — `openlore analyze` builds a working keyword index with zero configuration, no network, and no API key, and `orient` / `search_code` / `search_specs` / `suggest_insertion_points` all work immediately. Semantic (dense) embeddings are an **optional ranking upgrade** that improves recall on synonym/paraphrase queries; they are never required and structural correctness never depends on them.
+Keyword (BM25) search is the **first-class default** — `openlore analyze` builds a working keyword index with zero configuration, no network, and no API key, and `orient` / `search_code` / `search_specs` / `suggest_insertion_points` all work immediately. Semantic (dense) embeddings are a **ranking upgrade** that improves recall on synonym/paraphrase queries; they are never required and structural correctness never depends on them.
 
-Each surface states the active mode plainly — `keyword`, `keyword+vocabulary`, `local-semantic`, or `remote-semantic` (in `analyze` summaries, the `orient` CLI, and the `retrievalMode` field of the `orient` / `search_code` / `search_specs` responses). The keyword default is never framed as a degraded fallback.
+Each surface states the active mode plainly — `keyword`, `keyword+vocabulary`, `local-semantic`, or `remote-semantic` (in `analyze` summaries, the `orient` CLI, and the `retrievalMode` field of the `orient` / `search_code` / `search_specs` responses). The keyword default is never framed as a degraded fallback. Agent responses carry no advice to change the mode; `openlore status` and `openlore doctor` name the optional upgrade for a human.
+
+#### Local semantic in the background
+
+When a repository names no embedding provider, the background builds (auto-init, and the MCP server's and hooks' self-healing repair) publish the keyword index first, then add local vectors in a detached process. Answers say `keyword+vocabulary` until those vectors exist for the current analysis generation, then `local-semantic`. Embedding runs into a scratch index, so the real index's lock is held only for the final write. Once vectors exist, later rebuilds re-embed only changed functions; `analyze --force` builds keyword and the next background build adds the vectors again.
+
+Nothing is reported as a problem when this cannot happen: without the optional `@huggingface/transformers` package, or when the model cannot be downloaded, the keyword index keeps serving. Opt out with `"embedding": { "provider": "none" }` (which also wins over `EMBED_*`), `openlore embed --off`, or `autoInit: false`.
+
+#### Measured (2026-11-01)
+
+`npm run bench:retrieval` (harness: `bench/retrieval/`) asks fixed task queries with known target symbols through `orient` — the path an agent's call takes — on a keyword index and on a local-semantic index of the same clone. A query hits when a target is in the first 5 functions returned; MRR counts the first 10. Paraphrase queries avoid the target's name; identifier queries contain it.
+
+| Corpus | Queries (identifier / paraphrase) | Mode | recall@5 | MRR | Index build | Analysis dir |
+|---|---|---|---|---|---|---|
+| OpenLore (this repo, TypeScript) | 26 (12 / 14) | keyword+vocabulary | 46.2% | 0.369 | 31 s | 124 MB |
+| | | local-semantic | 61.5% | 0.442 | 50 s | 141 MB |
+| gridprims (JavaScript, documented) | 17 (7 / 10) | keyword+vocabulary | 82.4% | 0.801 | 7 s | 29 MB |
+| | | local-semantic | 94.1% | 0.865 | 10 s | 30 MB |
+| roughlogic.com (JavaScript, no doc comments) | 16 (7 / 9) | keyword+vocabulary | 43.8% | 0.446 | 19 s | 107 MB |
+| | | local-semantic | 50.0% | 0.414 | 30 s | 116 MB |
+| **All 59 queries** | | keyword+vocabulary | **55.9%** | 0.514 | | |
+| | | local-semantic | **67.8%** | 0.556 | | |
+
+The gain is +11.9 points of recall@5, and recall@5 rose on every corpus, which clears the bar in the `config` spec (`LocalSemanticIsBuiltInTheBackgroundWhenItMeasurablyHelps`). It comes from paraphrase queries (OpenLore 14% → 36%, roughlogic 0% → 22%); identifier queries stayed level or fell — on roughlogic one exact query dropped out of the top 5 (identifier recall@5 100% → 86%), and roughlogic's MRR fell 0.446 → 0.415. Build time is wall time of `analyze --force` (keyword analysis plus vectors) on a 10-core Apple-silicon laptop under load, with the model already cached; the first use also downloads about 23 MB.
+
+Local embedding was made 8–10x faster on 2026-11-01 (the background vector pass on this repository: 203–259 s → 24–25 s). Texts are batched by length, so a batch is padded to similar lengths instead of to the one long function it happened to hold; a bulk build runs on up to four worker threads, each with its own two-thread model session; and the model reads the 256 word pieces its model card documents instead of the tokenizer config's 512. The first two leave vectors unchanged (pooled vs single-thread vectors agree to 1e-7); the third changes the 6% of functions longer than 256 tokens, and moved recall@5 by nothing and MRR by 0.567 → 0.556 overall (bench/retrieval/results/2026-11-01.json). The background pass runs at low CPU priority. These are small query sets: one query is 4–6 points on a single corpus.
 
 After a full analysis, keyword mode may use a repository-derived vocabulary. OpenLore mines
 abbreviation, repeated local co-occurrence, and conservative attested morphology links from the
@@ -76,7 +101,7 @@ prefer `NODE_EXTRA_CA_CERTS`, or `EMBED_SKIP_SSL_VERIFY=1` when the CA is unavai
 }
 ```
 
-- `provider`: `"local"` (on-device) or `"remote"` (default when `baseUrl`/`model` are set)
+- `provider`: `"local"` (on-device), `"remote"` (default when `baseUrl`/`model` are set), or `"none"` (keyword only: no background vectors, and wins over `EMBED_*`)
 - `batchSize`: Number of texts to embed per API call (default: 64)
 
 > Switching the embedding model or provider re-embeds the whole index (`openlore embed` runs a forced rebuild). Cached vectors from a different model are never reused, so the index can never end up with mixed dimensions; if a stale index is ever queried with a mismatched model, search degrades to keyword (BM25) rather than erroring.

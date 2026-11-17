@@ -83,7 +83,20 @@ describe('doctor — retrieval mode served', () => {
     expect(check.status).toBe('ok');
     expect(check.detail).toContain('keyword');
     expect(check.detail).toContain('first-class default');
+    // A human surface: the optional upgrade is named as information, not as a fix.
+    expect(check.detail).toContain('openlore embed --local');
     expect(check.fix).toBeUndefined();
+  });
+
+  it('offers no upgrade when keyword is the configured choice', async () => {
+    await withIndex(false);
+    await writeConfig({ provider: 'none' });
+
+    const check = await checkRetrievalMode(root);
+
+    expect(check.status).toBe('ok');
+    expect(check.detail).toContain('by configuration');
+    expect(check.detail).not.toContain('openlore embed');
   });
 
   it('reports the semantic mode when the configured provider is realized', async () => {

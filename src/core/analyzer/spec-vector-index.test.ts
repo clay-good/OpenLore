@@ -934,3 +934,13 @@ describe('SpecVectorIndex', () => {
     });
   });
 });
+
+describe('specRowProse', () => {
+  it('drops only the index header, so the rest can be found in the spec file', async () => {
+    const { specRowProse } = await import('./spec-row-text.js');
+    const text = '[spec:payments] Requirement: Retry\nThe system SHALL retry.\n\n#### Scenario: Retry';
+    expect(specRowProse('payments', 'Requirement: Retry', text)).toBe('The system SHALL retry.\n\n#### Scenario: Retry');
+    expect(specRowProse('payments', 'Requirement: Retry', '[spec:payments] Requirement: Retry')).toBe('');
+    expect(specRowProse('other', 'Requirement: Retry', text)).toBe('');
+  });
+});

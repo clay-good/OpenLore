@@ -19,6 +19,7 @@
  * explicit `unsupported` result, never an empty escape set.
  */
 
+import { resolveQualifiedSymbol } from './symbol-query.js';
 import { relative } from 'node:path';
 import type Parser from 'tree-sitter';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable, safeJoin } from './utils.js';
@@ -40,7 +41,7 @@ import {
   type GoErrorFacts,
 } from '../../analyzer/exception-flow.js';
 import type { SerializedCallGraph, FunctionNode, CallEdge, AmbiguousCallSite } from '../../analyzer/call-graph.js';
-import { parseWithBudget, type BudgetableParser } from '../../analyzer/parse-budget.js';
+import { parseWithBudget, type BudgetableParser } from '../../analyzer/extraction-budget.js';
 import { MESSAGE_TOPOLOGY_RULE } from '../../analyzer/message-topology.js';
 
 export interface AnalyzeErrorPropagationInput {
@@ -126,9 +127,14 @@ export async function handleAnalyzeErrorPropagation(
   const namePart = sep >= 0 ? sym.slice(0, sep) : sym;
   const pathPart = sep >= 0 ? sym.slice(sep + 2) : undefined;
 
-  let candidates = allNodes.filter(n => n.name === namePart);
+  let candidates = allNodes.filter(n => n.name === namePart && !n.isExternal);
   if (pathPart) {
     candidates = candidates.filter(n => n.filePath === pathPart || n.filePath.endsWith(pathPart));
+  }
+  // `Class.method`: an external leaf can carry the dotted call text as its NAME, which resolved
+  // here and reported the method "not supported for external".
+  if (candidates.length === 0) {
+    candidates = resolveQualifiedSymbol(sym, name => allNodes.filter(n => n.name === name), id => allNodes.find(n => n.id === id)) ?? [];
   }
   if (candidates.length === 0) {
     const nameLower = namePart.toLowerCase();

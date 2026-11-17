@@ -67,6 +67,14 @@ const WITNESS_CAP = 8;
 const MAX_MERGE_SIMULATIONS = 60;
 /** Wall-clock budget for all merge simulations in one call (tool calls time out at 60 s). */
 const MERGE_SIMULATION_BUDGET_MS = 20_000;
+/**
+ * Wall-clock budget for READING the in-flight changes in one call. Reading a branch costs a
+ * merge-base, a diff and a base-snapshot reparse, and a working clone can hold hundreds of
+ * branches; without a budget a real clone (705 branches) ran for three minutes and the whole
+ * call died on the 60 s tool timeout, so the agent got nothing instead of the conflicts among
+ * the changes that WERE read (change: fix-in-flight-harvest-budget).
+ */
+const HARVEST_BUDGET_MS = 25_000;
 /** Files re-parsed per change for its base snapshot (a huge diff is the slow path). */
 const MAX_FILES_PER_CHANGE = 400;
 /**
@@ -471,6 +479,8 @@ export interface RawChange {
   title?: string;
   /** The change's tip commit id, when it exists locally (drives the textual merge simulation). */
   tip?: string;
+  /** The branch the change is on (a PR's head branch); used to match peer-board entries. */
+  headBranch?: string;
   /** Parsed diff hunks (empty when fetchError is set). */
   files: FileHunks[];
   /** Base-snapshot symbols by changed-file path (the provider does the re-parse I/O). */
@@ -493,10 +503,16 @@ export interface RawChangeEnumeration {
 type EnumerationOutput = RawChange[] | RawChangeEnumeration;
 
 export interface InFlightProviders {
-  /** Enumerate local branch changes ahead of base in a repo. */
-  enumerateBranches(repoPath: string, repoName: string, baseRef: string, only?: string[]): Promise<EnumerationOutput>;
+  /**
+   * Enumerate local branch changes ahead of base in a repo.
+   *
+   * `deadline` is an epoch-millisecond budget for the WHOLE call, not for this repo: it is
+   * computed once by the handler and handed to every provider, so a federation of N repos
+   * cannot spend N budgets and blow the tool timeout.
+   */
+  enumerateBranches(repoPath: string, repoName: string, baseRef: string, only?: string[], deadline?: number): Promise<EnumerationOutput>;
   /** Enumerate open pull requests in a repo (via gh). Resolves to [] when gh is absent. */
-  enumeratePullRequests(repoPath: string, repoName: string, baseRef: string): Promise<EnumerationOutput>;
+  enumeratePullRequests(repoPath: string, repoName: string, baseRef: string, deadline?: number): Promise<EnumerationOutput>;
   /** Whether `gh` is available at all (drives the "PRs not enumerated" caveat). */
   ghAvailable(repoPath: string): Promise<boolean>;
   /** Simulate merging two tip commits (default: a read-only `git merge-tree` in a scratch repository). */
@@ -653,10 +669,15 @@ export async function defaultEnumerateBranches(
   only?: string[],
   runGit: CommandRunner = git,
   autoResolve?: AutoBaseResolver,
+  deadline: number = Date.now() + HARVEST_BUDGET_MS,
 ): Promise<RawChangeEnumeration> {
   let names: string[];
   try {
-    names = (await runGit(repoPath, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']))
+    // Most recently committed FIRST. In-flight work is recent work, and a clone can hold
+    // hundreds of stale branches: taking them in alphabetical order spent the whole change cap
+    // on whatever sorts first, which is arbitrary (change: fix-in-flight-harvest-budget).
+    // `--sort` is a git-side order, so the selection stays deterministic.
+    names = (await runGit(repoPath, ['for-each-ref', '--sort=-committerdate', '--format=%(refname:short)', 'refs/heads/']))
       .split('\n').map(s => s.trim()).filter(Boolean);
   } catch (err) {
     // Propagate rather than returning []. The caller has a caveat for exactly this
@@ -672,9 +693,24 @@ export async function defaultEnumerateBranches(
   // that can genuinely conflict with a teammate's branch (a true positive the user wants).
   const wanted = only && only.length > 0 ? new Set(only) : null;
   const out: RawChange[] = [];
-  for (const branch of names.sort()) {
+  for (const branch of names) {
     if (branch === baseRef) continue;
+    // A wall-clock budget, like the merge simulations have: a branch not reached is disclosed
+    // as not assessed rather than letting the whole call hit the tool timeout, where the agent
+    // gets nothing at all. 705 branches × (merge-base + diff + a base-snapshot reparse) ran to
+    // three minutes on a real clone (change: fix-in-flight-harvest-budget).
+    // The caller's own filter comes FIRST: a branch it never asked about must not be reported
+    // as one the budget could not reach. Reporting those turned a request for one branch into
+    // four results, three of them "not assessed" for a branch nobody wanted assessed.
     if (wanted && !wanted.has(branch)) continue;
+    if (Date.now() > deadline) {
+      out.push({
+        actor: branch, ref: branch, title: branch, repo: repoName, kind: 'branch',
+        files: [], baseSymbolsByFile: new Map(),
+        assessmentError: `the ${HARVEST_BUDGET_MS / 1000}s harvest budget for one call was reached before this branch was read`,
+      });
+      continue;
+    }
     let mergeBase: string;
     try {
       // `--end-of-options` on every operand that is a REF NAME read out of the repo.
@@ -747,6 +783,7 @@ export async function defaultEnumeratePullRequests(
   },
   runGit: CommandRunner = git,
   autoResolve?: AutoBaseResolver,
+  deadline: number = Date.now() + HARVEST_BUDGET_MS,
 ): Promise<RawChangeEnumeration> {
   let prs: GhPr[];
   try {
@@ -764,12 +801,24 @@ export async function defaultEnumeratePullRequests(
   const out: RawChange[] = [];
   for (const pr of prs.sort((a, b) => a.number - b.number)) {
     const ref = `PR #${pr.number}`;
+    const headBranch = pr.headRefName;
     const actor = pr.author?.login || 'unknown';
+    // The same wall-clock budget the branch half has. `gh pr diff` is a network call per PR,
+    // 50 of them, and this loop had no bound at all: the budget stopped reading branches and
+    // then spent minutes here instead (change: fix-harvest-budget-scope).
+    if (Date.now() > deadline) {
+      out.push({
+        actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', headBranch,
+        files: [], baseSymbolsByFile: new Map(),
+        assessmentError: `the ${HARVEST_BUDGET_MS / 1000}s harvest budget for one call was reached before this pull request was read`,
+      });
+      continue;
+    }
     let patch: string;
     try {
       patch = await runGh(repoPath, ['pr', 'diff', String(pr.number), '--patch']);
     } catch {
-      out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', files: [], baseSymbolsByFile: new Map(), fetchError: `gh pr diff ${pr.number} failed` });
+      out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', headBranch, files: [], baseSymbolsByFile: new Map(), fetchError: `gh pr diff ${pr.number} failed` });
       continue;
     }
     const files = parseUnifiedDiff(patch);
@@ -780,7 +829,7 @@ export async function defaultEnumeratePullRequests(
         ref,
         title: pr.title,
         repo: repoName,
-        kind: 'pull-request',
+        kind: 'pull-request', headBranch,
         files: [],
         baseSymbolsByFile: new Map(),
         assessmentError: `diff contains ${files.length} changed files, exceeding the ${MAX_FILES_PER_CHANGE}-file assessment cap`,
@@ -791,7 +840,7 @@ export async function defaultEnumeratePullRequests(
     // has advanced past local) — disclosed in the caveats.
     const { byFile, unreadable } = await buildBaseSymbols(repoPath, baseRef, files);
     const tip = await localCommit(repoPath, pr.headRefOid, runGit);
-    out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', ...(tip ? { tip } : {}), files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
+    out.push({ actor, ref, title: pr.title, repo: repoName, kind: 'pull-request', headBranch, ...(tip ? { tip } : {}), files, baseSymbolsByFile: byFile, ...(unreadable.length ? { unreadableFiles: unreadable } : {}) });
   }
   return { changes: out, caveats };
 }
@@ -812,8 +861,12 @@ async function defaultGhAvailable(repoPath: string): Promise<boolean> {
 }
 
 const DEFAULT_PROVIDERS: InFlightProviders = {
-  enumerateBranches: defaultEnumerateBranches,
-  enumeratePullRequests: defaultEnumeratePullRequests,
+  // Each default carries its injectable runners before the deadline, so the interface's
+  // 5th/4th argument is mapped onto the right tail parameter rather than onto `runGit`.
+  enumerateBranches: (repoPath, repoName, baseRef, only, deadline) =>
+    defaultEnumerateBranches(repoPath, repoName, baseRef, only, undefined, undefined, deadline),
+  enumeratePullRequests: (repoPath, repoName, baseRef, deadline) =>
+    defaultEnumeratePullRequests(repoPath, repoName, baseRef, undefined, undefined, undefined, deadline),
   ghAvailable: defaultGhAvailable,
   simulateMerge,
 };
@@ -932,13 +985,18 @@ export async function computeInterferenceMap(
 
   // ── 1. Gather raw in-flight changes from every assessed repo ────────────────
   const raw: RawChange[] = [];
+  // ONE deadline for the whole call. The budget used to be a per-repo default argument, so a
+  // federation of N repos harvested for N × 25s, and PR enumeration had no budget at all —
+  // 50 `gh pr diff` calls plus the merge simulations sat on top. On this clone (506 branches,
+  // 5 open PRs) the call spent 52s of its 60s tool timeout.
+  const harvestDeadline = Date.now() + HARVEST_BUDGET_MS;
   const includeBranches = input.includeBranches !== false;
   const includePrs = input.includePullRequests !== false;
   let anyGh = false;
   let anyPrEnumerationSucceeded = false;
   for (const repo of repos) {
     if (includeBranches) {
-      try { appendEnumeration(await providers.enumerateBranches(repo.path, repo.name, resolvedBaseRef, input.branches), raw, caveats); }
+      try { appendEnumeration(await providers.enumerateBranches(repo.path, repo.name, resolvedBaseRef, input.branches, harvestDeadline), raw, caveats); }
       catch (err) {
         // Carry the reason: "not a git worktree" and "safe.directory rejected" need
         // different fixes, and a bare failure notice is not actionable.
@@ -950,7 +1008,7 @@ export async function computeInterferenceMap(
       anyGh = anyGh || has;
       if (has) {
         try {
-          appendEnumeration(await providers.enumeratePullRequests(repo.path, repo.name, resolvedBaseRef), raw, caveats);
+          appendEnumeration(await providers.enumeratePullRequests(repo.path, repo.name, resolvedBaseRef, harvestDeadline), raw, caveats);
           anyPrEnumerationSucceeded = true;
         } catch (error) {
           caveats.push(`PR enumeration failed for ${repo.name}: ${errorDetail(error)}`);
@@ -988,6 +1046,8 @@ export async function computeInterferenceMap(
     notAssessed.push({ actor: '—', ref: '(all changes)', repo: u.name, kind: 'branch', provenance: 'foreign-actor', assessed: false, reason: u.reason, detail: u.detail });
   }
 
+  // Branch name → the symbols its assessed change writes (home repo), to match peer-board entries.
+  const branchWrites = new Map<string, Set<string>>();
   for (const rc of raw) {
     if (assessed.length + notAssessed.length >= maxChanges) {
       caveats.push(`Assessment capped at ${maxChanges} changes; further in-flight changes were not assessed (raise maxChanges to widen).`);
@@ -1018,6 +1078,12 @@ export async function computeInterferenceMap(
       continue;
     }
     const footprint = footprintForChange(repo.cg, rc.ref, writeMembers, fpOptsFor(repo));
+    const branch = rc.headBranch ?? (rc.kind === 'branch' ? rc.ref : undefined);
+    if (branch && rc.repo === repos[0]?.name) {
+      const set = branchWrites.get(branch) ?? new Set<string>();
+      for (const w of writeMembers) set.add(w.id);
+      branchWrites.set(branch, set);
+    }
     const stableByNodeId = new Map<string, string>();
     for (const w of writeMembers) if (w.stableId) stableByNodeId.set(w.id, w.stableId);
     assessed.push({
@@ -1032,7 +1098,26 @@ export async function computeInterferenceMap(
   const home = repos[0];
   let cappedTasks = 0;
   let malformedTasks = 0;
-  for (const t of input.tasks ?? []) {
+  // Live peer-board entries join as agent tasks too (change: add-peer-footprint-board); a supplied
+  // task with the same id wins.
+  const supplied = input.tasks ?? [];
+  let boardTasks: TaskDescriptor[] = [];
+  try {
+    const { liveTaskDescriptors } = await import('../footprint-board.js');
+    const ids = new Set(supplied.map(t => t?.id));
+    // An entry whose declared writes its own branch's (or PR's) assessed change already covers is
+    // that same work: adding it would pair the agent with itself. Declared work beyond the
+    // committed change still joins.
+    const live = (await liveTaskDescriptors(absDir)).filter(t => !ids.has(t.id));
+    const covered = live.filter(t => {
+      const done = t.branch ? branchWrites.get(t.branch) : undefined;
+      return !!done && t.seedSymbols.every(s => done.has(s));
+    });
+    if (covered.length) caveats.push(`${covered.length} live peer-board entr${covered.length === 1 ? 'y is' : 'ies are'} already represented by ${covered.length === 1 ? 'its' : 'their'} branch change.`);
+    boardTasks = live.filter(t => !covered.includes(t)).map(({ branch: _b, ...t }) => t);
+  } catch { /* the board is optional: unreadable means no board tasks */ }
+  if (boardTasks.length) caveats.push(`${boardTasks.length} live peer-board entr${boardTasks.length === 1 ? 'y joins' : 'ies join'} as agent tasks (declare_footprint).`);
+  for (const t of [...supplied, ...boardTasks]) {
     if (assessed.length + notAssessed.length >= maxChanges) { cappedTasks++; continue; }
     if (!t || typeof t.id !== 'string' || t.id.length === 0) { malformedTasks++; continue; }
     const hasSeed = (t.seedSymbols && t.seedSymbols.length > 0) || (t.seedFiles && t.seedFiles.length > 0);

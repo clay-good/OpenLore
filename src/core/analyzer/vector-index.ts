@@ -1,3 +1,4 @@
+import type { FilePolicyResolver } from '../configuration/policy.js';
 /**
  * VectorIndex
  *
@@ -23,6 +24,7 @@ import type { CallEdge, FunctionNode } from './call-graph.js';
 import type { FileSignatureMap } from './signature-extractor.js';
 import type { Embedder } from './embedding-service.js';
 import { getSkeletonContent, isSkeletonWorthIncluding } from './code-shaper.js';
+import { isProjectedLanguage, PROJECTED_LANGUAGE_SQL } from './projected-language.js';
 import { quietNativeLoggingOnce } from './lance-logging.js';
 import { noteUpdateAndMaybeCompact } from './index-compaction.js';
 import { TOKENIZER_VERSION, tokenize } from './bm25-tokenizer.js';
@@ -67,7 +69,7 @@ export interface FunctionRecord {
   /** Concatenated text used for embedding */
   text: string;
   /** Embedding vector */
-  vector: number[];
+  vector: number[] | null;
 }
 
 export interface SearchResult {
@@ -107,6 +109,7 @@ const META_FILE = 'vector-index-meta.json';
 const META_SCHEMA_VERSION = 1;
 
 export interface VectorIndexMeta {
+  embeddingPolicyRevision?: string;
   hasEmbeddings: boolean;
   dim: number;
   model: string | null;
@@ -290,6 +293,31 @@ function isRepoFunction(node: Pick<FunctionNode, 'id' | 'filePath' | 'isExternal
 
 function isRepoFunctionRow(row: Record<string, unknown>): boolean {
   return row.filePath !== 'external' && !(row.id as string | undefined)?.startsWith('external::');
+}
+
+/**
+ * The candidate filter every search path applies, in one place.
+ *
+ * A projected declaration (an IaC resource, an OpenAPI operation or schema) is indexed so that a
+ * caller who NAMES its language can retrieve it, but it is not source code and must not compete
+ * with code for a ranked slot: a document declaring a few hundred schemas otherwise fills the
+ * whole result set, every schema scoring identically, and evicts every function the caller was
+ * actually looking for. Naming a projected language opts back in; `isProjectedLanguage` is the
+ * same predicate the graph's rankings use.
+ */
+function rowPassesSearchFilters(
+  row: Record<string, unknown>,
+  language?: string,
+  minFanIn?: number,
+): boolean {
+  if (!isRepoFunctionRow(row)) return false;
+  if (language) {
+    if ((row.language as string) !== language) return false;
+  } else if (isProjectedLanguage(row.language as string | undefined)) {
+    return false;
+  }
+  if (minFanIn !== undefined && minFanIn > 0 && (row.fanIn as number) < minFanIn) return false;
+  return true;
 }
 
 // ============================================================================
@@ -1271,6 +1299,9 @@ function filePathInPredicate(paths: Set<string>): string | null {
 function functionSearchPredicate(language?: string, minFanIn?: number): string | null {
   const clauses: string[] = [];
   if (language) clauses.push(`\`language\` = '${language.replace(/'/g, "''")}'`);
+  // Mirror of rowPassesSearchFilters: keep projected declarations out of the ANN recall set
+  // unless the caller named one, so the prefilter and the row filter cannot disagree.
+  else clauses.push(`(\`language\` IS NULL OR \`language\` NOT IN (${PROJECTED_LANGUAGE_SQL}))`);
   if (minFanIn !== undefined && minFanIn > 0 && Number.isFinite(minFanIn)) {
     clauses.push(`\`fanIn\` >= ${minFanIn}`);
   }
@@ -1335,10 +1366,15 @@ export function searchableFieldsForFunctionRow(row: Record<string, unknown>): Se
     .filter(Boolean)
     .join('\n');
   const body = text.startsWith(`${prefix}\n`) ? text.slice(prefix.length + 1) : '';
-  // Include the language marker with the path because both occupy the same
-  // prefix segment in the flattened text scored by BM25. Every attributed
-  // token must come from that scored text; fields are not extra query inputs.
-  return { symbol, path: `[${language}] ${filePath}`, signature, doc: docstring, body };
+  // Every attributed token must come from the scored text, and from the part of it that
+  // actually contains the token. The language marker and the path occupy the same prefix
+  // SEGMENT, but they are not the same TEXT: folded together, a query for `type` matched
+  // `[TypeScript]` and the receipt named `field: "path"` for a file whose path contains no
+  // `type` at all — a receipt naming evidence the file does not contain, which is worse than
+  // no receipt (change: fix-retrieval-coverage-over-unread-content). Splitting them keeps the
+  // partition of the scored text exact (the brackets and spaces are not tokens) while letting
+  // each field answer for its own tokens.
+  return { symbol, path: filePath, language: `[${language}]`, signature, doc: docstring, body };
 }
 
 /**
@@ -1423,6 +1459,7 @@ export class VectorIndex {
     callEdges?: readonly Pick<CallEdge, 'callerId' | 'calleeId'>[],
     /** How to behave when another process is already mutating this index. */
     lock?: VectorIndexLockOptions,
+    embeddingPolicy?: FilePolicyResolver,
   ): Promise<{
     embedded: number;
     reused: number;
@@ -1434,7 +1471,7 @@ export class VectorIndex {
   }> {
     return withVectorIndexMutation(outputDir, () => VectorIndex.buildUnlocked(
       outputDir, nodes, signatures, hubIds, entryPointIds, embedSvc, fileContents, incremental,
-      vocabularyExpansion, callEdges,
+      vocabularyExpansion, callEdges, embeddingPolicy,
     ), lock);
   }
 
@@ -1449,6 +1486,7 @@ export class VectorIndex {
     incremental = false,
     vocabularyExpansion = true,
     callEdges?: readonly Pick<CallEdge, 'callerId' | 'calleeId'>[],
+    embeddingPolicy?: FilePolicyResolver,
   ): Promise<{
     embedded: number;
     reused: number;
@@ -1543,6 +1581,8 @@ export class VectorIndex {
     const testFunctions = repoNodes.length - productionFunctions;
     const signatureOnlySymbols = candidates.length - repoNodes.length;
 
+    if (embeddingPolicy && !candidates.some(r => embeddingPolicy.admitted(r.filePath,'embed',true))) embedSvc = null;
+
     // ── BM25-only build (no embedding service) ───────────────────────────────
     // Write the corpus without a `vector` column so the table can never be
     // searched with ANN, and record `hasEmbeddings: false` in the sidecar.
@@ -1573,6 +1613,7 @@ export class VectorIndex {
         fullBuildAt: builtAt,
         schemaVersion: META_SCHEMA_VERSION,
         tokenizerVersion: TOKENIZER_VERSION,
+        ...(embeddingPolicy?.hasRulesFor('embed') ? {embeddingPolicyRevision:embeddingPolicy.revisionFor('embed')} : {}),
         ...(vocabularyContentStamp ? { vocabularyContentStamp } : {}),
       });
       _degradedFallback.delete(dbPath);
@@ -1617,6 +1658,7 @@ export class VectorIndex {
           const text = row.text as string;
           // Convert Arrow typed arrays (Float32Array etc.) to plain number[]
           // so LanceDB can re-infer the schema when writing back
+          if (!row.vector) continue;
           const vector = Array.from(row.vector as ArrayLike<number>);
           // Cache the vector keyed by "id::text" so a text change invalidates it
           cachedVectors.set(`${id}::${text}`, vector);
@@ -1631,9 +1673,11 @@ export class VectorIndex {
     const toEmbed: typeof candidates = [];
     const toEmbedIdx: number[] = []; // index into `candidates`
     const cachedIdx: number[] = [];
+    const excludedIdx: number[] = [];
 
     for (let i = 0; i < candidates.length; i++) {
       const r = candidates[i];
+      if (embeddingPolicy && !embeddingPolicy.admitted(r.filePath,'embed',true)) {excludedIdx.push(i);continue;}
       const cacheKey = `${r.id}::${r.text}`;
       if (cachedVectors.has(cacheKey)) {
         cachedIdx.push(i);
@@ -1656,6 +1700,7 @@ export class VectorIndex {
 
     // ── Assemble final records ───────────────────────────────────────────────
     const fullRecords: FunctionRecord[] = new Array(candidates.length);
+    for (const idx of excludedIdx) fullRecords[idx] = {...candidates[idx],vector:null};
     for (let i = 0; i < cachedIdx.length; i++) {
       const idx = cachedIdx[i];
       const r = candidates[idx];
@@ -1683,7 +1728,7 @@ export class VectorIndex {
     );
     await writeMeta(outputDir, {
       hasEmbeddings: true,
-      dim: fullRecords[0]?.vector.length ?? 0,
+      dim: fullRecords.find(r => r.vector)?.vector?.length ?? 0,
       // Runtime test doubles and third-party embedders predating `modelName`
       // can omit it despite the current type contract. Persist a valid,
       // conservative identity rather than publishing malformed metadata.
@@ -1692,6 +1737,7 @@ export class VectorIndex {
       fullBuildAt: builtAt,
       schemaVersion: META_SCHEMA_VERSION,
       tokenizerVersion: TOKENIZER_VERSION,
+      ...(embeddingPolicy?.hasRulesFor('embed') ? {embeddingPolicyRevision:embeddingPolicy.revisionFor('embed')} : {}),
       ...(vocabularyContentStamp ? { vocabularyContentStamp } : {}),
     });
 
@@ -1738,9 +1784,10 @@ export class VectorIndex {
      * section is short, and a caller that loses the race should converge, not fail.
      */
     lock: VectorIndexLockOptions = { contention: 'wait' },
-  ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean; deferred?: 'model-changed' | 'tokenizer-changed' }> {
+    embeddingPolicy?: FilePolicyResolver,
+  ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean; deferred?: 'model-changed' | 'tokenizer-changed' | 'policy-changed' }> {
     return withVectorIndexMutation(outputDir, () => VectorIndex.updateFilesUnlocked(
-      outputDir, nodes, changedFilePaths, signatures, hubIds, entryPointIds, embedSvc, fileContents,
+      outputDir, nodes, changedFilePaths, signatures, hubIds, entryPointIds, embedSvc, fileContents, embeddingPolicy,
     ), lock);
   }
 
@@ -1753,13 +1800,15 @@ export class VectorIndex {
     entryPointIds: Set<string>,
     embedSvc: Embedder | null | undefined,
     fileContents?: Map<string, string>,
-  ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean; deferred?: 'model-changed' | 'tokenizer-changed' }> {
+    embeddingPolicy?: FilePolicyResolver,
+  ): Promise<{ embedded: number; reused: number; total: number; hasEmbeddings: boolean; deferred?: 'model-changed' | 'tokenizer-changed' | 'policy-changed' }> {
     if (!VectorIndex.exists(outputDir)) {
       return { embedded: 0, reused: 0, total: 0, hasEmbeddings: false };
     }
     const dbPath = dbPathFor(outputDir);
     const existingMeta = readMeta(outputDir);
     const indexHasEmbeddings = metaHasEmbeddings(existingMeta);
+    if (existingMeta && existingMeta !== INVALID_META && existingMeta.embeddingPolicyRevision !== (embeddingPolicy?.hasRulesFor('embed') ? embeddingPolicy.revisionFor('embed') : undefined)) return {embedded:0,reused:0,total:0,hasEmbeddings:indexHasEmbeddings,deferred:'policy-changed'};
     if (changedFilePaths.size === 0) {
       return { embedded: 0, reused: 0, total: 0, hasEmbeddings: indexHasEmbeddings };
     }
@@ -1974,14 +2023,16 @@ export class VectorIndex {
       for (const row of previousRows) {
         const id = row.id as string;
         const text = row.text as string;
-        cachedVectors.set(`${id}::${text}`, Array.from(row.vector as ArrayLike<number>));
+        if (row.vector) cachedVectors.set(`${id}::${text}`, Array.from(row.vector as ArrayLike<number>));
       }
     }
 
     const toEmbed: typeof candidates = [];
     const toEmbedIdx: number[] = [];
     const cachedIdx: number[] = [];
+    const excludedIdx: number[] = [];
     for (let i = 0; i < candidates.length; i++) {
+      if (embeddingPolicy && !embeddingPolicy.admitted(candidates[i].filePath,'embed',true)) {excludedIdx.push(i);continue;}
       const key = `${candidates[i].id}::${candidates[i].text}`;
       if (cachedVectors.has(key)) cachedIdx.push(i);
       else { toEmbed.push(candidates[i]); toEmbedIdx.push(i); }
@@ -1996,6 +2047,7 @@ export class VectorIndex {
     }
 
     const fullRecords: FunctionRecord[] = new Array(candidates.length);
+    for (const idx of excludedIdx) fullRecords[idx] = {...candidates[idx],vector:null};
     for (const idx of cachedIdx) {
       const r = candidates[idx];
       fullRecords[idx] = { ...r, vector: cachedVectors.get(`${r.id}::${r.text}`)! };
@@ -2123,12 +2175,8 @@ export class VectorIndex {
     if (densePredicate) denseQuery = denseQuery.where(densePredicate);
     const denseRows = await denseQuery.limit(denseFetch).toArray() as Record<string, unknown>[];
 
-    const passesFilters = (row: Record<string, unknown>): boolean => {
-      if (!isRepoFunctionRow(row)) return false;
-      if (language && (row.language as string) !== language) return false;
-      if (minFanIn !== undefined && minFanIn > 0 && (row.fanIn as number) < minFanIn) return false;
-      return true;
-    };
+    const passesFilters = (row: Record<string, unknown>): boolean =>
+      rowPassesSearchFilters(row, language, minFanIn);
 
     // ── Dense-only path ───────────────────────────────────────────────────────
     if (!hybrid) {
@@ -2306,12 +2354,7 @@ export class VectorIndex {
         return row ? { row, idx, score, expansionScore } : null;
       })
       .filter((x): x is { row: Record<string, unknown>; idx: number; score: number; expansionScore: number } => x !== null)
-      .filter(({ row }) => {
-        if (!isRepoFunctionRow(row)) return false;
-        if (language && (row.language as string) !== language) return false;
-        if (minFanIn !== undefined && minFanIn > 0 && (row.fanIn as number) < minFanIn) return false;
-        return true;
-      })
+      .filter(({ row }) => rowPassesSearchFilters(row, language, minFanIn))
       .slice(0, traceCandidates ? undefined : limit)
       .map(({ row, idx, score, expansionScore }) => ({
         record: rowToRecord(row),

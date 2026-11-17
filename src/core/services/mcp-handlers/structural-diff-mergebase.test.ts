@@ -106,7 +106,7 @@ function buildAdvancedBaseRepo(checkout: 'feature' | 'main'): string {
 
 describe('structural_diff — merge-base old-content discipline', () => {
   let repo: string;
-  afterEach(() => { if (repo) rmSync(repo, { recursive: true, force: true }); });
+  afterEach(() => { if (repo) rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 
   it('working-tree path: an advanced base does not misattribute main-side edits', async () => {
     repo = buildAdvancedBaseRepo('feature');
@@ -171,7 +171,7 @@ describe('structural_diff — merge-base old-content discipline', () => {
 
 describe('structural_diff — snapshot build failure is a disclosed boundary', () => {
   let repo: string;
-  afterEach(() => { if (repo) rmSync(repo, { recursive: true, force: true }); });
+  afterEach(() => { if (repo) rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 
   it('names the failed snapshot instead of a silent empty comparison', async () => {
     repo = mkdtempSync(join(tmpdir(), 'struct-mb-crash-'));

@@ -51,14 +51,18 @@ export function formatDuration(ms: number): string {
 /**
  * Format an elapsed time (ms) as a human-readable age string.
  * @example formatAge(30000)    // "just now"
+ * @example formatAge(90000)    // "1 minute ago"
  * @example formatAge(300000)   // "5 minutes ago"
  * @example formatAge(7200000)  // "2 hours ago"
  */
 export function formatAge(ms: number): string {
   if (ms < 60_000) return 'just now';
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)} minutes ago`;
-  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)} hours ago`;
-  return `${Math.floor(ms / 86_400_000)} days ago`;
+  // Singular when it is one. "1 minutes ago" had been invisible in a one-line discovery
+  // message; `openlore status` now prints this in a panel of prose, where it reads as a bug.
+  const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'} ago`;
+  if (ms < 3_600_000) return plural(Math.floor(ms / 60_000), 'minute');
+  if (ms < 86_400_000) return plural(Math.floor(ms / 3_600_000), 'hour');
+  return plural(Math.floor(ms / 86_400_000), 'day');
 }
 
 /**

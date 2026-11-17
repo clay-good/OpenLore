@@ -1,3 +1,4 @@
+import { configureOpenLore, configurationRoot, reviewConfigurationOnIdle, type ConfigurationRequest } from '../api/configuration.js';
 /**
  * openlore Pi extension — src/pi/extension.ts
  *
@@ -5,15 +6,17 @@
  * `pi install npm:openlore` drops it into the Pi extension registry automatically.
  *
  * Two halves:
- *   C — context injection (before_agent_start): model starts grounded with the
- *       architecture digest + spec index + task-grounded orient call, so weak
- *       tool-callers benefit even without calling a tool.
+ *   C — context injection (before_agent_start): repository-wide architecture/spec context is
+ *       opt-in (`pi.contextMode: "full"`). The default is on-demand; the agent calls
+ *       openlore_orient when it has a task. Recognized OpenSpec proposal invocations receive a
+ *       concise instruction to synthesize intent before orienting.
  *   B — native tools (registerTool): the substrate surface for on-demand structural
  *       queries — NAV_TOOLS spans navigate + change + remember + verify + governance,
  *       each round-tripping to the warm daemon via fetch. Every tool is registered, but a
  *       session starts with only the lean set active (the MCP `substrate` preset, the same
  *       default Claude Code gets); openlore_activate_tools turns on the task groups in
- *       PI_TOOL_GROUPS. `pi.toolSurface: "all"` keeps every tool active.
+ *       PI_TOOL_GROUPS. If the user enables Pi's native `tool_search`, specialist tools become
+ *       deferred and searchable; `pi.toolSurface: "all"` keeps every tool active.
  *       (change: add-pi-lean-tool-surface)
  *
  * Uses ctx.mode (0.78.1+): full injection in tui/rpc (interactive), none in
@@ -34,43 +37,37 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   SessionShutdownEvent,
+  SessionCompactEvent,
   SessionStartEvent,
+  ToolResultEvent,
 } from '@earendil-works/pi-coding-agent';
 import { StringEnum } from '@earendil-works/pi-ai';
 import { getMarkdownTheme } from '@earendil-works/pi-coding-agent';
 import { Markdown, Text } from '@earendil-works/pi-tui';
 import { Type, type TObject, type TSchema } from 'typebox';
 
-import { spawn } from 'node:child_process';
-import { openSync, closeSync } from 'node:fs';
+import { execFile, spawn } from 'node:child_process';
+import { openSync, closeSync, readFileSync, existsSync } from 'node:fs';
 import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
-// Task-scoped injection gate + render. This module is intentionally
-// dependency-light (pure tokenization, framing, and token estimation) so importing it
-// here does NOT drag the analyzer into the Pi host — orientation still comes
-// from the warm daemon over RPC (decision abee8e3e).
-import {
-  resolveInjectionConfig,
-  evaluateRelevanceGate,
-  renderInjectionBlock,
-  classifyTurnIntent,
-  pointerLineFor,
-  type LeanOrientResult,
-} from '../cli/commands/orient-inject-render.js';
 // The shared serve.json validator. Dependency-light (node builtins + the loopback
 // predicate) so it does not drag the analyzer into the Pi host, and it guarantees
 // Pi trusts the untrusted descriptor exactly as the CLI and MCP server do
 // (mcp-security: ServeDescriptorValidatedAtEveryReader).
 import {
   readServeDescriptor,
+  readServeDescriptorState,
   serveHttpBaseUrl,
   validateServeHealth,
   type ServeDescriptor,
   type ServeHealth,
 } from '../cli/commands/serve-descriptor.js';
+import { OPENLORE_PACKAGE_VERSION } from '../core/runtime/package-versions.js';
+import { sanitizeForTerminal } from '../utils/misc.js';
 import type { ContextInjectionConfig } from '../types/index.js';
 import {
   refuseRepoConfiguredEndpoint,
@@ -85,17 +82,20 @@ import { redirectConsoleToStderr } from '../utils/quiet-stdout.js';
 import {
   frameServedContent,
   readAnalysisContentProvenance,
-  reviewedFileContentProvenance,
+  specCorpusContentProvenance,
 } from '../core/services/served-content.js';
 import { safeJoin } from '../utils/path-confinement.js';
-import { globalOpenLoreConfigPath, readConfigObject, readLayeredConfig } from '../utils/config-layers.js';
+import { isOpenloreProject, openloreProjectRoot } from '../utils/project-root.js';
+import { globalOpenLoreConfigPath, readConfigObject, readLayeredConfig, readLayeredConfigSync } from '../utils/config-layers.js';
 // Functional readiness for the footer status. `health.ts` is kept dependency-light on purpose so
 // importing it does not load the daemon's stack into the host; `extension-imports.test.ts` guards it.
 import { openloreHealth, readWatcherState, type HealthResult } from '../api/health.js';
-import { OPENLORE_ANALYSIS_REL_PATH } from '../constants.js';
+import { FULL_PRESET, FULL_PRESET_ALIAS, OPENLORE_ANALYSIS_REL_PATH } from '../constants.js';
+import { proposalContextForPrompt } from '../cli/commands/proposal-context.js';
 import { REQUIRED_ANALYSIS_ARTIFACTS } from '../core/runtime/analysis-generation.js';
 import { runtimeDirOf } from '../core/runtime/analysis-ownership.js';
 import { OWNERSHIP_LOCK_FILE } from '../core/runtime/advisory-lock.js';
+import { countUnreviewedDecisions } from '../core/decisions/autopilot.js';
 
 // ── Config types & helpers ────────────────────────────────────────────────────
 
@@ -122,6 +122,7 @@ interface OpenLoreConfig {
   } | null;
   /** Task-scoped context injection settings (gate + token budget + opt-out). */
   contextInjection?: ContextInjectionConfig;
+  pi?: { contextMode?: PiContextMode; toolSurface?: PiToolSurface; spawnDaemon?: boolean };
   createdAt: string;
   lastRun: string | null;
 }
@@ -147,22 +148,6 @@ export async function readConfig(cwd: string): Promise<OpenLoreConfig | null> {
 }
 
 /**
- * Read just the `contextInjection` block, independent of `isUsableConfig`.
- * The injection opt-out (including user defaults) must work even before an LLM provider is configured —
- * `readConfig` returns null until `generation.provider` is set (a headless/rpc
- * session may never run the wizard), which would silently drop `mode: "off"`.
- * Mirrors the CLI path, which reads config unconditionally.
- */
-export async function readContextInjection(cwd: string): Promise<ContextInjectionConfig | undefined> {
-  try {
-    const raw = await readLayeredConfig(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')));
-    return raw && typeof raw === 'object'
-      ? (raw as { contextInjection?: ContextInjectionConfig }).contextInjection
-      : undefined;
-  } catch { return undefined; }
-}
-
-/**
  * Environment override for daemon spawn authority (change: extend-api-for-supervising-hosts).
  * Set by a supervising host that already runs one daemon per working tree, so an
  * extension-initiated spawn would produce a second, unsupervised process outliving the session.
@@ -172,7 +157,7 @@ const PI_NO_SPAWN_ENV = 'OPENLORE_PI_NO_SPAWN';
 /**
  * May this extension spawn a daemon of its own?
  *
- * Read like `readContextInjection` and NOT through `readConfig`: the opt-out must work before an
+ * Read directly and NOT through `readConfig`: the opt-out must work before an
  * LLM provider is configured, and `readConfig` returns null until `generation.provider` is set —
  * which would silently restore spawn authority the operator revoked. The environment variable wins
  * over the config key, because it is the host's per-process statement about who owns the process.
@@ -191,6 +176,20 @@ export async function piMaySpawnDaemon(cwd: string): Promise<boolean> {
 }
 
 export type PiToolSurface = 'lean' | 'all';
+export type PiSessionToolSurface = PiToolSurface | 'search';
+
+export type PiContextMode = 'on-demand' | 'full';
+
+/** Default Pi context mode avoids repeating repository-wide summaries on every turn. */
+export async function piContextMode(cwd: string): Promise<PiContextMode> {
+  try {
+    const raw = await readLayeredConfig(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')));
+    const pi = raw && typeof raw === 'object' ? (raw as { pi?: { contextMode?: unknown } | null }).pi : undefined;
+    return pi?.contextMode === 'full' ? 'full' : 'on-demand';
+  } catch {
+    return 'on-demand';
+  }
+}
 
 /**
  * Which OpenLore tools a Pi session starts with. Read like `piMaySpawnDaemon`, so it works before
@@ -205,6 +204,92 @@ export async function piToolSurface(cwd: string): Promise<PiToolSurface> {
   } catch {
     return 'lean';
   }
+}
+
+/** Read the initial surface synchronously so registration-time exposure honors `all`. */
+function piToolSurfaceAtLoad(cwd: string): PiToolSurface {
+  try {
+    const raw = readLayeredConfigSync(safeJoin(cwd, join(OPENLORE_DIR, 'config.json')));
+    const pi = raw && typeof raw === 'object' ? (raw as { pi?: { toolSurface?: unknown } | null }).pi : undefined;
+    return pi?.toolSurface === 'all' ? 'all' : 'lean';
+  } catch {
+    return 'lean';
+  }
+}
+
+/** Resolve Pi's configured tool_search without calling runtime actions during extension loading. */
+function piToolSearchEnabledAtLoad(cwd: string): boolean {
+  const defaultTools = ['read', 'bash', 'edit', 'write'];
+  let entries: string[] | undefined;
+  const readDefaultTools = (path: string): string[] | undefined => {
+    try {
+      const settings = JSON.parse(readFileSync(path, 'utf-8')) as { defaultTools?: unknown };
+      return Array.isArray(settings.defaultTools) && settings.defaultTools.every((entry) => typeof entry === 'string')
+        ? settings.defaultTools
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const merge = (base: string[] | undefined, overrides: string[] | undefined): string[] | undefined => {
+    if (!overrides) return base;
+    return overrides.every((entry) => /^[+-][^*]+$/.test(entry))
+      ? [...(base ?? []), ...overrides]
+      : overrides;
+  };
+  const agentDir = process.env.PI_CODING_AGENT_DIR
+    ? process.env.PI_CODING_AGENT_DIR.replace(/^~/, homedir())
+    : join(homedir(), '.pi', 'agent');
+  entries = merge(entries, readDefaultTools(join(agentDir, 'settings.json')));
+  entries = merge(entries, readDefaultTools(safeJoin(cwd, join('.pi', 'settings.json'))));
+
+  const args = process.argv;
+  const noTools = args.some((arg) => arg === '--no-tools' || arg === '-nt' || arg === '--no-builtin-tools' || arg === '-nbt');
+  const resolved = noTools ? [] : (() => {
+    const configured = entries ?? defaultTools;
+    const plain = configured.filter((entry) => !/^[+-][^*]+$/.test(entry));
+    const selected = plain.length > 0 || configured.length === 0 ? plain : defaultTools;
+    for (const entry of configured) {
+      if (entry.startsWith('+') && !selected.includes(entry.slice(1))) selected.push(entry.slice(1));
+      if (entry.startsWith('-')) {
+        const index = selected.indexOf(entry.slice(1));
+        if (index >= 0) selected.splice(index, 1);
+      }
+    }
+    return selected;
+  })();
+  const readCliList = (flags: readonly string[]): string[] | undefined => {
+    for (let i = 0; i < args.length; i += 1) {
+      if (!flags.includes(args[i]) || !args[i + 1]) continue;
+      return args[i + 1].split(',').map((name) => name.trim()).filter(Boolean);
+    }
+    return undefined;
+  };
+  const cliTools = readCliList(['--tools', '-t']);
+  let selected = resolved;
+  if (cliTools) {
+    selected = cliTools.some((entry) => entry.startsWith('+') || entry.startsWith('-'))
+      ? (() => {
+          const next = [...resolved];
+          for (const entry of cliTools) {
+            const name = entry.slice(1);
+            const index = next.indexOf(name);
+            if (entry.startsWith('+') && index < 0) next.push(name);
+            if (entry.startsWith('-') && index >= 0) next.splice(index, 1);
+          }
+          return next;
+        })()
+      : cliTools;
+  }
+
+  // Escape every regex metacharacter but `*` (a glob wildcard): an unescaped `?` in a
+  // user-supplied pattern made `new RegExp` throw and took the whole extension load down.
+  const matches = (pattern: string): boolean => {
+    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${escaped}$`).test('tool_search');
+  };
+  const excluded = readCliList(['--exclude-tools', '-xt']) ?? [];
+  return selected.some(matches) && !excluded.some(matches);
 }
 
 async function writeConfig(cwd: string, config: OpenLoreConfig, global = false): Promise<void> {
@@ -539,7 +624,7 @@ export async function runConfigWizard(
     lastRun: typeof existing?.lastRun === 'string' || existing?.lastRun === null ? existing.lastRun : null,
   };
 
-  await writeConfig(ctx.cwd, config, hooks.global);
+  await writeConfig(piProjectRoot(ctx.cwd), config, hooks.global);
   ui.notify(hooks.global ? `Global configuration saved to ${globalOpenLoreConfigPath()}.` : 'Configuration saved.', 'info');
 
   const generationChanged = generation.provider !== prevProvider || generation.model !== prevModel;
@@ -553,11 +638,14 @@ export async function runConfigWizard(
       const [exitCode, errText] = await new Promise<[number, string]>((resolve) => {
         const trySpawn = (cmd: string, args: string[]) => new Promise<[number, string] | null>((res) => {
           const chunks: Buffer[] = [];
+          // Pass env explicitly so the child honors the process's CURRENT environment
+          // (e.g. a PATH the host adjusted) rather than a stale snapshot — identical to the
+          // default inherited env in normal use, but it keeps resolution deterministic.
           const proc = process.platform === 'win32'
-            ? spawn('cmd.exe', ['/c', cmd, ...args], { cwd: ctx.cwd, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+            ? spawn('cmd.exe', ['/c', cmd, ...args], { cwd: piProjectRoot(ctx.cwd), env: process.env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
             // windowsHide is a documented no-op off Windows; set here too so the invariant is
             // uniform across both branches rather than a carve-out the guard has to know about.
-            : spawn(cmd, args, { cwd: ctx.cwd, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+            : spawn(cmd, args, { cwd: piProjectRoot(ctx.cwd), env: process.env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
           proc.stderr?.on('data', (d: Buffer) => chunks.push(d));
           proc.on('close', (code) => res([code ?? 1, Buffer.concat(chunks).toString().trim()]));
           proc.on('error', () => res(null));
@@ -582,7 +670,20 @@ export async function runConfigWizard(
 interface Daemon {
   baseUrl: string;
   token?: string;
+  /**
+   * Process id `.openlore/serve.json` announced when this daemon was resolved. A cached daemon is
+   * reused only while the descriptor still names this pid at this address: another session or the
+   * CLI can replace the daemon while an older one keeps answering on its old port, and serving the
+   * status (or tool calls) from that one shows a stale state. Absent for an injected test daemon.
+   */
+  pid?: number;
   incompatibility?: string;
+  /** A repository-bound health response found a version mismatch or missing Pi tools. */
+  autoRecoverable?: boolean;
+  /** Preset reported by the authenticated daemon, reused for automatic recovery. */
+  restartPreset?: string;
+  /** Identity of the older daemon, re-checked immediately before automatic recovery stops it. */
+  restartExpect?: { pid: number; version: string };
 }
 
 interface DaemonProbe {
@@ -592,12 +693,14 @@ interface DaemonProbe {
 
 const HEALTH_TIMEOUT_MS = 8000;
 const HEALTH_POLL_MS = 150;
-export const PI_ORIENT_TIMEOUT_MS = 4_000;
 export const PI_SPEC_INDEX_MAX_DOMAINS = 50;
 // Generous per-probe timeout: a cold Node HTTP server on Windows can be slow to
 // answer the first /health. Too short a timeout misreads a live daemon as dead,
 // so we spawn a fresh one and orphan the previous — orphans pile up in RAM.
 const HEALTH_PROBE_TIMEOUT_MS = 2500;
+// The CLI serializes stop behind startup (30s) and drains rebuilds (up to 65s).
+const DAEMON_STOP_TIMEOUT_MS = 120_000;
+const execFileAsync = promisify(execFile);
 // Keepalive: while a session is open, ping the daemon's /health on this interval
 // so the in-use daemon never hits the serve idle-shutdown (default 15 min) mid-
 // session. Must stay well below that window — at ~1/3 of it, two pings can be
@@ -698,10 +801,22 @@ export function piDaemonSpawnCommand(cwd: string): { command: string; args: stri
   };
 }
 
+/**
+ * Is a cached daemon still the one `.openlore/serve.json` announces for this working tree? A
+ * draining or missing announcement, another pid, or another address means it was replaced or is
+ * going away. A daemon without a recorded pid has no identity to compare and is kept. @internal
+ */
+export async function piDaemonStillAnnounced(cwd: string, daemon: { baseUrl: string; pid?: number }): Promise<boolean> {
+  if (daemon.pid === undefined) return true;
+  const desc = await readDescriptor(cwd);
+  return desc !== null && desc.pid === daemon.pid && serveHttpBaseUrl(desc.host, desc.port) === daemon.baseUrl;
+}
+
 function incompatibleDaemon(desc: ServeDescriptor): Daemon {
   return {
     baseUrl: serveHttpBaseUrl(desc.host, desc.port),
     token: desc.token,
+    pid: desc.pid,
     incompatibility:
       'The running openlore daemon does not report an authenticated, enforced tool surface for ' +
       'this repository. Stop the legacy or incompatible process manually, upgrade OpenLore, ' +
@@ -709,17 +824,67 @@ function incompatibleDaemon(desc: ServeDescriptor): Daemon {
   };
 }
 
+/** Return true only when a parseable release version is strictly older. */
+function isOlderPackageVersion(candidate: string, current: string): boolean {
+  const parse = (value: string) => {
+    const match = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value);
+    const prerelease = match?.[4]?.split('.');
+    if (prerelease?.some((part) => /^\d+$/.test(part) && part.length > 1 && part.startsWith('0'))) return null;
+    return match
+      ? { core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])], prerelease }
+      : null;
+  };
+  const a = parse(candidate);
+  const b = parse(current);
+  if (!a || !b) return false;
+  for (let i = 0; i < a.core.length; i++) {
+    if (a.core[i] !== b.core[i]) return a.core[i] < b.core[i];
+  }
+  if (!a.prerelease) return false;
+  if (!b.prerelease) return true;
+  for (let i = 0; i < Math.max(a.prerelease.length, b.prerelease.length); i++) {
+    const left = a.prerelease[i];
+    const right = b.prerelease[i];
+    if (left === undefined) return true;
+    if (right === undefined) return false;
+    if (left === right) continue;
+    const leftNumeric = /^\d+$/.test(left);
+    const rightNumeric = /^\d+$/.test(right);
+    if (leftNumeric && rightNumeric) return left.length === right.length ? left < right : left.length < right.length;
+    if (leftNumeric !== rightNumeric) return leftNumeric;
+    return left < right;
+  }
+  return false;
+}
+
 function daemonFromHealth(desc: ServeDescriptor, health: ServeHealth): Daemon {
   const missing = missingDaemonTools(health.tools, NAV_TOOLS.map((tool) => tool.name));
+  const olderVersion = health.version !== undefined && isOlderPackageVersion(health.version, OPENLORE_PACKAGE_VERSION);
+  // An older version alone is not an incompatibility: a tool-complete daemon stays usable when it
+  // cannot be replaced (spawn opt-out, refused stop) rather than locking Pi out entirely.
+  const autoRecoverable = olderVersion;
   return {
     baseUrl: serveHttpBaseUrl(desc.host, desc.port),
     token: desc.token,
+    pid: desc.pid,
+    ...(autoRecoverable
+      ? {
+          autoRecoverable: true,
+          restartPreset: health.preset,
+          restartExpect: { pid: health.pid, version: health.version as string },
+        }
+      : {}),
     ...(missing.length > 0
       ? {
           incompatibility:
-            `The running openlore daemon does not expose ${missing.length} Pi tool(s), including ` +
-            `${missing.slice(0, 3).join(', ')}. Run \`openlore serve --stop\`, then retry so Pi ` +
-            'can start its required full-preset daemon.',
+            (olderVersion
+              ? `The running daemon version ${health.version} is older than the installed extension version ${OPENLORE_PACKAGE_VERSION}. `
+              : '') +
+            `It does not expose ${missing.length} Pi tool(s), including ${missing.slice(0, 3).join(', ')}. ` +
+            (autoRecoverable
+              ? 'Automatic recovery could not replace it; run /openlore restart in Pi to retry. '
+              : 'The current preset omits Pi tools; run /openlore restart in Pi to switch to the full preset. ') +
+            'If externally supervised, restart it through the supervising host instead.',
         }
       : {}),
   };
@@ -730,7 +895,7 @@ export type EnsureDaemonResult =
   | {
       daemon: null;
       failure: string;
-      failureKind: 'draining' | 'launch' | 'preparation' | 'early-exit' | 'health-timeout' | 'spawn-disabled';
+      failureKind: 'draining' | 'launch' | 'preparation' | 'early-exit' | 'health-timeout' | 'spawn-disabled' | 'stop' | 'unknown-preset';
     };
 
 export function shouldNegativeCacheDaemonFailure(
@@ -858,6 +1023,91 @@ export async function ensureDaemon(cwd: string): Promise<Daemon | null> {
   return (await ensureDaemonResult(cwd)).daemon;
 }
 
+/** Whether the installed `serve` accepts this preset name (same rule as `runServe`). */
+async function isKnownServePreset(preset: string): Promise<boolean> {
+  if (preset === FULL_PRESET || preset === FULL_PRESET_ALIAS) return true;
+  // Lazy: the MCP registry is heavy and only this recovery path needs it.
+  const { TOOL_PRESETS } = await import('../cli/commands/mcp.js');
+  return Object.hasOwn(TOOL_PRESETS, preset);
+}
+
+/** Explicit user recovery, never automatic takeover of a shared daemon. */
+export async function restartPiDaemon(
+  cwd: string,
+  options: {
+    /** Internal test seams; production always uses this package's CLI. */
+    stop?: { command: string; args: string[] };
+    launch?: { command: string; args: string[] };
+    timeoutMs?: number;
+    preset?: string;
+    /** Stop only while the announced daemon is still this one (automatic recovery). */
+    expect?: { pid: number; version: string };
+  } = {},
+): Promise<EnsureDaemonResult> {
+  if (!(await piMaySpawnDaemon(cwd))) {
+    return {
+      daemon: null,
+      failureKind: 'spawn-disabled',
+      failure: 'OpenLore daemon restart is disabled by the host or pi.spawnDaemon. ' +
+        'Restart or upgrade the daemon through the supervising host instead.',
+    };
+  }
+  // The reported preset comes from the OLD daemon; this release may have removed or renamed it.
+  // Stopping first would leave no daemon when the replacement then refuses the preset.
+  if (options.preset !== undefined && !(await isKnownServePreset(options.preset))) {
+    return {
+      daemon: null,
+      failureKind: 'unknown-preset',
+      failure: `The running daemon's preset is not known to this OpenLore release, so it was not ` +
+        'replaced automatically. Run /openlore restart in Pi to switch to the full preset.',
+    };
+  }
+  const packaged = piDaemonSpawnCommand(cwd);
+  const stop = options.stop ?? {
+    command: packaged.command,
+    args: [packaged.args[0], 'serve', '--directory', cwd, '--stop'],
+  };
+  const launch = options.launch ?? {
+    command: packaged.command,
+    args: [packaged.args[0], 'serve', '--directory', cwd, '--preset', options.preset ?? PI_DAEMON_PRESET],
+  };
+  if (options.expect) {
+    // Re-check right before the stop: another Pi session on this repository may already have
+    // replaced the older daemon, and stopping its current-version successor would interrupt it.
+    // If the announcement changed, adopt (or start) whatever is there instead of stopping.
+    // A window remains: the CLI stop re-reads serve.json after waiting on the startup lock and
+    // cannot be told "stop only PID X", so a replacement published inside that wait can still be
+    // stopped. Closing it fully needs a PID-bound stop in the CLI.
+    const current = await readDescriptor(cwd);
+    const probe = current ? await probeHealth(current, cwd) : null;
+    if (probe?.health?.pid !== options.expect.pid || probe.health.version !== options.expect.version) {
+      return ensureDaemonResult(cwd, { launch, timeoutMs: options.timeoutMs });
+    }
+  }
+  try {
+    // Reuse the CLI's startup lock, authenticated root/PID health proof, graceful
+    // shutdown, and bounded drain. Never signal the repo-writable descriptor PID.
+    await execFileAsync(stop.command, stop.args, {
+      timeout: DAEMON_STOP_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    // Some CLI refusal paths log a warning without a nonzero exit. A draining
+    // or still-announced instance must never be followed by a replacement spawn.
+    const remaining = await readServeDescriptorState(
+      safeJoin(cwd, join(OPENLORE_DIR, 'serve.json')), { includeDraining: true },
+    );
+    if (remaining.kind !== 'absent') throw new Error('daemon is still announced');
+  } catch {
+    return {
+      daemon: null,
+      failureKind: 'stop',
+      failure: 'OpenLore could not safely stop the announced daemon. No replacement was started. ' +
+        'A legacy or unverified daemon must be stopped by its owner; see .openlore/serve.log.',
+    };
+  }
+  return ensureDaemonResult(cwd, { launch, timeoutMs: options.timeoutMs });
+}
+
 export async function callTool(daemon: Daemon, name: string, args: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<unknown> {
   if (daemon.incompatibility) return { error: daemon.incompatibility };
   const headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -892,19 +1142,6 @@ export class PiDaemonConnectionError extends Error {
   }
 }
 
-/** Bound a best-effort Pi operation without abandoning useful background work. */
-export async function awaitWithSignal<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted();
-  return await new Promise<T>((resolve, reject) => {
-    const abort = () => reject(signal.reason);
-    signal.addEventListener('abort', abort, { once: true });
-    void work.then(
-      (value) => { signal.removeEventListener('abort', abort); resolve(value); },
-      (error) => { signal.removeEventListener('abort', abort); reject(error); },
-    );
-  });
-}
-
 export function isUsableDaemon(daemon: Daemon): boolean {
   return daemon.incompatibility === undefined;
 }
@@ -927,6 +1164,8 @@ export interface PiStatusFacts {
   daemon: PiDaemonView;
   /** Absent when the health read failed: readiness is then unknown, never assumed. */
   health?: Pick<HealthResult, 'index' | 'watcher'>;
+  /** Auto-accepted decisions awaiting human review (change: default-decision-autopilot-with-visible-trace). */
+  unreviewed?: number;
 }
 
 /**
@@ -936,7 +1175,8 @@ export interface PiStatusFacts {
  * ready index and a usable daemon. @internal
  */
 export function formatPiStatus(facts: PiStatusFacts): string {
-  const say = (text: string) => `${PI_STATUS_KEY}: ${text}`;
+  const review = facts.unreviewed ? ` · ${facts.unreviewed} to review` : '';
+  const say = (text: string) => `${PI_STATUS_KEY}: ${text}${review}`;
   if (facts.daemon === 'connecting') return say('connecting…');
   if (!facts.health) return say('status unknown');
   switch (facts.health.index) {
@@ -983,7 +1223,23 @@ type PiWatcherReader = (cwd: string) => Promise<HealthResult['watcher']>;
 /** Set the status only where the host has a UI; a failing host call never escapes. */
 function setPiStatus(ctx: ExtensionContext, text: string | undefined): void {
   try {
-    if (ctx.hasUI && typeof ctx.ui?.setStatus === 'function') ctx.ui.setStatus(PI_STATUS_KEY, text);
+    if (!ctx.hasUI || typeof ctx.ui?.setStatus !== 'function') return;
+    // The color follows the readiness label, not the trailing review count.
+    const label = text?.slice(`${PI_STATUS_KEY}: `.length).split(' · ')[0];
+    const color = label === 'ready'
+      ? 'success'
+      : label === 'connecting…' || label === 'analyzing…'
+        ? 'accent'
+        : label === 'index degraded' || label === 'daemon incompatible' || label === 'daemon unavailable'
+          ? 'error'
+          : label === 'ready (watcher stopped)' || label === 'no index (run openlore analyze)' ||
+              label === 'daemon not started (spawn disabled)' || label === 'status unknown'
+            ? 'warning'
+            : undefined;
+    const rendered = text && color && typeof ctx.ui.theme?.fg === 'function'
+      ? ctx.ui.theme.fg(color, text)
+      : text;
+    ctx.ui.setStatus(PI_STATUS_KEY, rendered);
   } catch {
     // Advisory only (spec: PiStatusFollowsTheSessionLifecycle).
   }
@@ -1118,6 +1374,46 @@ export const NAV_TOOLS: NavToolSpec[] = [
     }),
   },
   {
+    name: 'verify_change',
+    label: 'openlore verify_change',
+    description: 'Before landing a change, get ONE severity-ranked checklist of what it breaks and what to re-run: each item names its subject, the check that found it, a severity, and the single next action, plus the tests to run. Composes blast_radius and structural_diff; advisory, runs nothing and edits nothing.',
+    guideline: 'Right before you commit or finish a change, call openlore_verify_change to get a single ordered action list — the breaks to fix and the tests to run — distilled from the diff. With no arguments it uses your uncommitted changes (diff vs HEAD). It is a grader, not an author: act on the list; it runs and edits nothing. Its sibling blast_radius returns the fuller structured briefing.',
+    parameters: Type.Object({
+      baseRef: Type.Optional(Type.String({ description: 'Git ref to diff the working tree against (e.g. "HEAD", "main"). Optional — defaults to HEAD (uncommitted changes).' })),
+    }),
+  },
+  {
+    name: 'certify_provenance',
+    label: 'openlore certify_provenance',
+    description: 'Emit a reproducible, content-addressed record of what a change does (blast radius, paths newly opened into a declared surface, drifted specs, tests to run, structural delta), for attachment to SLSA/in-toto provenance. OpenLore emits, it does not sign.',
+    guideline: 'When a change needs a verifiable provenance record (a CI attestation or audit trail), call openlore_certify_provenance to emit a content-addressed certificate of what the change does — as an in-toto predicate (format "in-toto") or JSON. Any consumer recomputes it to verify the digest. A bad base is fatal; it signs nothing.',
+    parameters: Type.Object({
+      baseRef: Type.Optional(Type.String({ description: 'Git ref to diff against (default HEAD).' })),
+      change: Type.Optional(Type.String({ description: 'Change id recorded on the certificate (default "working-tree").' })),
+      format: Type.Optional(Type.String({ description: 'Output shape: "in-toto" for an unsigned Statement v1 envelope (shape structurally checked locally), or "json" (default json).' })),
+    }),
+  },
+  {
+    name: 'certify_merge',
+    label: 'openlore certify_merge',
+    description: 'Before landing two branches that merge cleanly, check whether one side breaks what the other calls: build the call graph at the merge-base and each side, and report where one adds a call into a symbol the other changed incompatibly or removed. Advisory, a sound lower bound (never "safe").',
+    guideline: 'Before merging two branches (or landing a PR onto its base), call openlore_certify_merge with `ours` and `theirs` (git refs) to catch the "merges cleanly but the combination is broken" failure textual merge misses. Verdicts are incompatible / potentially-incompatible, never "safe".',
+    parameters: Type.Object({
+      ours: Type.String({ description: 'One side to merge (a git ref).' }),
+      theirs: Type.String({ description: 'The other side to merge (a git ref).' }),
+      base: Type.Optional(Type.String({ description: 'Merge base (default: the git merge-base of ours and theirs).' })),
+    }),
+  },
+  {
+    name: 'fleet_status',
+    label: 'openlore fleet_status',
+    description: 'Coordinating parallel branches off a moving base: re-check each recorded coordination verdict (a clean blast radius, a stable surface, a passed merge check) against the current graph — still-valid / carried / invalidated / needs-reverification — and surface the coordination arc. A verdict is never served fresh once its base moved.',
+    guideline: 'When coordinating several in-flight branches, call openlore_fleet_status to see which recorded verdicts still hold after the base moved, and the overall coordination picture (dispatch → in-flight → landing). Read-only and advisory.',
+    parameters: Type.Object({
+      branches: Type.Optional(Type.Array(Type.String(), { description: 'In-flight branches to compose the arc for.' })),
+    }),
+  },
+  {
     name: 'structural_diff',
     label: 'openlore structural_diff',
     description: 'Show what changed structurally between two states (working tree vs a ref, or two refs): functions and call edges added/removed, signature changes, and the existing callers left STALE by a moved signature.',
@@ -1134,8 +1430,8 @@ export const NAV_TOOLS: NavToolSpec[] = [
     description: 'Verify a structural claim against the graph before asserting it — "X is dead", "Y calls Z", "Z is safe to change" — or a decision-authority claim ("ADR abc12345 governs this") before citing it, and get a deterministic verdict (confirmed / refuted / unverifiable) with a citation receipt.',
     guideline: 'Before you tell the user a structural fact ("X is dead", "Y calls Z", "this is safe to change"), or cite a decision id to a human, call openlore_verify_claim with `kind` and `subject` (and `object` for relational kinds: calls, reaches, impacts). For `decision-current`, `subject` is the 8-character decision id — a "refuted" verdict names the live superseder to cite instead. An "unverifiable" verdict means hedge or read the source rather than assert.',
     parameters: Type.Object({
-      kind: StringEnum(['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current'] as const, { description: 'REQUIRED. The kind of claim to verify (structural, or decision-current for decision authority).' }),
-      subject: Type.String({ description: 'REQUIRED. What the claim is about: a function/method name for structural kinds, or an 8-character decision id for decision-current.' }),
+      kind: StringEnum(['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current', 'decision-governed', 'endpoint-implemented', 'endpoint-consumed', 'lease-current'] as const, { description: 'REQUIRED. The kind of claim to verify.' }),
+      subject: Type.String({ description: 'REQUIRED. A symbol; a decision id; "METHOD /path"; or a leaseToken.' }),
       object: Type.Optional(Type.String({ description: 'The second symbol — required for relational kinds (calls, reaches, impacts).' })),
     }),
   },
@@ -1356,12 +1652,28 @@ export const NAV_TOOLS: NavToolSpec[] = [
         Type.Object({
           symbol: Type.Optional(Type.String({ description: 'Function/method name (optional).' })),
           file: Type.Optional(Type.String({ description: 'Repo-relative file path (optional).' })),
+          span: Type.Optional(Type.String({ minLength: 1, maxLength: 2000, description: 'Exact text inside the symbol (optional); only edits to it drift the memory.' })),
         }),
         { description: 'Code this memory is about; each anchor names a symbol and/or file so the memory self-invalidates when that code changes.' },
       )),
       type: Type.Optional(StringEnum(['invariant', 'gotcha', 'rationale', 'convention', 'preference', 'todo', 'note'] as const, { description: 'Classification (default note); never inferred.' })),
       tags: Type.Optional(Type.Array(Type.String(), { description: 'Optional retrieval tags.' })),
       supersedes: Type.Optional(Type.String({ description: 'Id of a prior memory to retire (kept queryable via asOf).' })),
+      trigger: Type.Optional(Type.Object({
+        fileGlob: Type.Optional(Type.String({ minLength: 1, maxLength: 256, description: 'Glob over touched files, e.g. "src/routes/**" (* ? ** only).' })),
+        symbolPattern: Type.Optional(Type.String({ minLength: 1, maxLength: 256, description: 'Glob over touched symbol names, e.g. "handle*".' })),
+        specDomain: Type.Optional(Type.String({ minLength: 1, maxLength: 256, description: 'A spec domain the task touches.' })),
+        withinHops: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: 'Anchor is within N call hops of a touched symbol.' })),
+      }, { additionalProperties: false, maxProperties: 1, description: 'Optional: give exactly one predicate; the memory is pushed into orient/blast_radius briefings when it matches what they touch.' })),
+      pinned: Type.Optional(Type.Boolean({ description: 'Push this memory into every full (non-lean) orient briefing (at most 10 notes are pushed; the rest are counted).' })),
+      claims: Type.Optional(Type.Array(
+        Type.Object({
+          kind: StringEnum(['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current'] as const),
+          subject: Type.String({ minLength: 1, maxLength: 256, description: 'Symbol name, or a decision id for decision-current.' }),
+          object: Type.Optional(Type.String({ minLength: 1, maxLength: 256, description: 'Second symbol, for calls / reaches / impacts.' })),
+        }, { additionalProperties: false }),
+        { maxItems: 10, description: 'Optional: verify_claim claims the memory rests on. Each must hold now; recall checks them again and moves the memory out of the authoritative set when one no longer holds.' },
+      )),
     }),
   },
   {
@@ -1473,6 +1785,10 @@ export const PI_TOOL_SNIPPETS: Record<string, string> = {
   select_tests: 'Tests to run for given functions or your uncommitted changes.',
   get_test_coverage: 'Which code has tests and which does not.',
   blast_radius: 'Pre-commit briefing: callers, tests to run, specs and decisions at risk.',
+  verify_change: 'Pre-commit checklist: what the diff breaks and the tests to run, severity-ranked.',
+  certify_provenance: 'Reproducible, content-addressed record of what a change does, for SLSA/in-toto.',
+  certify_merge: 'Two branches merge cleanly but break in combination — the semantic conflict check.',
+  fleet_status: 'Which recorded coordination verdicts still hold after the base moved, plus the arc.',
   structural_diff: 'Functions, edges, and signatures changed between two states, plus stale callers.',
   verify_claim: 'Check a structural fact or a decision citation before you state it.',
   suggest_insertion_points: 'Ranked places to add new code.',
@@ -1510,24 +1826,35 @@ export const PI_TOOL_SNIPPETS: Record<string, string> = {
 
 // Tools active when a Pi session starts (names without the `openlore_` prefix):
 // the MCP `substrate` preset — the default `openlore install` wires for Claude
-// Code — plus the two Pi-only utilities. extension.test.ts derives this set from
-// TOOL_PRESETS.substrate so the two surfaces cannot drift.
+// Code — minus PI_ON_DEMAND_SUBSTRATE_TOOLS, plus the two Pi-only utilities.
+// extension.test.ts derives this set from TOOL_PRESETS.substrate so the two
+// surfaces cannot drift.
 export const PI_LEAN_TOOLS: readonly string[] = [
   'orient', 'search_code', 'get_subgraph', 'trace_execution_path',
   'analyze_impact', 'suggest_insertion_points', 'get_function_skeleton',
   'get_landmarks', 'get_map', 'find_path',
   'recall', 'verify_claim', 'blast_radius',
-  'prepare_spec_generation', 'prepare_spec_repair',
   'configure', 'activate_tools',
 ];
+
+/** Tools that stay directly visible when Pi's native tool_search is active. */
+export const PI_SEARCH_TOOLS: readonly string[] = ['orient', 'search_code'];
+
+// Substrate tools Pi keeps out of the lean set: an MCP host cannot turn a tool on
+// mid-session, but Pi can, so task-specific spec authoring waits in the `specs`
+// group instead of adding its descriptions to every prompt.
+export const PI_ON_DEMAND_SUBSTRATE_TOOLS: readonly string[] = ['prepare_spec_generation', 'prepare_spec_repair'];
 
 // Task groups openlore_activate_tools turns on. Every registered tool outside
 // PI_LEAN_TOOLS belongs to exactly one group (guarded in extension.test.ts).
 // Groups are task-shaped, not capability families: `navigate` alone holds most tools.
 export const PI_TOOL_GROUPS: Record<string, readonly string[]> = {
-  specs: ['search_specs', 'get_spec', 'list_spec_domains', 'search_unified', 'check_spec_drift', 'audit_spec_coverage'],
+  specs: [
+    'search_specs', 'get_spec', 'list_spec_domains', 'search_unified', 'check_spec_drift', 'audit_spec_coverage',
+    ...PI_ON_DEMAND_SUBSTRATE_TOOLS,
+  ],
   memory: ['remember', 'record_decision', 'list_decisions', 'approve_decision', 'reject_decision', 'sync_decisions'],
-  review: ['structural_diff', 'select_tests', 'get_test_coverage', 'briefing_since', 'certify_public_surface'],
+  review: ['structural_diff', 'verify_change', 'certify_provenance', 'certify_merge', 'fleet_status', 'select_tests', 'get_test_coverage', 'briefing_since', 'certify_public_surface'],
   quality: [
     'get_refactor_report', 'get_health_map', 'get_critical_hubs', 'get_god_functions',
     'get_architecture_overview', 'get_surprising_connections', 'find_clones', 'get_style_fingerprint',
@@ -1551,14 +1878,14 @@ export function piRegisteredToolNames(): string[] {
  * tools the host had already turned off (`hostExcluded`) stay off.
  */
 export function piSessionActiveTools(
-  surface: PiToolSurface,
+  surface: PiSessionToolSurface,
   active: readonly string[],
   hostExcluded: ReadonlySet<string>,
 ): string[] {
   const registered = new Set(piRegisteredToolNames());
   const wanted = surface === 'all'
     ? [...registered].filter((name) => name !== PI_ACTIVATOR_TOOL)
-    : PI_LEAN_TOOLS.map((name) => PI_TOOL_PREFIX + name);
+    : (surface === 'search' ? PI_SEARCH_TOOLS : PI_LEAN_TOOLS).map((name) => PI_TOOL_PREFIX + name);
   return [
     ...active.filter((name) => !registered.has(name)),
     ...wanted.filter((name) => !hostExcluded.has(name)),
@@ -1615,6 +1942,7 @@ export function piActivatorDescription(): string {
     .map(([group, tools]) => `- ${group}: ${tools.map((name) => PI_TOOL_PREFIX + name).join(', ')}`);
   return [
     'Turn on more openlore tools for the rest of this session. Pass group names, or the name of any tool below.',
+    'To create a spec from code or repair an existing spec, turn on the specs group.',
     ...lines,
   ].join('\n');
 }
@@ -1624,9 +1952,10 @@ export function piActivatorDescription(): string {
  * `estimatePiStandingTokens`. Each entry records its measured baseline and bounded headroom, so
  * raising a budget changes both a number and its rationale (the STANDING_CONTEXT_BUDGETS pattern).
  */
-export const PI_STANDING_CONTEXT_BUDGETS: Record<PiToolSurface, { baselineTokens: number; maxTokens: number; rationale: string }> = {
-  lean: { baselineTokens: 3_089, maxTokens: 3_300, rationale: 'Measured baseline plus 6.8% headroom.' },
-  all: { baselineTokens: 7_445, maxTokens: 7_950, rationale: 'Measured baseline plus 6.8% headroom.' },
+export const PI_STANDING_CONTEXT_BUDGETS: Record<PiSessionToolSurface, { baselineTokens: number; maxTokens: number; rationale: string }> = {
+  lean: { baselineTokens: 2_977, maxTokens: 3_180, rationale: 'Includes the configuration workflow actions on openlore_configure (188 tokens, loosely typed arguments); measured baseline plus 6.8% headroom.' },
+  search: { baselineTokens: 240, maxTokens: 300, rationale: 'Measured budget for orient and search_code; Pi tool_search loads specialized tools only when requested.' },
+  all: { baselineTokens: 8_825, maxTokens: 9_400, rationale: 'Grew with verify_change, certify_provenance, certify_merge, and fleet_status (the moat/interop features); measured baseline plus 6.5% headroom.' },
 };
 
 /** Deterministic estimate (characters / 4) of what the given registered tools add to the prompt. */
@@ -1652,6 +1981,10 @@ export function estimatePiStandingTokens(tools: ReadonlyArray<{
 // conclusion tool fails CI until its author makes this decision explicitly, the
 // same fails-until-you-classify discipline tool-contract.test.ts enforces.
 export const PI_EXCLUDED_CONCLUSION_TOOLS: Record<string, string> = {
+  configure_openlore: 'Projected through the native openlore_configure workflow; does not require a daemon.',
+  declare_footprint: 'opt-in coordination preset write surface; `openlore footprint` serves it from the CLI.',
+  certify_service_contract: 'opt-in full-preset API-contract check; `openlore certify-service-contract` serves it from the CLI.',
+  get_handoff_briefing: 'Session succession reaches Pi through its compaction event (`session_before_compact`) in add-agent-loop-hooks-subagents-codex-pi; until then `openlore handoff` serves it from the CLI.',
   explain_retrieval_miss: 'opt-in full-preset retrieval diagnostic; Pi exposes the primary search_code/search_specs paths',
   prepare_spec_generation: 'surfaced by the dedicated openlore_prepare_spec_generation entry point',
   prepare_spec_repair: 'surfaced by the dedicated openlore_prepare_spec_repair entry point',
@@ -1700,8 +2033,13 @@ export const PI_EXCLUDED_CONCLUSION_TOOLS: Record<string, string> = {
   get_change_coupling: 'git co-change/churn conclusion — deferred from the native surface pending demand',
 };
 
+/**
+ * Every Pi tool answer is built here, so this is where repository-derived bytes are screened on
+ * the Pi surface — the counterpart of `capStructuredResult` on the MCP transport. `details` is the
+ * structured passthrough a host consumes programmatically and is left exactly as computed.
+ */
 function toolResult(text: string, details: unknown = null): AgentToolResult<unknown> {
-  return { content: [{ type: 'text', text }], details };
+  return { content: [{ type: 'text', text: sanitizeForTerminal(text, { keepNewlines: true }) }], details };
 }
 
 /**
@@ -1920,13 +2258,150 @@ export function formatToolResult(result: unknown, toolName?: string): string {
 
 /** Bounded runtime overrides for the extension. @internal */
 export interface PiExtensionRuntime {
-  orientTimeoutMs?: number;
   /** Replaces the functional-readiness read behind the footer status. */
   readHealth?: PiHealthReader;
   /** Replaces the watcher-only probe used on a cached health read. */
   readWatcher?: PiWatcherReader;
   /** Replaces daemon discovery/spawn. */
   resolveDaemon?: (cwd: string) => Promise<EnsureDaemonResult>;
+  /** Replaces explicit daemon restart. */
+  restartDaemon?: (
+    cwd: string,
+    preset?: string,
+    expect?: { pid: number; version: string },
+  ) => Promise<EnsureDaemonResult>;
+  /** Replaces the child process that runs one agent-loop moment (tests). */
+  runLoopMoment?: (moment: string, payload: Record<string, unknown>, cwd: string, signal?: AbortSignal) => Promise<string | undefined>;
+}
+
+/** Each moment's own limit in the hook, plus node startup and the session reads outside its race. */
+const LOOP_MOMENT_TIMEOUT_MS: Record<string, number> = { 'after-tools': 20_000, 'after-compact': 35_000 };
+const LOOP_MOMENT_MAX_STDOUT = 256 * 1024;
+/** Children at once: a parallel batch of edits must not start one node process per call. */
+const LOOP_MOMENT_CONCURRENCY = 2;
+
+/**
+ * The node runtime to run the CLI with: Pi's own executable only when it is node (or bun), never a
+ * compiled Pi binary, which would read the payload as a prompt. Undefined: no runtime found.
+ */
+function nodeRuntime(): string | undefined {
+  const exe = basename(process.execPath).toLowerCase().replace(/\.exe$/, '');
+  if (exe === 'node' || exe === 'nodejs' || exe === 'bun') return process.execPath;
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (!dir) continue;
+    for (const name of process.platform === 'win32' ? ['node.exe'] : ['node']) {
+      const candidate = join(dir, name);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+/** Whether a file Pi touched lies in an OpenLore project (the hook's own root walk). */
+export function inOpenloreProject(cwd: string, file?: string): boolean {
+  return openloreProjectRoot(cwd) !== undefined || (!!file && openloreProjectRoot(dirname(resolvePath(cwd, file))) !== undefined);
+}
+
+/**
+ * The project root for a Pi working directory: the nearest directory at or above `cwd` that holds a
+ * project `.openlore/config.json` or `.openlore/analysis/`, else the nearest git root, else `cwd`
+ * itself. The home directory never counts: its `.openlore/` holds the user-level config. Pi can be
+ * started in a subdirectory (`ui/`, `server/`); the daemon, status, config and context must still
+ * describe the project, not create a second `.openlore/` in that subdirectory. @internal
+ */
+export function piProjectRoot(cwd: string): string {
+  const home = resolvePath(process.env.OPENLORE_HOME ?? homedir());
+  const start = resolvePath(cwd);
+  for (let dir = start; dir !== home; dir = dirname(dir)) {
+    if (isOpenloreProject(dir)) return dir;
+    if (existsSync(join(dir, '.git'))) return dir;
+    if (dirname(dir) === dir) break;
+  }
+  return cwd;
+}
+
+/** A path as Pi's tools resolve it: a leading `@` dropped, `~` expanded. */
+export function piToolPath(path: string): string {
+  const p = path.startsWith('@') ? path.slice(1) : path;
+  return p === '~' ? homedir() : p.startsWith('~/') ? join(homedir(), p.slice(2)) : p;
+}
+
+let loopRunning = 0;
+const loopWaiting: Array<() => void> = [];
+async function withLoopSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (loopRunning >= LOOP_MOMENT_CONCURRENCY) await new Promise<void>(r => loopWaiting.push(r));
+  loopRunning++;
+  try { return await fn(); } finally { loopRunning--; loopWaiting.shift()?.(); }
+}
+
+/**
+ * Run one agent-loop moment (`openlore hook <moment>`) in a child process and return its
+ * `additionalContext`: the analyzer never loads in the Pi host (change:
+ * add-agent-loop-hooks-pi-and-task-created). Undefined on silence, timeout, abort, or any failure.
+ */
+export async function runLoopMomentChild(moment: string, payload: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<string | undefined> {
+  const runtime = nodeRuntime();
+  if (!runtime || signal?.aborted) return undefined;
+  const cliEntry = fileURLToPath(new URL('../cli/index.js', import.meta.url));
+  return withLoopSlot(() => new Promise<string | undefined>((resolveResult) => {
+    let out = '';
+    let settled = false;
+    let child: ReturnType<typeof spawn> | undefined;
+    const onAbort = () => { child?.kill(); done(undefined); };
+    const done = (v: string | undefined) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      resolveResult(v);
+    };
+    const timer = setTimeout(() => { child?.kill(); done(undefined); }, LOOP_MOMENT_TIMEOUT_MS[moment] ?? 20_000);
+    timer.unref?.();
+    if (signal?.aborted) { done(undefined); return; }
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      child = spawn(runtime, [cliEntry, 'hook', moment, '--harness', 'pi'], { cwd, env: process.env, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+    } catch { done(undefined); return; }
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (d: string) => {
+      out += d;
+      if (out.length > LOOP_MOMENT_MAX_STDOUT) { child?.kill(); done(undefined); }
+    });
+    child.on('error', () => done(undefined));
+    child.on('close', () => {
+      try {
+        const parsed = JSON.parse(out) as { hookSpecificOutput?: { additionalContext?: unknown } };
+        const text = parsed?.hookSpecificOutput?.additionalContext;
+        done(typeof text === 'string' && text ? text : undefined);
+      } catch { done(undefined); }
+    });
+    child.stdin?.on('error', () => { /* the child exited early */ });
+    child.stdin?.end(JSON.stringify(payload));
+  }));
+}
+
+/** How long a turn waits for a briefing still being computed (it is otherwise given on a later turn). */
+const HANDOFF_WAIT_MS = 2_000;
+
+/** Whether `hooks.after-compact` is off in this directory's `.openlore/config.json` (no child at all). */
+function handoffDisabled(cwd: string): boolean {
+  try {
+    const cfg = JSON.parse(readFileSync(join(cwd, OPENLORE_DIR, 'config.json'), 'utf8')) as { hooks?: Record<string, unknown> };
+    return cfg?.hooks?.['after-compact'] === false;
+  } catch { return false; }
+}
+
+/** Pi's built-in tools, as the hook payload names them (Claude Code's tool names). */
+const PI_LOOP_TOOLS: Record<string, string> = { edit: 'Edit', write: 'Write', bash: 'Bash', powershell: 'Bash' };
+
+/** A Pi shell result as the hook's `tool_response`: the real exit code, or an interrupted run, or nothing known. */
+export function piShellResponse(event: { isError: boolean; structuredContent?: unknown; content: Array<{ type: string; text?: string }> }): Record<string, unknown> | undefined {
+  const exit = (event.structuredContent as { exit_code?: unknown } | undefined)?.exit_code;
+  if (typeof exit === 'number' && Number.isInteger(exit)) return { exit_code: exit };
+  const text = event.content.map(c => (c.type === 'text' ? c.text ?? '' : '')).join('\n').trimEnd();
+  // Aborted or timed out: the run did not complete, so it is not a test result.
+  if (/Command (?:aborted|timed out\b[^\n]*)$/.test(text)) return { interrupted: true };
+  return undefined;
 }
 
 function registerOpenlore(
@@ -1946,7 +2421,6 @@ function registerOpenlore(
   // repo that simply isn't analyzed yet. Transient failures recover after TTL.
   const failedUntil = new Map<string, number>();
   const DAEMON_RETRY_COOLDOWN_MS = 30_000;
-  const primed = new Set<string>();
   const configHinted = new Set<string>();
   // Footer status state (spec: PiStatusReportsFunctionalReadiness). Keyed by cwd like the daemon
   // cache. No ExtensionContext is ever stored: each update uses the ctx of the event it handles.
@@ -1955,6 +2429,9 @@ function registerOpenlore(
   const readHealth = runtime.readHealth ?? defaultHealthReader;
   const readWatcher = runtime.readWatcher ?? readWatcherState;
   const resolveDaemon = runtime.resolveDaemon ?? ((cwd: string) => ensureDaemonResult(cwd));
+  const restartDaemon = runtime.restartDaemon
+    ?? ((cwd: string, preset?: string, expect?: { pid: number; version: string }) =>
+      restartPiDaemon(cwd, { preset, expect }));
   // Background work may outlive the event that started it. A generation makes those continuations
   // harmless after shutdown or session replacement without retaining an ExtensionContext globally.
   let sessionGeneration = 0;
@@ -1967,14 +2444,28 @@ function registerOpenlore(
   let suppressed = new Set<string>();
   const hostSupportsActiveTools = (): boolean =>
     typeof pi.getActiveTools === 'function' && typeof pi.setActiveTools === 'function';
+  // Pi's tool_search is user-enabled. Read its settings/CLI selection here: runtime actions such
+  // as getActiveTools() are unavailable while extensions load.
+  const nativeToolSearchEnabled = hostSupportsActiveTools() && piToolSearchEnabledAtLoad(process.cwd());
+  const deferSpecialistTools = nativeToolSearchEnabled && piToolSurfaceAtLoad(process.cwd()) !== 'all';
+  const toolExposure = (name: string): 'direct' | 'deferred' =>
+    deferSpecialistTools && !PI_SEARCH_TOOLS.includes(name) ? 'deferred' : 'direct';
+  const isDirectOpenLoreTool = (name: string): boolean => {
+    const unprefixed = name.startsWith(PI_TOOL_PREFIX) ? name.slice(PI_TOOL_PREFIX.length) : name;
+    return !deferSpecialistTools || PI_SEARCH_TOOLS.includes(unprefixed);
+  };
   async function applyToolSurface(cwd: string): Promise<void> {
     if (!hostSupportsActiveTools()) return; // older host: every tool stays active
     try {
       const active = pi.getActiveTools();
       const activeSet = new Set(active);
       const registered = piRegisteredToolNames();
-      hostExcluded = new Set(registered.filter((name) => !activeSet.has(name) && !suppressed.has(name)));
-      const next = piSessionActiveTools(await piToolSurface(cwd), active, hostExcluded);
+      hostExcluded = new Set(registered.filter((name) => isDirectOpenLoreTool(name) && !activeSet.has(name) && !suppressed.has(name)));
+      const configuredSurface = await piToolSurface(cwd);
+      const surface: PiSessionToolSurface = nativeToolSearchEnabled && configuredSurface !== 'all'
+        ? 'search'
+        : configuredSurface;
+      const next = piSessionActiveTools(surface, active, hostExcluded);
       const nextSet = new Set(next);
       suppressed = new Set(registered.filter((name) => !nextSet.has(name) && !hostExcluded.has(name)));
       pi.setActiveTools(next);
@@ -1985,18 +2476,57 @@ function registerOpenlore(
   // One in-flight resolution per cwd: the session-start warmup and any tool call that arrives
   // meanwhile share it instead of each spawning or probing the daemon.
   const pendingDaemons = new Map<string, Promise<Daemon | null>>();
+  const automaticRecoveryAttempts = new Set<string>();
+  const automaticRecoveryFailures = new Map<string, string>();
   async function getDaemon(cwd: string): Promise<Daemon | null> {
-    const cached = daemons.get(cwd);
-    if (cached) return cached;
-    if ((failedUntil.get(cwd) ?? 0) > Date.now()) return null;
     const pending = pendingDaemons.get(cwd);
     if (pending) return pending;
+    const cached = daemons.get(cwd);
+    if (cached) {
+      // Reuse the cache only while serve.json still announces this daemon. A replaced daemon can
+      // keep answering on its old port, so liveness alone would keep serving the old one.
+      if (await piDaemonStillAnnounced(cwd, cached)) return cached;
+      if (daemons.get(cwd) === cached) dropDaemon(cwd);
+      // Another caller may have started resolving while the descriptor was read.
+      const racing = pendingDaemons.get(cwd);
+      if (racing) return racing;
+      const replaced = daemons.get(cwd);
+      if (replaced) return replaced;
+    }
+    if ((failedUntil.get(cwd) ?? 0) > Date.now()) return null;
     const resolving = resolveAndRecordDaemon(cwd).finally(() => pendingDaemons.delete(cwd));
     pendingDaemons.set(cwd, resolving);
     return resolving;
   }
   async function resolveAndRecordDaemon(cwd: string): Promise<Daemon | null> {
     const result = await resolveDaemon(cwd);
+    if (result.daemon?.autoRecoverable && !automaticRecoveryAttempts.has(cwd)) {
+      // A valid, repository-bound health response proves the daemon is older.
+      // Replace it on first use after an update. The CLI stop refuses unverified
+      // listeners, but /health carries no "supervised" marker, so it cannot tell a
+      // host-supervised daemon from one Pi spawned: the host's spawn opt-out
+      // (checked in restartPiDaemon) is the ONLY protection for a supervised daemon.
+      automaticRecoveryAttempts.add(cwd);
+      const recovered = await restartDaemon(cwd, result.daemon.restartPreset, result.daemon.restartExpect);
+      if (recovered.daemon) {
+        automaticRecoveryFailures.delete(cwd);
+        return recordDaemonResult(cwd, recovered);
+      }
+      automaticRecoveryFailures.set(cwd, recovered.failure);
+      // Nothing was launched: a spawn opt-out, unknown preset, or refused stop leaves the verified daemon in
+      // place, so keep serving through it instead of reporting it absent.
+      if (
+        recovered.failureKind === 'spawn-disabled'
+        || recovered.failureKind === 'stop'
+        || recovered.failureKind === 'unknown-preset'
+      ) {
+        return recordDaemonResult(cwd, result);
+      }
+      return recordDaemonResult(cwd, recovered);
+    }
+    return recordDaemonResult(cwd, result);
+  }
+  function recordDaemonResult(cwd: string, result: EnsureDaemonResult): Daemon | null {
     daemonViews.set(cwd, piDaemonView(result));
     const d = result.daemon;
     if (d) {
@@ -2037,9 +2567,17 @@ function registerOpenlore(
     keepalive = setInterval(() => {
       for (const [cwd, daemon] of daemons) {
         const headers = daemon.token ? { 'x-openlore-token': daemon.token } : undefined;
+        // Drop only the daemon this ping was for: a newer one may have replaced it meanwhile.
+        const drop = () => { if (daemons.get(cwd) === daemon) dropDaemon(cwd); };
         void fetch(`${daemon.baseUrl}/health`, { headers, signal: AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS), redirect: 'error' })
-          .then((res) => { if (!res.ok) dropDaemon(cwd); })
-          .catch(() => dropDaemon(cwd));
+          .then(async (res) => {
+            if (!res.ok) return drop();
+            // An answer is not enough: the port may now belong to another daemon or root, or the
+            // daemon may be draining. Keep the cache only for the same, repository-bound process.
+            const health = validateServeHealth(await res.json().catch(() => null), cwd);
+            if (!health || health.draining || (daemon.pid !== undefined && health.pid !== daemon.pid)) drop();
+          })
+          .catch(drop);
       }
     }, KEEPALIVE_MS);
     keepalive.unref?.(); // never keep the host process alive for the keepalive alone
@@ -2053,11 +2591,12 @@ function registerOpenlore(
   async function refreshStatus(ctx: ExtensionContext): Promise<void> {
     try {
       if (!ctx.hasUI) return;
-      const cwd = ctx.cwd;
-      // No usable daemon cached (the cwd moved, or a daemon was dropped): resolve the same way a
-      // tool call would, so the status reports this resolution, not a stale one. `getDaemon`
+      const cwd = piProjectRoot(ctx.cwd);
+      // Resolve the same way a tool call would, so the status reports this resolution, not a
+      // stale one: no daemon cached (the cwd moved, one was dropped), or a cached daemon that
+      // serve.json no longer announces (replaced by another session or the CLI). `getDaemon`
       // keeps its failure cooldown, so a failing daemon is not re-probed on every run.
-      if (!daemons.has(cwd)) await getDaemon(cwd);
+      await getDaemon(cwd);
       const daemon = daemons.has(cwd) ? 'usable' : (daemonViews.get(cwd) ?? 'unavailable');
       let health: HealthResult | undefined;
       try {
@@ -2074,7 +2613,9 @@ function registerOpenlore(
         healthCache.delete(cwd);
         health = undefined;
       }
-      setPiStatus(ctx, formatPiStatus({ daemon, ...(health ? { health } : {}) }));
+      // Read fresh every time, like the watcher: a review moves no index artifact.
+      const unreviewed = await countUnreviewedDecisions(cwd);
+      setPiStatus(ctx, formatPiStatus({ daemon, ...(health ? { health } : {}), unreviewed }));
     } catch {
       // Advisory only.
     }
@@ -2088,7 +2629,7 @@ function registerOpenlore(
    */
   async function refreshStatusIfNotReady(result: unknown, ctx: ExtensionContext): Promise<void> {
     if (!result || typeof result !== 'object' || (result as { notReady?: unknown }).notReady !== true) return;
-    healthCache.delete(ctx.cwd);
+    healthCache.delete(piProjectRoot(ctx.cwd));
     await refreshStatus(ctx);
   }
 
@@ -2098,17 +2639,18 @@ function registerOpenlore(
       name: `openlore_${tool.name}`,
       label: tool.label,
       description: tool.description,
+      exposure: toolExposure(tool.name),
       promptSnippet: PI_TOOL_SNIPPETS[tool.name],
       promptGuidelines: [tool.guideline],
       parameters: tool.parameters as TSchema,
       async execute(_id, params, signal, _onUpdate, ctx) {
-        const daemon = await getDaemon(ctx.cwd);
-        if (!daemon) return toolResult(daemonUnavailable(ctx.cwd));
+        const daemon = await getDaemon(piProjectRoot(ctx.cwd));
+        if (!daemon) return toolResult(daemonUnavailable(piProjectRoot(ctx.cwd)));
         let result: unknown;
         try {
-          result = await callTool(daemon, tool.name, params as Record<string, unknown>, ctx.cwd, signal ?? undefined);
+          result = await callTool(daemon, tool.name, params as Record<string, unknown>, piProjectRoot(ctx.cwd), signal ?? undefined);
         } catch (err) {
-          dropDaemon(ctx.cwd);
+          dropDaemon(piProjectRoot(ctx.cwd));
           return toolResult(
             `openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`,
           );
@@ -2147,6 +2689,7 @@ function registerOpenlore(
   pi.registerTool({
     name: 'openlore_prepare_spec_generation',
     label: 'openlore prepare spec generation',
+    exposure: toolExposure('prepare_spec_generation'),
     description: 'Prepare deterministic, domain-scoped code evidence for writing a new OpenSpec specification.',
     promptSnippet: 'Get deterministic evidence before writing a new specification.',
     promptGuidelines: ['When asked to create specs from existing code, call openlore_prepare_spec_generation first; write the specification yourself from its evidence.'],
@@ -2156,18 +2699,18 @@ function registerOpenlore(
       maxItems: Type.Optional(Type.Number({ minimum: 10, maximum: 200, description: 'Maximum evidence items per deterministic page.' })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const daemon = await getDaemon(ctx.cwd);
-      if (!daemon) return toolResult(daemonUnavailable(ctx.cwd));
+      const daemon = await getDaemon(piProjectRoot(ctx.cwd));
+      if (!daemon) return toolResult(daemonUnavailable(piProjectRoot(ctx.cwd)));
       try {
         const { domain, cursor, maxItems } = params as { domain: string; cursor?: string; maxItems?: number };
         const result = await callTool(
           daemon, 'prepare_spec_generation',
-          { domain, cursor, maxItems, maxResponseBytes: PI_COMPOSITE_RESPONSE_BYTES }, ctx.cwd, signal ?? undefined,
+          { domain, cursor, maxItems, maxResponseBytes: PI_COMPOSITE_RESPONSE_BYTES }, piProjectRoot(ctx.cwd), signal ?? undefined,
         );
         await refreshStatusIfNotReady(result, ctx);
         return compositeToolResult(result);
       } catch (err) {
-        dropDaemon(ctx.cwd);
+        dropDaemon(piProjectRoot(ctx.cwd));
         return toolResult(`openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`);
       }
     },
@@ -2176,6 +2719,7 @@ function registerOpenlore(
   pi.registerTool({
     name: 'openlore_prepare_spec_repair',
     label: 'openlore prepare spec repair',
+    exposure: toolExposure('prepare_spec_repair'),
     description: 'Prepare evidence for repairing one existing OpenSpec domain: code coverage observations, its spec, mapping provenance, and drift.',
     promptSnippet: 'Get deterministic repair evidence before editing an existing specification.',
     promptGuidelines: ['When asked to repair an existing spec, call openlore_prepare_spec_repair first; interpret observations and edit the specification yourself.'],
@@ -2186,19 +2730,19 @@ function registerOpenlore(
       maxItems: Type.Optional(Type.Number({ minimum: 10, maximum: 200, description: 'Maximum observations per bounded category.' })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const daemon = await getDaemon(ctx.cwd);
-      if (!daemon) return toolResult(daemonUnavailable(ctx.cwd));
+      const daemon = await getDaemon(piProjectRoot(ctx.cwd));
+      if (!daemon) return toolResult(daemonUnavailable(piProjectRoot(ctx.cwd)));
       const { domain, baseRef, cursor, maxItems } = params as { domain: string; baseRef?: string; cursor?: string; maxItems?: number };
       try {
         const result = await callTool(
           daemon, 'prepare_spec_repair',
           { domain, baseRef: baseRef ?? 'HEAD', cursor, maxItems, maxResponseBytes: PI_COMPOSITE_RESPONSE_BYTES },
-          ctx.cwd, signal ?? undefined,
+          piProjectRoot(ctx.cwd), signal ?? undefined,
         );
         await refreshStatusIfNotReady(result, ctx);
         return compositeToolResult(result);
       } catch (err) {
-        dropDaemon(ctx.cwd);
+        dropDaemon(piProjectRoot(ctx.cwd));
         return toolResult(`openlore daemon connection changed — ${err instanceof Error ? err.message : String(err)}. Retry the tool.`);
       }
     },
@@ -2208,16 +2752,42 @@ function registerOpenlore(
   pi.registerTool({
     name: 'openlore_configure',
     label: 'openlore configure',
-    description: 'Open the openlore configuration wizard for project settings or user-wide defaults (global: true).',
+    exposure: toolExposure('configure'),
+    description: 'Configure OpenLore: inspect repository evidence, preview a candidate, apply, verify or revert a plan; omit action for the settings wizard (global: user defaults).',
     promptSnippet: 'Configure openlore settings (provider, model, API key, embedding).',
     promptGuidelines: ['Use openlore_configure to change the LLM provider, model, or embedding settings.'],
     parameters: Type.Object({
+      action: Type.Optional(Type.Union(['inspect','preview','apply','verify','revert'].map(value => Type.Literal(value)))),
+      // Kept loose and typed: this tool is in every Pi session's standing context, and strict
+      // providers reject untyped or `pattern` properties. The workflow validates the candidate.
+      candidate: Type.Optional(Type.Object({}, {additionalProperties:true, description:'Preview only: {rules:[{id,pattern,lanes:{index|watch|embed:"include"|"exclude"},reason}]}. Keep existing rules.'})),
+      activate: Type.Optional(Type.Boolean({description:'Request authenticated daemon restart after applying; requires host confirmation.'})),
+      plan: Type.Optional(Type.Object({}, {additionalProperties:true, description:'Exact preview result, unchanged.'})),
       global: Type.Optional(Type.Boolean({ description: 'Edit user-wide defaults instead of project configuration.' })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
+      const request = params as unknown as ConfigurationRequest & {global?:boolean};
+      if (request.action) {
+        if (request.global) return toolResult('Agent-assisted configuration targets the project; use the wizard for user defaults.');
+        const root = await configurationRoot(ctx.cwd);
+        const mutation = request.action === 'apply' || request.action === 'revert';
+        if (mutation && (!ctx.hasUI || !request.plan)) {
+          const refused = request.plan
+            ? await configureOpenLore(request,{rootPath:root,signal:_signal})
+            : {version:1,outcome:'needs-input',configPublished:false,reason:'Exact preview plan and host authorization required.'};
+          return toolResult(JSON.stringify(refused,null,2),refused);
+        }
+        if (mutation && !(await ctx.ui.confirm('Apply OpenLore configuration plan?', JSON.stringify({action:request.action,id:request.plan!.id,patches:request.plan!.patches,conflicts:request.plan!.conflicts,restartDaemon:request.activate === true,sharedSessionImpact:request.activate ? 'Restart may interrupt other sessions sharing this project daemon.' : undefined},null,2)))) return toolResult('Configuration unchanged.');
+        const result = await configureOpenLore(request,{rootPath:root,signal:_signal,...(request.activate ? {activate:async () => {
+          if (!(await piMaySpawnDaemon(root))) throw new Error('Daemon lifecycle is externally supervised');
+          const restarted = await restartDaemon(root);
+          if (!restarted.daemon || !isUsableDaemon(restarted.daemon)) throw new Error('Daemon recovery could not be verified');
+        }} : {}),...(mutation ? {authority:{root,planId:request.plan!.id,permissions:['write-config','replace-choices',...(request.activate ? ['runtime' as const] : [])] as Array<'write-config'|'replace-choices'|'runtime'>}} : {})});
+        return toolResult(JSON.stringify(result,null,2),result);
+      }
       if (!ctx.hasUI) return toolResult('Config wizard requires an interactive session (tui or rpc mode).');
       const global = (params as { global?: boolean }).global === true;
-      const loaded = await loadExistingConfig(ctx.cwd, global ? 'global' : 'project');
+      const loaded = await loadExistingConfig(piProjectRoot(ctx.cwd), global ? 'global' : 'project');
       if (loaded.state === 'invalid') {
         return toolResult(`Configuration not changed: ${loaded.detail}. Repair the indicated config file and retry.`);
       }
@@ -2230,6 +2800,7 @@ function registerOpenlore(
   pi.registerTool({
     name: PI_ACTIVATOR_TOOL,
     label: 'openlore activate tools',
+    exposure: toolExposure('activate_tools'),
     description: piActivatorDescription(),
     promptSnippet: 'Turn on more openlore tools by group or by tool name.',
     promptGuidelines: [
@@ -2260,18 +2831,56 @@ function registerOpenlore(
 
   // ── /configure slash command ──
   pi.registerCommand('openlore', {
-    description: 'Configure OpenLore for this project, or use configure --global for user-wide defaults',
+    description: 'Configure OpenLore (configure [--global]) or restart its daemon (restart)',
     async handler(args, ctx) {
+      if (args.trim() === 'configure assist') {
+        const result = await configureOpenLore({action:'inspect'},{rootPath:ctx.cwd});
+        pi.sendMessage({customType:'openlore-configuration',content:'Use the openlore-configure workflow to review these facts, explain index/watch/embed choices and preview a configuration plan. '+JSON.stringify(result,null,2),display:true},{triggerTurn:true});
+        return;
+      }
       if (!ctx.hasUI) {
         ctx.ui.notify('Config wizard requires an interactive session.', 'error');
         return;
       }
-      const global = args.trim() === 'configure --global';
-      if (args.trim() && args.trim() !== 'configure' && !global) {
-        ctx.ui.notify('Usage: /openlore configure [--global]', 'error');
+      if (args.trim() === 'restart') {
+        if (!ctx.isIdle()) {
+          ctx.ui.notify('Wait for the current agent turn to finish before restarting OpenLore.', 'warning');
+          return;
+        }
+        const cwd = piProjectRoot(ctx.cwd);
+        if (pendingDaemons.has(cwd)) {
+          ctx.ui.notify('OpenLore daemon startup or restart is already in progress; retry shortly.', 'info');
+          return;
+        }
+        dropDaemon(cwd);
+        failedUntil.delete(cwd);
+        healthCache.delete(cwd);
+        automaticRecoveryAttempts.delete(cwd);
+        automaticRecoveryFailures.delete(cwd);
+        setPiStatus(ctx, formatPiStatus({ daemon: 'connecting' }));
+        ctx.ui.notify('Restarting the OpenLore daemon for this project…', 'info');
+        const restarting = restartDaemon(cwd)
+          .then((result) => recordDaemonResult(cwd, result))
+          .finally(() => pendingDaemons.delete(cwd));
+        pendingDaemons.set(cwd, restarting);
+        try {
+          const daemon = await restarting;
+          ctx.ui.notify(
+            daemon?.incompatibility ?? (daemon ? 'OpenLore daemon restarted.' : daemonUnavailable(cwd)),
+            daemon && isUsableDaemon(daemon) ? 'info' : 'error',
+          );
+        } catch {
+          ctx.ui.notify('OpenLore daemon restart failed; inspect .openlore/serve.log and retry.', 'error');
+        }
+        await refreshStatus(ctx);
         return;
       }
-      const loaded = await loadExistingConfig(ctx.cwd, global ? 'global' : 'project');
+      const global = args.trim() === 'configure --global';
+      if (args.trim() && args.trim() !== 'configure' && !global) {
+        ctx.ui.notify('Usage: /openlore configure [--global] | /openlore restart', 'error');
+        return;
+      }
+      const loaded = await loadExistingConfig(piProjectRoot(ctx.cwd), global ? 'global' : 'project');
       if (loaded.state === 'invalid') {
         ctx.ui.notify(`Configuration not changed: ${loaded.detail}. Repair the indicated config file and retry.`, 'error');
         return;
@@ -2285,12 +2894,12 @@ function registerOpenlore(
     const generation = ++sessionGeneration;
     sessionActive = true;
     // Lean tool surface first, in every mode (spec: PiDefaultToolSurfaceIsLean).
-    await applyToolSurface(ctx.cwd);
+    await applyToolSurface(piProjectRoot(ctx.cwd));
 
     if (ctx.hasUI) {
-      const loaded = await loadExistingConfig(ctx.cwd);
-      if (loaded.state === 'absent' && !configHinted.has(ctx.cwd)) {
-        configHinted.add(ctx.cwd);
+      const loaded = await loadExistingConfig(piProjectRoot(ctx.cwd));
+      if (loaded.state === 'absent' && !configHinted.has(piProjectRoot(ctx.cwd))) {
+        configHinted.add(piProjectRoot(ctx.cwd));
         ctx.ui.notify('OpenLore is not configured for this project — run /openlore configure (or /openlore configure --global for user-wide defaults).', 'info');
       } else if (loaded.state === 'invalid') {
         ctx.ui.notify(`OpenLore config not changed: ${loaded.detail}. Repair the indicated config file to configure it.`, 'warning');
@@ -2308,8 +2917,14 @@ function registerOpenlore(
   // Session-start daemon warmup, run off the session_start handler. Resolution failures surface
   // through the status and tool results, so nothing rejects here.
   async function warmDaemon(ctx: ExtensionContext, generation: number): Promise<void> {
-    await getDaemon(ctx.cwd).catch(() => null);
+    const daemon = await getDaemon(piProjectRoot(ctx.cwd)).catch(() => null);
     if (!sessionActive || generation !== sessionGeneration) return;
+    if (ctx.hasUI && daemon?.incompatibility) ctx.ui.notify(daemon.incompatibility, 'warning');
+    const recoveryFailure = automaticRecoveryFailures.get(piProjectRoot(ctx.cwd));
+    if (ctx.hasUI && recoveryFailure !== undefined) {
+      automaticRecoveryFailures.delete(piProjectRoot(ctx.cwd));
+      ctx.ui.notify(recoveryFailure, 'warning');
+    }
     startKeepalive();
     await refreshStatus(ctx);
   }
@@ -2318,6 +2933,10 @@ function registerOpenlore(
   // with a refresh. Cheap when nothing moved: a few stats against the cached key.
   pi.on('agent_end', async (_event: AgentEndEvent, ctx: ExtensionContext) => {
     await refreshStatus(ctx);
+    try {
+      const reviewed = await reviewConfigurationOnIdle({rootPath:ctx.cwd,idle:true,operationActive:pendingDaemons.has(ctx.cwd),notificationsAuthorized:process.env.OPENLORE_CONFIGURATION_NOTIFICATIONS === '1',canDeliver:() => ctx.isIdle() && !pendingDaemons.has(ctx.cwd)});
+      if (reviewed?.notice && ctx.isIdle() && !pendingDaemons.has(ctx.cwd)) pi.sendMessage({customType:'openlore-configuration-review',content:reviewed.notice.message,display:true},{triggerTurn:false});
+    } catch { /* Uncertain evidence or unavailable private state remains silent. */ }
   });
 
   // Stop pinging when the session ends gracefully so the now-unused daemon can
@@ -2328,84 +2947,114 @@ function registerOpenlore(
     sessionGeneration += 1;
     if (keepalive) { clearInterval(keepalive); keepalive = undefined; }
     if (ctx) setPiStatus(ctx, undefined);
+    // A briefing still computing belongs to this session: stopped, never delivered to the next.
+    pendingHandoff?.abort.abort();
+    pendingHandoff = undefined;
   });
 
-  // ── C: context injection on the first turn ──
+  // ── B2: agent-loop receipt after an edit or shell command (change: add-agent-loop-hooks-pi-and-task-created) ──
+  // The after-tools facts (generated files, phantom references, check weakening, peer changes, test
+  // runs) are appended to the tool result the agent reads, computed in a child process.
+  pi.on('tool_result', async (event: ToolResultEvent, ctx: ExtensionContext): Promise<{ content: ToolResultEvent['content']; structuredContent?: ToolResultEvent['structuredContent'] } | void> => {
+    if (ctx.mode === 'json' || ctx.mode === 'print') return;
+    // A call a tool (a codemode script) made: its result goes to that script, not the model.
+    if (event.parentToolCallId) return;
+    const tool = PI_LOOP_TOOLS[event.toolName];
+    if (!tool) return;
+    const input = event.input as { path?: unknown; command?: unknown };
+    if (tool === 'Bash' ? typeof input.command !== 'string' : typeof input.path !== 'string') return;
+    // An edit Pi refused changed nothing; a failed shell command is still a run (a failed test run).
+    if (tool !== 'Bash' && event.isError) return;
+    const file = tool === 'Bash' ? undefined : piToolPath(input.path as string);
+    // No OpenLore project here: no child process at all.
+    if (!inOpenloreProject(ctx.cwd, file)) return;
+    let sessionId: string | undefined;
+    try { sessionId = ctx.sessionManager.getSessionId(); } catch { /* no session id: nothing is deduplicated */ }
+    const response = tool === 'Bash' ? piShellResponse(event) : undefined;
+    const payload: Record<string, unknown> = {
+      ...(sessionId ? { session_id: sessionId } : {}),
+      cwd: ctx.cwd,
+      hook_event_name: 'PostToolUse',
+      tool_name: tool,
+      tool_input: tool === 'Bash' ? { command: input.command } : { file_path: file },
+      ...(response ? { tool_response: response } : {}),
+    };
+    const text = await (runtime.runLoopMoment ?? runLoopMomentChild)('after-tools', payload, ctx.cwd, ctx.signal).catch(() => undefined);
+    if (!text) return;
+    // Replacing content alone would drop the tool's machine-readable result: it is passed through.
+    const structured = event.structuredContent;
+    return { content: [...event.content, { type: 'text', text: `\n${text}` }], ...(structured !== undefined ? { structuredContent: structured } : {}) };
+  });
+
+  // ── B3: handoff briefing after a compaction (change: add-agent-loop-hooks-task-created-and-compaction) ──
+  // Pi's compaction summary is free text; the in-flight change's computed state is added as a
+  // message for the next turn (custom messages reach the model as context), as Claude Code's
+  // SessionStart `compact` hook does.
+  let pendingHandoff: { text: Promise<string | undefined>; abort: AbortController } | undefined;
+  /** The latest compaction's briefing, when ready within a short wait; kept for a later turn otherwise. */
+  const takeHandoff = async (): Promise<string | undefined> => {
+    const slot = pendingHandoff;
+    if (!slot) return undefined;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<'late'>(r => { timer = setTimeout(() => r('late'), HANDOFF_WAIT_MS); timer.unref?.(); });
+    const text = await Promise.race([slot.text, late]);
+    if (timer) clearTimeout(timer);
+    if (text === 'late') return undefined;
+    if (pendingHandoff === slot) pendingHandoff = undefined;
+    return text;
+  };
+
+  // Pi awaits this handler before it ends the compaction, so the briefing is computed in the
+  // background: one slot, the latest compaction's, delivered by the next before_agent_start.
+  pi.on('session_compact', (_event: SessionCompactEvent, ctx: ExtensionContext): void => {
+    if (ctx.mode === 'json' || ctx.mode === 'print') return;
+    if (!inOpenloreProject(ctx.cwd) || handoffDisabled(piProjectRoot(ctx.cwd))) return;
+    pendingHandoff?.abort.abort(); // an older compaction's briefing is stale
+    let sessionId: string | undefined;
+    try { sessionId = ctx.sessionManager.getSessionId(); } catch { /* no session id */ }
+    const payload = { ...(sessionId ? { session_id: sessionId } : {}), cwd: ctx.cwd, hook_event_name: 'SessionStart', source: 'compact' };
+    const abort = new AbortController();
+    const text = (runtime.runLoopMoment ?? runLoopMomentChild)('after-compact', payload, ctx.cwd, abort.signal).catch(() => undefined);
+    pendingHandoff = { text, abort };
+  });
+
+  // ── C: context injection ──
+  // Keep the repository-wide digest opt-in: it is repeated standing context, while the orient tool
+  // provides task-specific evidence on demand. Proposal prompts get only a compact instruction.
   pi.on('before_agent_start', async (event: BeforeAgentStartEvent, ctx: ExtensionContext): Promise<BeforeAgentStartEventResult | void> => {
     if (ctx.mode === 'json' || ctx.mode === 'print') return;
-    if (primed.has(ctx.cwd)) return;
-    primed.add(ctx.cwd);
+    const handoff = await takeHandoff();
+    const projectDir = piProjectRoot(ctx.cwd);
 
     const blocks: string[] = [];
-    const [analysisProvenance, specProvenance] = await Promise.all([
-      readAnalysisContentProvenance(ctx.cwd),
-      reviewedFileContentProvenance(ctx.cwd, 'openspec'),
-    ]);
-    const digest = await readDigest(ctx.cwd);
-    if (digest) blocks.push(frameServedContent(
-      '# Codebase architecture (openlore)\n\n' + truncate(digest, 8000),
-      analysisProvenance,
-      'codebase architecture digest',
-    ));
-    const specIndex = await readSpecIndex(ctx.cwd);
-    if (specIndex) blocks.push(frameServedContent(specIndex, specProvenance, 'specification index'));
-
-    // Task-scoped orientation: gate + token-budgeted render, the same pipeline
-    // `openlore orient --inject` uses for the Claude Code hook (change
-    // add-task-scoped-context-injection). The daemon does the orientation; the
-    // host only gates and renders. `mode: "off"` opts out (digest/spec index,
-    // Pi's own baseline grounding, are unaffected); a weak/absent match degrades
-    // to the single ignorable pointer line instead of dumping raw orient JSON.
-    const cfg = resolveInjectionConfig(await readContextInjection(ctx.cwd));
-    // Turn-intent gate, ahead of the daemon round-trip: a repository-management
-    // turn (push, open/merge a PR, cut a release) gets the reason-bearing
-    // pointer line and no orientation at all — same classifier, same wording as
-    // the CLI hook (change scope-advisory-noise-to-touched-code).
-    const prompt = event.prompt?.trim() ?? '';
-    if (cfg.mode !== 'off') {
-      if (!prompt) {
-        blocks.push(pointerLineFor('empty-prompt'));
-      } else if (cfg.intentGate && classifyTurnIntent(prompt) === 'repository-management') {
-        blocks.push(pointerLineFor('management-intent'));
-      } else {
-        // Resolve/contact the daemon only after the intent gate has admitted the
-        // turn. Every failure remains visible as a reason-bearing pointer; a
-        // digest already in `blocks` must not accidentally hide orientation loss.
-        const injectionSignal = AbortSignal.timeout(runtime.orientTimeoutMs ?? PI_ORIENT_TIMEOUT_MS);
-        try {
-          const daemon = await awaitWithSignal(getDaemon(ctx.cwd), injectionSignal);
-          if (!daemon) {
-            blocks.push(pointerLineFor('error'));
-          } else {
-            const oriented = await callTool(
-              daemon,
-              'orient',
-              { task: prompt },
-              ctx.cwd,
-              injectionSignal,
-            );
-            const result = oriented && typeof oriented === 'object'
-              ? (oriented as LeanOrientResult)
-              : { error: 'invalid orient response' };
-            const evaluation = evaluateRelevanceGate(result, cfg);
-            blocks.push(evaluation.passes
-              ? renderInjectionBlock(result, cfg)
-              : pointerLineFor(evaluation.reason ?? 'weak-relevance'));
-          }
-        } catch {
-          // A first-turn deadline is not evidence that the daemon is unhealthy.
-          // Discovery continues in the background and may warm the next call.
-          if (!injectionSignal.aborted) dropDaemon(ctx.cwd);
-          blocks.push(pointerLineFor('error'));
-        }
+    if (await piContextMode(projectDir) === 'full') {
+      const [analysisProvenance, specProvenance] = await Promise.all([
+        readAnalysisContentProvenance(projectDir),
+        specCorpusContentProvenance(projectDir),
+      ]);
+      const digest = await readDigest(projectDir);
+      if (digest) blocks.push(frameServedContent(
+        '# Codebase architecture (openlore)\n\n' + truncate(digest, 8000),
+        analysisProvenance,
+        'codebase architecture digest',
+      ));
+      const specIndex = await readSpecIndex(projectDir);
+      if (specIndex) blocks.push(frameServedContent(specIndex, specProvenance, 'specification index'));
+      if (blocks.length === 0) {
+        blocks.push('[openlore: no analysis found — run `openlore analyze` to enable structural context.]');
       }
     }
 
-    const suffix = blocks.length > 0
-      ? blocks.join('\n\n')
-      : '[openlore: no analysis found — run `openlore analyze` to enable structural context.]';
+    const proposalPrompt = event.messageType === 'user' ? event.prompt : '';
+    const proposalContext = proposalContextForPrompt(proposalPrompt, 'pi');
+    if (proposalContext) blocks.push(proposalContext);
 
-    return { systemPrompt: event.systemPrompt + '\n\n' + suffix };
+    // The handoff joins the conversation (a custom message reaches the model as context and stays
+    // in the session), not the per-turn system prompt; hidden in the transcript.
+    const message = handoff ? { message: { customType: 'openlore-handoff', content: handoff, display: false } } : {};
+    if (blocks.length === 0) return handoff ? message : undefined;
+
+    return { systemPrompt: event.systemPrompt + '\n\n' + blocks.join('\n\n'), ...message };
   });
 }
 

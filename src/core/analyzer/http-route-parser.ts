@@ -36,9 +36,11 @@ import {
 import { blankCommentsPreservingLayout } from './comment-blanking.js';
 import { scanJavaMethodDeclarations } from './java-method-scanner.js';
 import { lineFromIndex } from './line-index.js';
+import { readNamedChildren } from './ast-children.js';
 import { getExceptionParser } from './exception-flow.js';
+import { sameNode } from './same-node.js';
 import type Parser from 'tree-sitter';
-import { parseBudgetOverrunMs, parseWithBudget, type BudgetableParser } from './parse-budget.js';
+import { extractionBudgetOverrunMs, parseWithBudget, type BudgetableParser } from './extraction-budget.js';
 
 // ============================================================================
 // TYPES
@@ -337,8 +339,12 @@ function httpAstWithinTraversalBudget(root: SyntaxNode): boolean {
   while (stack.length > 0) {
     const { node, depth } = stack.pop()!;
     if (depth > MAX_HTTP_AST_DEPTH || ++visited > MAX_HTTP_AST_NODES) return false;
-    for (let i = node.namedChildren.length - 1; i >= 0; i--) {
-      stack.push({ node: node.namedChildren[i], depth: depth + 1 });
+    // ONE read of the children getter — see `readNamedChildren`. Re-reading it per child made
+    // this walk O(k²) on a wide node, and a generated `[]byte{…}` literal of a few thousand
+    // elements is exactly that node.
+    const kids = readNamedChildren(node);
+    for (let i = kids.length - 1; i >= 0; i--) {
+      stack.push({ node: kids[i], depth: depth + 1 });
     }
   }
   return true;
@@ -414,7 +420,7 @@ async function extractPythonHttpCalls(filePath: string, content: string, onDegra
   try {
     root = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content).rootNode;
   } catch (error) {
-    const budgetMs = parseBudgetOverrunMs((error as Error).message);
+    const budgetMs = extractionBudgetOverrunMs((error as Error).message);
     onDegraded?.({ file: filePath, reason: budgetMs === undefined ? 'parse-failure' : 'budget-exceeded', ...(budgetMs === undefined ? {} : { budgetMs }) });
     return [];
   }
@@ -444,7 +450,7 @@ export function extractPythonHttpCallsFromRoot(filePath: string, root: SyntaxNod
     if (node.type === 'import_statement') {
       const conditional = (() => {
         let parent = node.parent;
-        while (parent && parent !== active.node) {
+        while (parent && !sameNode(parent, active.node)) {
           if (['if_statement', 'for_statement', 'while_statement', 'try_statement', 'match_statement'].includes(parent.type)) return true;
           parent = parent.parent;
         }
@@ -589,7 +595,7 @@ async function extractGoHttpCalls(filePath: string, content: string, onDegraded?
   try {
     root = parseWithBudget(parser as unknown as BudgetableParser<Parser.Tree>, content).rootNode;
   } catch (error) {
-    const budgetMs = parseBudgetOverrunMs((error as Error).message);
+    const budgetMs = extractionBudgetOverrunMs((error as Error).message);
     onDegraded?.({ file: filePath, reason: budgetMs === undefined ? 'parse-failure' : 'budget-exceeded', ...(budgetMs === undefined ? {} : { budgetMs }) });
     return [];
   }
@@ -634,7 +640,7 @@ export function extractGoHttpCallsFromRoot(filePath: string, root: SyntaxNode, o
     const httpClients = new Map<string, number>();
     const lexicalBlock = (node: SyntaxNode): number | undefined => {
       let current: SyntaxNode | null = node;
-      while (current && current !== fn) {
+      while (current && !sameNode(current, fn)) {
         if (current.type === 'block') return current.startIndex;
         current = current.parent;
       }

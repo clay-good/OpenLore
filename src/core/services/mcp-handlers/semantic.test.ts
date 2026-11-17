@@ -166,9 +166,11 @@ describe('handleListSpecDomains', () => {
 
   it('returns empty domains when openspec/specs/ does not exist', async () => {
     const { handleListSpecDomains } = await import('./semantic.js');
-    const result = await handleListSpecDomains(tmpDir) as { domains: string[]; note?: string };
+    const result = await handleListSpecDomains(tmpDir) as { domains: string[]; note?: string; reason?: string; lookedFor?: string[] };
     expect(result.domains).toEqual([]);
-    expect(result.note).toContain('No openspec/specs/');
+    expect(result).toMatchObject({ reason: 'no-spec-source', lookedFor: ['openspec'] });
+    expect(result.note).toBe('no spec source found (looked for: openspec); no openspec/specs/ directory.');
+    expect(JSON.stringify(result)).not.toContain('openlore generate');
   });
 
   it('returns the list of domains that have a spec.md', async () => {
@@ -245,10 +247,24 @@ describe('handleSearchSpecs', () => {
       },
     }));
 
+    await mkdir(join(tmpDir, 'openspec', 'specs', 'auth'), { recursive: true });
+    await writeFile(join(tmpDir, 'openspec', 'specs', 'auth', 'spec.md'), '# Auth\n');
     const { handleSearchSpecs } = await import('./semantic.js');
     const result = await handleSearchSpecs(tmpDir, 'email validation') as { error: string; hint: string };
     expect(result.error).toContain('No spec index found');
     expect(result.hint).toContain('keyword');
+  });
+
+  it('states "no spec source" as an empty answer, not an error, and names no generate step', async () => {
+    // `analyze` indexes no specs when none exist, so "run analyze first" never resolved.
+    vi.doMock('../../analyzer/spec-vector-index.js', () => ({
+      SpecVectorIndex: { exists: vi.fn().mockReturnValue(false), build: vi.fn(), search: vi.fn() },
+    }));
+    const { handleSearchSpecs } = await import('./semantic.js');
+    const result = await handleSearchSpecs(tmpDir, 'email validation') as Record<string, unknown>;
+    expect(result).toMatchObject({ count: 0, results: [], reason: 'no-spec-source', lookedFor: ['openspec'] });
+    expect(result.error).toBeUndefined();
+    expect(JSON.stringify(result)).not.toMatch(/openlore generate|openlore analyze/);
   });
 });
 
@@ -366,6 +382,22 @@ describe('handleSearchCode', () => {
     expect(result.count).toBe(1);
     expect(Array.isArray(result.results)).toBe(true);
     expect((result.indexStaleness as { staleFiles: string[] }).staleFiles).toEqual(['src/a.ts']);
+  });
+
+  it('a literal-text answer carries the coverage verdict the dispatch contract requires', async () => {
+    // Served whenever no indexed symbol matched — including the seconds while the watcher re-indexes
+    // a just-written function — and it had no `coverage`, which the runtime contract flags.
+    const analysisDir = join(tmpDir, '.openlore', 'analysis');
+    await mkdir(analysisDir, { recursive: true });
+    await TextLineIndex.build(analysisDir, [{ filePath: 'src/a.ts', content: 'export function zebraQuokka() {}\n' }]);
+    await writeAnalysisFile(tmpDir, 'llm-context.json', {});
+    const { handleSearchCode } = await import('./semantic.js');
+    const { assertConclusionShape } = await import('./tool-contract.js');
+    const result = await handleSearchCode(tmpDir, 'zebraQuokka', 10, undefined, undefined, undefined, 'text') as {
+      coverage?: { verdict: string };
+    };
+    expect(result.coverage?.verdict).toBe('covered');
+    expect(() => assertConclusionShape('search_code', result)).not.toThrow();
   });
 
   it('checks stale text-index citations outside the programming-language allowlist', async () => {
@@ -505,11 +537,9 @@ describe('handleSearchSpecs — success path', () => {
     expect(result.error).toBeUndefined();
     expect(result.searchMode).toBe('bm25_fallback');
     expect(result.retrievalMode).toBe('keyword');
-    // First-class keyword default: the note states the mode + offers the
-    // semantic upgrade, never a degraded-fallback warning.
-    expect(result.note).toContain('Keyword (BM25)');
-    expect(result.note).toContain('embed --local');
-    expect(result.note).not.toContain('unavailable');
+    // First-class keyword default: the mode is reported with no upgrade advice to the agent.
+    expect(result.note).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('openlore embed');
     expect(result.results[0].scoreKind).toBe('bm25');
     expect(search).toHaveBeenCalledWith(expect.any(String), 'auth', null, expect.anything());
   });
@@ -566,7 +596,7 @@ describe('handleSearchSpecs — success path', () => {
 
     expect(result.searchMode).toBe('bm25_fallback');
     expect(result.retrievalMode).toBe('keyword');
-    expect(result.note).toContain('Keyword (BM25)');
+    expect(result.note).toBeUndefined();
   });
 
   it.each(['local-semantic', 'remote-semantic'] as const)(

@@ -91,8 +91,9 @@ describe('Windows-generated agent launch commands', () => {
     const mcp = JSON.parse(await readFile(join(ctx.root, '.mcp.json'), 'utf8'));
     expect(mcp.mcpServers.openlore.command).toBe('npx');
     const settings = JSON.parse(await readFile(join(ctx.root, '.claude/settings.json'), 'utf8'));
+    // Guarded: with no npx on PATH, the hook exits 0 silently (hook-reliability 8.1).
     expect(settings.hooks.SessionStart[0].hooks[0].command)
-      .toBe('npx --yes openlore orient --json');
+      .toBe('command -v npx >/dev/null 2>&1 || exit 0; npx --yes openlore orient --json');
     const cursor = JSON.parse(await readFile(join(ctx.root, '.cursor/mcp.json'), 'utf8'));
     expect(cursor.mcpServers.openlore.command).toBe('npx');
     const continueConfig = JSON.parse(await readFile(join(ctx.root, '.continue/config.json'), 'utf8'));

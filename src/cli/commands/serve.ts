@@ -34,6 +34,7 @@
  */
 
 import { Command } from 'commander';
+import { setActiveToolSurface } from '../../core/services/mcp-handlers/active-surface.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
 import { randomBytes } from 'node:crypto';
@@ -42,12 +43,15 @@ import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, FULL_PRESET, FULL_PRESET_ALIAS, LEAN_DEFAULT_PRESET } from '../../constants.js';
 import { dispatchTool, UnknownToolError } from '../../core/services/tool-dispatch.js';
+import { sanitizeForTerminal, stringifyScreened } from '../../utils/misc.js';
 import { resolveCanonicalToolName } from '../../core/services/mcp-handlers/tool-contract.js';
 import { releaseContextCache, validateDirectory, waitForGraphRebuild } from '../../core/services/mcp-handlers/utils.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
 import { McpWatcher } from '../../core/services/mcp-watcher.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
-import { registerRepairHost } from '../../core/services/cold-start-bootstrap.js';
+import { registerRepairHost, registerRepairBuilder, hasAnalysis, autoInitSuppression, repairInBackground, startBackgroundVectorPass } from '../../core/services/cold-start-bootstrap.js';
+import { startDetachedIndexBuild } from '../../core/services/one-shot-index-build.js';
+import { seedFromSiblingCheckout, servingSeededIndex } from '../../core/runtime/seed-from-sibling.js';
 import { acquireLockAt, isLockHeld } from '../../core/runtime/advisory-lock.js';
 import { openloreAnalyze } from '../../api/analyze.js';
 import { TOOL_DEFINITIONS, TOOL_PRESETS, presetMembershipError, selectActiveTools } from './mcp.js';
@@ -282,8 +286,16 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
   });
 }
 
+/**
+ * The daemon's single response serializer — and therefore where the HTTP transport screens
+ * repository-derived bytes, as `capStructuredResult` does for the stdio transport.
+ * `JSON.stringify` escapes C0 controls on its own but passes bidi overrides and zero-width
+ * characters through verbatim, so a tool result reached an agent carrying them. The class only
+ * removes characters inside string literals, so the body stays valid JSON (content-length is
+ * measured after).
+ */
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const text = JSON.stringify(body);
+  const text = sanitizeForTerminal(stringifyScreened(body), { keepNewlines: true });
   res.writeHead(status, {
     'content-type': 'application/json',
     'content-length': Buffer.byteLength(text),
@@ -548,6 +560,12 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
       : selectActiveTools(TOOL_DEFINITIONS, { preset: presetName })
     ).map((t) => t.name),
   );
+  // Tell the guidance renderers what THIS process serves, exactly as `openlore mcp` does.
+  // Without it the daemon kept prescribing `record_decision` and `check_spec_drift`, which it
+  // then refuses with a preset-membership error — and because `openlore mcp` delegates to a
+  // running daemon with no flag, the stdio default regressed as soon as a daemon was warm
+  // (change: fix-orient-guidance-preset).
+  setActiveToolSurface(activeNames);
 
   // Idle self-shutdown: a request resets the timer; firing tears down and exits.
   // Bounds orphaned-daemon lifetime so they can't accumulate in RAM (see
@@ -713,7 +731,11 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
     }
     logger.discovery(`[serve] rebuilding graph index (${directory})`);
     const rebuild = openloreAnalyze({ rootPath: directory, force: true })
-      .then(() => logger.discovery(`[serve] graph index rebuilt (${directory})`))
+      .then(() => {
+        logger.discovery(`[serve] graph index rebuilt (${directory})`);
+        // The forced rebuild publishes keyword-only indexes; put the local vectors back.
+        startBackgroundVectorPass(directory);
+      })
       .catch((err) => logger.warning(`[serve] graph rebuild failed: ${err instanceof Error ? err.message : String(err)}`))
       .finally(() => {
         rebuildPromises.delete(directory);
@@ -798,6 +820,7 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
         // source. Optional and allowlist-projected: an older daemon omits it and readers report
         // 'unknown' rather than guessing, so no protocol bump is warranted.
         watcher: watcher ? 'healthy' : 'stopped',
+        ...(url.searchParams.get('configuration') === 'true' && watcher ? {configuration:{watchPolicyRevision:watcher.configurationPolicyRevision,watchedDirectories:watcher.configurationWatchedDirectories}} : {}),
       });
       return;
     }
@@ -1027,6 +1050,30 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
       }
     } else {
       schemaReset = false;
+      // No call-graph store at all: bootstrap it (change: self-heal-serve-daemon). The daemon
+      // had no absent-index bootstrap — unlike the stdio MCP server and the one-shot CLI — so a
+      // fresh repo opened under Pi (the daemon is Pi's sole backend) served `index-absent`
+      // forever unless a watched file happened to be edited. Use the DETACHED supervisor so the
+      // build outlives this daemon's lifetime; it self-suppresses outside a git work tree or
+      // when auto-init is opted out. `stale-region` when an analysis exists but its graph store
+      // is missing (a partial/interrupted build), `index-absent` for a truly fresh repo.
+      // A new worktree first copies a sibling checkout's verified index and rebuilds over it
+      // (change: seed-worktree-index-from-sibling-checkout).
+      const autoInitAllowed = !autoInitSuppression(root);
+      if (autoInitAllowed && !hasAnalysis(root)) await seedFromSiblingCheckout(root);
+      if (autoInitAllowed && await servingSeededIndex(root)) {
+        repairInBackground(root, 'seeded', {
+          analyze: async dir => {
+            triggerRebuild(dir);
+            await rebuildPromises.get(dir);
+          },
+        });
+      } else if (autoInitAllowed) {
+        const build = startDetachedIndexBuild(root, hasAnalysis(root) ? 'stale-region' : 'index-absent');
+        if (build.state === 'started') {
+          logger.discovery('[serve] No call-graph index — building it in the background (non-blocking, no API key).');
+        }
+      }
     }
   } catch (err) {
     logger.debug(`[serve] Failed to check schema on startup: ${err instanceof Error ? err.message : String(err)}`);
@@ -1077,6 +1124,20 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
     if (watcher) return watcher.requestColdReadRepair(staleFiles);
     triggerRebuild(root);
     return true;
+  });
+
+  // Wire the read-path self-heal into the daemon (change: self-heal-serve-daemon).
+  // Without this, `maybeTriggerBackgroundRepair` (readCachedContext) is a NO-OP inside the
+  // serve process — no repair builder is registered — so every read-path staleness reason
+  // (an empty/reset call graph, a `degraded` truncated store, an unservable artifact) was
+  // detected and disclosed but never rebuilt. The daemon's own gate only covers a schema
+  // MISMATCH (`notReady`); this closes the rest. Pi, which routes every orient through this
+  // daemon, inherited that gap. The builder funnels through the same single-flight
+  // `triggerRebuild`, so it never races the schema-reset healer or the watcher's re-analyze,
+  // and it awaits the coalesced rebuild so the "refresh started" disclosure stays honest.
+  registerRepairBuilder(async dir => {
+    triggerRebuild(dir);
+    await rebuildPromises.get(dir);
   });
 
   // Clean shutdown: drop the descriptor so clients don't reuse a dead port.

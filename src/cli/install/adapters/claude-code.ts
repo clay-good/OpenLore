@@ -17,7 +17,7 @@ import { mergeEntries, readMeta, removeManaged, isHandEdited, editJsonPreserving
 import { previewCreate, previewDiff } from '../diff.js';
 import type { Adapter, ApplyContext, ApplyResult, PlannedChange } from './types.js';
 import { LEAN_DEFAULT_PRESET } from '../../../constants.js';
-import { formatPlatformCommand, isOpenloreCliEntryPath, resolveOpenloreCommand, windowsCommandHazard } from '../../../utils/platform-command.js';
+import { formatGuardedHookCommand, formatPlatformCommand, isOpenloreCliEntryPath, resolveOpenloreCommand, windowsCommandHazard } from '../../../utils/platform-command.js';
 import { confinedAtomicWriteFile, safeJoin } from '../../../utils/path-confinement.js';
 import { isGuardedWriteFailure, withGuardedConfigWrite } from '../guarded-config-write.js';
 
@@ -25,6 +25,31 @@ const MD_FILE = 'CLAUDE.md';
 const SETTINGS_PATH = '.claude/settings.json';
 const SETTINGS_LOCAL_PATH = '.claude/settings.local.json';
 const MCP_PATH = '.mcp.json';
+/** The argv OpenLore owns in Claude Code's single custom status-line slot. Its last flag is the marker. */
+const STATUSLINE_ARGS = ['statusline', '--installed-by-openlore'] as const;
+
+/**
+ * Is this the status line OpenLore installed? Identified by the trailing marker argv, NOT by the
+ * exact command string: the command embeds this host's node/CLI path (#449), which changes when
+ * openlore is reinstalled, Node is upgraded, or the platform format changes. An exact match would
+ * then read our own entry as the user's — install would refuse to refresh a dead path and
+ * uninstall would strand it. Matching the marker also needs no command formatting, so removal
+ * still works on a host whose paths cannot be quoted (change: harden-windows-hook-quoting).
+ * Users who compose their own status line are told to call the UNMARKED `openlore statusline`.
+ */
+function isOpenLoreStatusLine(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const { type, command } = value as Record<string, unknown>;
+  return type === 'command' && typeof command === 'string'
+    && /(^|\s)statusline --installed-by-openlore$/.test(command.trim());
+}
+
+function managedStatusLineCommand(
+  platform: NodeJS.Platform,
+  runtime: ApplyContext['platformCommandRuntime'],
+): string {
+  return formatPlatformCommand(resolveOpenloreCommand([...STATUSLINE_ARGS], platform, runtime), platform);
+}
 
 /**
  * The repo-scope grant: the whole `openlore` command family, in ONE repository the
@@ -252,20 +277,59 @@ function mcpEntry(
  * REMOVAL, stranding the very hooks uninstall exists to take out
  * (change: harden-windows-hook-quoting).
  */
-const MANAGED_HOOKS: ReadonlyArray<{ key: string; args: readonly string[] }> = [
+interface ManagedHook {
+  key: string;
+  args: readonly string[];
+  /**
+   * An agent-loop moment (change: add-agent-loop-hook-surfaces). Its group carries
+   * `_openloreHook: <moment>` and is identified by that alone, so it never touches another
+   * `_openlore` group on the same event (the opt-in `check-edit` PostToolUse hook).
+   */
+  moment?: string;
+  /** Tool-name matcher for tool events (the edit tools). */
+  matcher?: string;
+  /** Hook timeout, in seconds. */
+  timeout?: number;
+}
+
+const EDIT_TOOLS = 'Edit|Write|MultiEdit|NotebookEdit';
+
+/** Exported so the Claude Code plugin's hooks are checked against the same moments (plugin-manifest.test.ts). */
+export const MANAGED_HOOKS: ReadonlyArray<ManagedHook> = [
   { key: 'SessionStart', args: ['orient', '--json'] },
   { key: 'UserPromptSubmit', args: ['orient', '--inject'] },
+  { key: 'PreToolUse', args: ['hook', 'before-edit'], moment: 'before-edit', matcher: EDIT_TOOLS, timeout: 15 },
+  // Shell calls too: a test run is recorded so the stop receipt can name edits made after it.
+  { key: 'PostToolUse', args: ['hook', 'after-tools'], moment: 'after-tools', matcher: `${EDIT_TOOLS}|Bash`, timeout: 30 },
+  // A failing shell command (a failed test run) arrives as a tool failure in Claude Code.
+  { key: 'PostToolUseFailure', args: ['hook', 'after-tools'], moment: 'after-tools', matcher: 'Bash', timeout: 30 },
+  { key: 'Stop', args: ['hook', 'before-stop'], moment: 'before-stop', timeout: 90 },
+  { key: 'SessionStart', args: ['hook', 'after-compact'], moment: 'after-compact', matcher: 'compact', timeout: 60 },
+  // A sub-agent's task is queued from the parent's Agent call (SubagentStart does not carry it).
+  { key: 'PreToolUse', args: ['hook', 'before-subagent'], moment: 'before-subagent', matcher: 'Agent|Task', timeout: 10 },
+  { key: 'SubagentStart', args: ['hook', 'subagent-start'], moment: 'subagent-start', timeout: 30 },
 ];
+
+/**
+ * The user-scope guard of a loop moment: outside a project with `.openlore/`, the hook exits before
+ * Node starts. The session-start and prompt hooks do not get it: they are what sets OpenLore up in
+ * a new repository or worktree (change: user-scope-loop-hooks).
+ */
+export const USER_SCOPE_PROJECT_GUARD = '[ -d "${CLAUDE_PROJECT_DIR:-.}/.openlore" ] || exit 0; ';
 
 /** The hook keys OpenLore manages, with commands resolved for the generating host. */
 function managedHooks(
   platform: NodeJS.Platform,
   runtime: ApplyContext['platformCommandRuntime'],
-): ReadonlyArray<{ key: string; command: string }> {
-  return MANAGED_HOOKS.map(({ key, args }) => ({
-    key,
-    command: formatPlatformCommand(resolveOpenloreCommand(args, platform, runtime), platform),
-  }));
+  scope: 'repo' | 'user' = 'repo',
+): ReadonlyArray<{ def: ManagedHook; command: string }> {
+  return MANAGED_HOOKS.map(def => {
+    // The user-scope form stands down where a repository wires the same hook itself.
+    const args = scope === 'user' ? [...def.args, '--scope', 'user'] : def.args;
+    // Guarded: a hook whose runtime is gone exits 0 silently (change: hook-reliability, task 8.1).
+    const command = formatGuardedHookCommand(resolveOpenloreCommand(args, platform, runtime), platform);
+    return { def, command: scope === 'user' && def.moment ? USER_SCOPE_PROJECT_GUARD + command : command };
+  });
 }
 
 /**
@@ -287,30 +351,66 @@ function hookCommandHazard(
   return null;
 }
 
-function ourHookGroup(command: string): Record<string, unknown> {
+function ourHookGroup(command: string, def: ManagedHook): Record<string, unknown> {
   return {
-    matcher: '',
+    matcher: def.matcher ?? '',
     _openlore: true,
-    hooks: [{ type: 'command', command }],
+    ...(def.moment ? { _openloreHook: def.moment } : {}),
+    hooks: [{ type: 'command', command, ...(def.timeout ? { timeout: def.timeout } : {}) }],
   };
 }
 
-function isOurHookEntry(entry: unknown): boolean {
+/** Whether `entry` is the group install manages for `def` (a loop moment's marker, or the plain marker). */
+function isOurHookEntry(entry: unknown, def: ManagedHook): boolean {
   if (!entry || typeof entry !== 'object') return false;
-  return (entry as Record<string, unknown>)._openlore === true;
+  const e = entry as Record<string, unknown>;
+  if (def.moment) return e._openlore === true && e._openloreHook === def.moment;
+  return e._openlore === true && e._openloreHook === undefined;
 }
 
 /** Replace our marker-identified group in `existing`, leaving user-authored entries untouched. */
-function mergeOurHook(existing: unknown, command: string): unknown[] {
+function mergeOurHook(existing: unknown, command: string, def: ManagedHook): unknown[] {
   const arr = Array.isArray(existing) ? existing : [];
-  const withoutOurs = arr.filter((e) => !isOurHookEntry(e));
-  return [...withoutOurs, ourHookGroup(command)];
+  const withoutOurs = arr.filter((e) => !isOurHookEntry(e, def));
+  return [...withoutOurs, ourHookGroup(command, def)];
+}
+
+/** The moments this version wires; an `_openloreHook` group naming any other moment is retired. */
+const CURRENT_MOMENTS = new Set(MANAGED_HOOKS.flatMap(def => (def.moment ? [def.moment] : [])));
+
+/** An OpenLore loop-moment group for a moment this version no longer has (change: hook-reliability). */
+function isRetiredHookEntry(entry: unknown): boolean {
+  if (!entry || typeof entry !== 'object') return false;
+  const e = entry as Record<string, unknown>;
+  return e._openlore === true && typeof e._openloreHook === 'string' && !CURRENT_MOMENTS.has(e._openloreHook);
+}
+
+/**
+ * Remove every retired OpenLore group, on any event, from `hooks`, recording one edit per event it
+ * changes. The user's own groups, and current OpenLore groups, are kept as they are.
+ */
+function stripRetiredHooks(hooks: Record<string, unknown>, edits: JsonPathEdit[]): boolean {
+  let changed = false;
+  for (const [key, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    const kept = groups.filter(g => !isRetiredHookEntry(g));
+    if (kept.length === groups.length) continue;
+    changed = true;
+    if (kept.length === 0) {
+      delete hooks[key];
+      edits.push({ path: ['hooks', key], value: undefined });
+    } else {
+      hooks[key] = kept;
+      edits.push({ path: ['hooks', key], value: kept });
+    }
+  }
+  return changed;
 }
 
 /** Remove our marker-identified group from `existing`, leaving user-authored entries untouched. */
-function stripOurHook(existing: unknown): unknown[] {
+function stripOurHook(existing: unknown, def: ManagedHook): unknown[] {
   const arr = Array.isArray(existing) ? existing : [];
-  return arr.filter((e) => !isOurHookEntry(e));
+  return arr.filter((e) => !isOurHookEntry(e, def));
 }
 
 async function readJsonOrEmpty(path: string): Promise<Record<string, unknown>> {
@@ -634,6 +734,33 @@ export const claudeCodeAdapter: Adapter = {
       mdResult.conflict = true;
       return mdResult;
     }
+    // A pre-existing `mcpServers.openlore` this install did not write — a hand-wired wrapper,
+    // a pinned preset, another checkout's absolute path — is the user's, not ours: preserved
+    // with a warning, as the Codex adapter already does for `mcp_servers.openlore`. Silently
+    // replacing it threw away a deliberate choice. Scoped to a file carrying no managed meta
+    // and an entry that is not our own shape, so an entry we wrote (or one whose meta was
+    // lost) still updates in place.
+    if (!prevMcpMeta && hadMcp && !ctx.force) {
+      const servers = existingMcp.mcpServers;
+      const foreign = servers && typeof servers === 'object'
+        ? (servers as Record<string, unknown>).openlore
+        : undefined;
+      if (foreign !== undefined && !isOurMcpEntry(foreign)) {
+        mdResult.changes.push({
+          path: mcpPath,
+          kind: 'noop',
+          summary: `${layout.mcp}: preserved the existing mcpServers.openlore entry`,
+        });
+        mdResult.warnings.push(
+          `${layout.mcp} already defines mcpServers.openlore and OpenLore did not write it — `
+          + 'OpenLore preserved it and registered nothing. Remove that entry (or pass --force) '
+          + 'to have install wire the server itself.',
+        );
+        mdResult.conflict = true;
+        return mdResult;
+      }
+    }
+
     const entry = mcpEntry(ctx.preset, ctx.platform, ctx.platformCommandRuntime);
     const { next: nextMcp, action: mcpAction } = mergeEntries(existingMcp, [
       { path: 'mcpServers.openlore', value: entry },
@@ -684,6 +811,10 @@ export const claudeCodeAdapter: Adapter = {
     // is never read for MCP), and set each marker-identified hook group. Everything else in the
     // user's settings.json is preserved byte-for-byte.
     const settingsEdits: JsonPathEdit[] = [];
+    // A group for a moment this version no longer has is removed on every install, so an upgrade
+    // never leaves an old moment running (change: hook-reliability, task 8.2).
+    stripRetiredHooks(nextHooks, settingsEdits);
+    const commandHazard = hookCommandHazard(ctx.platform, ctx.platformCommandRuntime);
     if ('_openlore' in existing) settingsEdits.push({ path: ['_openlore'], value: undefined });
     const legacyMcp = existing.mcpServers as Record<string, unknown> | undefined;
     if (legacyMcp && 'openlore' in legacyMcp) {
@@ -692,6 +823,37 @@ export const claudeCodeAdapter: Adapter = {
           ? { path: ['mcpServers'], value: undefined }
           : { path: ['mcpServers', 'openlore'], value: undefined },
       );
+    }
+    // Claude Code has ONE custom status-line command. It is a personal display preference, so it is
+    // wired in the USER scope only: a repo's `.claude/settings.json` is shared with every teammate
+    // and outranks `~/.claude/settings.json`, so writing it there would override each teammate's
+    // own status line. Within the user scope: fill an empty slot, refresh our own marked entry
+    // (its embedded path may have moved), never replace one the user chose, and drop ours when
+    // this host cannot run it (same rule as the hooks below).
+    let includesOpenLoreStatusLine = false;
+    if (ctx.scope === 'user') {
+      const current = next.statusLine;
+      const ours = isOpenLoreStatusLine(current);
+      if (commandHazard) {
+        if (ours) {
+          delete next.statusLine;
+          settingsEdits.push({ path: ['statusLine'], value: undefined });
+        }
+        mdResult.warnings.push(`The Claude Code status line was NOT wired, because ${commandHazard}.`);
+      } else if (current === undefined || ours) {
+        const statusLine = {
+          type: 'command',
+          command: managedStatusLineCommand(ctx.platform, ctx.platformCommandRuntime),
+        };
+        next.statusLine = statusLine;
+        settingsEdits.push({ path: ['statusLine'], value: statusLine });
+        includesOpenLoreStatusLine = true;
+      } else {
+        mdResult.warnings.push(
+          `${layout.settings} already has a custom statusLine, so OpenLore left it unchanged. `
+          + 'To show index readiness too, call `openlore statusline` from your status-line script.',
+        );
+      }
     }
     // A host whose own paths cannot be quoted for a shell (see `windowsCommandHazard`) has NO
     // correct hook command available. That is a property of the host, not a conflict with the
@@ -703,12 +865,12 @@ export const claudeCodeAdapter: Adapter = {
     // — #483's own `Cannot find module`, once per turn, forever. A hook that cannot work is
     // worse than no hook, and silently leaving it while reporting a refusal is worse still
     // (change: harden-windows-hook-quoting).
-    const commandHazard = hookCommandHazard(ctx.platform, ctx.platformCommandRuntime);
     if (commandHazard) {
-      for (const { key } of MANAGED_HOOKS) {
-        const original = (base.hooks as Record<string, unknown>)?.[key];
+      for (const def of MANAGED_HOOKS) {
+        const { key } = def;
+        const original = nextHooks[key];
         if (!Array.isArray(original)) continue;
-        const filtered = stripOurHook(original);
+        const filtered = stripOurHook(original, def);
         if (filtered.length === original.length) continue;
         if (filtered.length === 0) {
           delete nextHooks[key];
@@ -719,14 +881,20 @@ export const claudeCodeAdapter: Adapter = {
         }
       }
       mdResult.warnings.push(
-        `The SessionStart and UserPromptSubmit hooks were NOT wired, because ${commandHazard}. `
+        `The SessionStart, UserPromptSubmit, and agent-loop hooks were NOT wired, because ${commandHazard}. `
         + 'Everything else was installed, and any earlier OpenLore hook was removed rather than '
         + 'left pointing at a command this host cannot run. Reinstall openlore from a path '
         + 'without that character to get the hooks.',
       );
     } else {
-      for (const { key, command } of managedHooks(ctx.platform, ctx.platformCommandRuntime)) {
-        const merged = mergeOurHook((base.hooks as Record<string, unknown>)?.[key], command);
+      for (const { def, command } of managedHooks(ctx.platform, ctx.platformCommandRuntime, ctx.scope === 'user' ? 'user' : 'repo')) {
+        const { key } = def;
+        // The user scope wires the loop moments too: their guard exits at once outside a project
+        // with `.openlore/`, and `--scope user` stands down where the repository wires them itself
+        // (change: user-scope-loop-hooks).
+        // Several managed groups may share an event: merge into what this loop already built.
+        // `nextHooks` is a clone of the file's hooks, so a group removed above stays removed.
+        const merged = mergeOurHook(nextHooks[key], command, def);
         nextHooks[key] = merged;
         settingsEdits.push({ path: ['hooks', key], value: merged });
       }
@@ -758,10 +926,10 @@ export const claudeCodeAdapter: Adapter = {
         // Never claim the hooks: on this host they are the one thing that was not written.
         ? `${layout.settings}: OpenLore hooks not wired — ${commandHazard}`
         : !had
-          ? `create ${layout.settings} with SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''}`
+          ? `create ${layout.settings} with SessionStart, UserPromptSubmit and agent-loop hooks${includesOpenLoreStatusLine ? ' and OpenLore status line' : ''}${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''}`
           : !changed
             ? `${layout.settings}: already up to date`
-            : `update SessionStart + UserPromptSubmit hooks${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''} in ${layout.settings}`,
+            : `update SessionStart, UserPromptSubmit and agent-loop hooks${includesOpenLoreStatusLine ? ' and OpenLore status line' : ''}${permissionSharesSettingsFile ? ` and ${layout.permission}` : ''} in ${layout.settings}`,
       preview: !had
         ? previewCreate(settingsPath, after)
         : !changed
@@ -906,12 +1074,19 @@ export const claudeCodeAdapter: Adapter = {
     // so the user's other settings stay byte-identical.
     let changed = false;
     const removalEdits: JsonPathEdit[] = [];
+    if (isOpenLoreStatusLine(parsed.statusLine)) {
+      changed = true;
+      removalEdits.push({ path: ['statusLine'], value: undefined });
+      delete parsed.statusLine;
+    }
     const hooksObj = parsed.hooks as Record<string, unknown> | undefined;
     if (hooksObj) {
-      for (const { key } of MANAGED_HOOKS) {
+      if (stripRetiredHooks(hooksObj, removalEdits)) changed = true;
+      for (const def of MANAGED_HOOKS) {
+        const { key } = def;
         if (!Array.isArray(hooksObj[key])) continue;
         const original = hooksObj[key] as unknown[];
-        const filtered = stripOurHook(original);
+        const filtered = stripOurHook(original, def);
         if (filtered.length !== original.length) changed = true;
         if (filtered.length === 0) {
           removalEdits.push({ path: ['hooks', key], value: undefined });

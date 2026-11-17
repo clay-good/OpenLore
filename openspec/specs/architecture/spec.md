@@ -31,12 +31,12 @@ The system SHALL maintain separation between:
 
 ### Requirement: SecurityModel
 
-The system SHALL implement security via: API key-based authentication for LLM providers; no user authentication for CLI tool
+The system SHALL implement security via: API key-based authentication for LLM providers; no user authentication for CLI tool; and an optional `x-openlore-token` on its local HTTP servers (see mcp-security `Local Daemon Authentication and Origin Defense`)
 
 #### Scenario: AuthenticatedAccess
-- **GIVEN** an unauthenticated request
-- **WHEN** accessing protected resources
-- **THEN** access is denied
+- **GIVEN** a local HTTP server started with a token and bound to a non-loopback host
+- **WHEN** a request carries no valid `x-openlore-token` (or session cookie)
+- **THEN** the response is 401 and no tool runs
 
 ### Requirement: DurableAtomicStorePersistence
 
@@ -209,8 +209,8 @@ not. Each writer's whole artifact-mutation section — the analyze save-set, and
 and deletion lanes — SHALL be one locked critical section, so overlap resolves to one writer's
 complete, self-consistent output followed by the other's, never an interleaving of the two. The
 per-artifact persist helper SHALL remain lock-free (it runs inside a lane that already holds the
-lock), so a lane never re-acquires the lock it holds. Implemented in `src/core/decisions/lock.ts`
-(`acquireAnalysisLock`/`withAnalysisLock`); guarded by `lock.test.ts`.
+lock), so a lane never re-acquires the lock it holds. Implemented in `src/core/runtime/advisory-lock.ts`
+(`acquireAnalysisLock`/`withAnalysisLock`); guarded by `advisory-lock.test.ts`.
 
 #### Scenario: Watcher self-heal does not race the watcher
 - **GIVEN** a watcher that has spawned a detached `analyze --force` while continuing to serve and
@@ -773,6 +773,27 @@ what the guard pins, on every platform.
 - **THEN** the hard batch ceiling is armed again, so a steady write stream cannot postpone the flush
   without bound
 
+### Requirement: NewCapabilityArrivesAtAMomentNotAsATool
+
+A new agent-facing capability SHALL reach the agent as evidence at a hook moment, or as a field or
+finding on an existing answer (`orient`, `blast_radius`, `verify_change`, `verify_claim`, `recall`).
+It SHALL NOT add an MCP tool, and existing tools SHALL keep their names with no aliases. This rule
+governs delivery only; the capability SHALL still attach to the one graph, fact store and freshness
+lease that `UnifiedStructuralSubstrate` requires.
+
+#### Scenario: A new check is delivered at a moment
+
+- **GIVEN** a proposed check that finds a new kind of problem in a diff
+- **WHEN** it is designed
+- **THEN** it is delivered as a finding at a hook moment or on an existing answer
+- **AND** the number of registered MCP tools does not change
+
+#### Scenario: An existing tool becomes an evidence source under its own name
+
+- **GIVEN** an existing tool whose result a hook moment starts to use
+- **WHEN** the moment calls its handler
+- **THEN** the tool keeps its name and stays callable wherever it was callable before
+
 ## System Diagram
 
 ```mermaid
@@ -793,7 +814,7 @@ graph TB
 ### CLI
 
 **Purpose**: Command-line interface for user interaction and command processing
-**Location**: `src/cli/commands/mcp.ts, src/cli/commands/view.ts, src/cli/commands/openlore.ts`
+**Location**: `src/cli/index.ts, src/cli/commands/mcp.ts, src/cli/commands/view.ts`
 
 ### API
 
@@ -813,7 +834,7 @@ graph TB
 ### Repository
 
 **Purpose**: Data persistence and retrieval
-**Location**: `src/utils/command-helpers.ts, src/core/services/mcp-handlers/utils.ts`
+**Location**: `src/core/services/edge-store.ts, src/core/analyzer/vector-index.ts, src/core/decisions/atomic-store.ts`
 
 ## Data Flow
 

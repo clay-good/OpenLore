@@ -4,6 +4,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 vi.mock('./utils.js', () => ({
   validateDirectory: vi.fn(async (d: string) => d),
@@ -51,9 +54,14 @@ const CG: SerializedCallGraph = {
 const WIRED: ExternalWiringReport = {
   wired: [{ file: 'src/cli/index.ts', receipts: [{ config: 'package.json', key: 'bin.tool' }] }],
   boundaries: [{ config: 'package.json', key: 'scripts.dynamic', reference: '$SCRIPT', reason: 'dynamic-reference' }],
-  boundariesOmitted: 0,
+  boundariesOmitted: 0, manifestsRead: ['package.json'],
 };
-const NONE: ExternalWiringReport = { wired: [], boundaries: [], boundariesOmitted: 0 };
+const NONE: ExternalWiringReport = { wired: [], boundaries: [], boundariesOmitted: 0, manifestsRead: [] };
+// A file named only by a workspace member's manifest: the receipt is that manifest's own path.
+const WORKSPACE_WIRED: ExternalWiringReport = {
+  wired: [{ file: 'src/unused.ts', receipts: [{ config: 'packages/api/package.json', key: 'scripts.start' }] }],
+  boundaries: [], boundariesOmitted: 0, manifestsRead: ['package.json', 'packages/api/package.json'],
+};
 
 type DeadResult = {
   candidateDead: Array<{ name: string; confidence: string; reason: string }>;
@@ -93,17 +101,28 @@ describe('find_dead_code with config-wired roots', () => {
     expect(r.externalWiring.boundaries).toEqual(WIRED.boundaries);
     const caveats = r.soundness.caveats.join(' ');
     expect(caveats).toMatch(/1 config reference\(s\) could not be resolved/);
-    expect(caveats).toMatch(/Workspace-member manifests, framework routing conventions/);
+    expect(caveats).toMatch(/A manifest outside the declared workspace set, framework routing conventions/);
   });
 
   it('states the all-functions rule only when something is wired', async () => {
     vi.mocked(collectExternalWiring).mockResolvedValue(NONE);
     const none = (await handleFindDeadCode({ directory: '/p' }) as DeadResult).soundness.caveats.join(' ');
     expect(none).not.toMatch(/Every function in a file a config invokes/);
-    expect(none).toMatch(/Workspace-member manifests/);
+    expect(none).toMatch(/A manifest outside the declared workspace set/);
     vi.mocked(collectExternalWiring).mockResolvedValue(WIRED);
     const wired = (await handleFindDeadCode({ directory: '/p' }) as DeadResult).soundness.caveats.join(' ');
     expect(wired).toMatch(/Every function in a file a config invokes is treated as live/);
+  });
+
+  it('counts a declared workspace member\'s wiring as a root, receipted with the member manifest', async () => {
+    vi.mocked(collectExternalWiring).mockResolvedValue(WORKSPACE_WIRED);
+    const r = await handleFindDeadCode({ directory: '/p' }) as DeadResult;
+    expect(r.candidateDead.map(d => d.name).sort()).toEqual(['parseFlags', 'runCli']);
+    expect(r.rootKinds.externallyWired).toBe(1);
+    expect(r.externalWiring.files).toEqual([
+      { file: 'src/unused.ts', receipts: [{ config: 'packages/api/package.json', key: 'scripts.start' }], roots: 1 },
+    ]);
+    expect(r.soundness.caveats.join(' ')).toMatch(/each DECLARED workspace member/);
   });
 
   it('shares the wired roots with the dead set other conclusions read', async () => {
@@ -116,6 +135,43 @@ describe('find_dead_code with config-wired roots', () => {
     const r = await handleFindDeadCode({ directory: '/p' }) as DeadResult;
     expect(r.candidateDead.map(d => d.name).sort()).toEqual(['orphan', 'parseFlags', 'runCli']);
     expect(r.rootKinds.externallyWired).toBe(0);
+  });
+});
+
+describe('find_dead_code inside a package whose manifest was not read', () => {
+  // A VS Code extension in a Python repository: `vscode-extension/package.json` says
+  // `"main": "./out/extension.js"`, and nothing in the repository imports `activate`. That manifest
+  // is neither the root's nor a declared workspace member's, so it is never read — and `activate`
+  // was rated HIGH-confidence dead.
+  const NESTED: SerializedCallGraph = {
+    ...CG,
+    nodes: [node({ id: 'vscode-extension/src/extension.ts::activate' }), node({ id: 'src/unused.ts::orphan' })],
+    edges: [],
+  };
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'ol-nested-manifest-'));
+    mkdirSync(join(dir, 'vscode-extension', 'src'), { recursive: true });
+    writeFileSync(join(dir, 'vscode-extension', 'package.json'), '{"main":"./out/extension.js"}');
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: NESTED } as never);
+    return () => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+  const of = (r: DeadResult, name: string) => r.candidateDead.find(d => d.name === name)!;
+
+  it('caps a candidate under an unread manifest at low, naming the manifest', async () => {
+    vi.mocked(collectExternalWiring).mockResolvedValue(NONE);
+    const r = await handleFindDeadCode({ directory: dir }) as DeadResult;
+    expect(of(r, 'activate').confidence).toBe('low');
+    expect(of(r, 'activate').reason).toMatch(/inside the package declared by vscode-extension\/package\.json, which was not read for wiring/);
+    // A file with no enclosing manifest is untouched by this rule.
+    expect(of(r, 'orphan').confidence).toBe('medium');
+    expect(of(r, 'orphan').reason).not.toMatch(/not read for wiring/);
+  });
+
+  it('leaves a candidate alone when its nearest manifest WAS read', async () => {
+    vi.mocked(collectExternalWiring).mockResolvedValue({ ...NONE, manifestsRead: ['vscode-extension/package.json'] });
+    const r = await handleFindDeadCode({ directory: dir }) as DeadResult;
+    expect(of(r, 'activate').confidence).toBe('medium');
   });
 });
 

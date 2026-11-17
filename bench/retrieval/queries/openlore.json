@@ -1,0 +1,32 @@
+{
+  "corpus": "openlore",
+  "description": "This repository. Targets are production symbols; a query hits when any listed target is ranked.",
+  "queries": [
+    { "kind": "identifier", "query": "resolveEmbedder", "targets": [{ "name": "resolveEmbedder", "file": "src/core/analyzer/embedder.ts" }] },
+    { "kind": "identifier", "query": "safeJoin path confinement", "targets": [{ "name": "safeJoin", "file": "src/utils/path-confinement.ts" }] },
+    { "kind": "identifier", "query": "handleOrient", "targets": [{ "name": "handleOrient", "file": "src/core/services/mcp-handlers/orient.ts" }] },
+    { "kind": "identifier", "query": "sanitizeForTerminal", "targets": [{ "name": "sanitizeForTerminal", "file": "src/utils/misc.ts" }] },
+    { "kind": "identifier", "query": "readOpenLoreConfig", "targets": [{ "name": "readOpenLoreConfig", "file": "src/core/services/config-manager.ts" }] },
+    { "kind": "identifier", "query": "checkRetrievalMode in doctor", "targets": [{ "name": "checkRetrievalMode", "file": "src/cli/commands/doctor.ts" }] },
+    { "kind": "identifier", "query": "collectIndexStatus", "targets": [{ "name": "collectIndexStatus", "file": "src/cli/commands/status.ts" }] },
+    { "kind": "identifier", "query": "servedRetrievalMode", "targets": [{ "name": "servedRetrievalMode", "file": "src/core/analyzer/embedder.ts" }] },
+    { "kind": "identifier", "query": "handleSearchCode", "targets": [{ "name": "handleSearchCode", "file": "src/core/services/mcp-handlers/semantic.ts" }] },
+    { "kind": "identifier", "query": "buildBm25Corpus", "targets": [{ "name": "buildBm25Corpus", "file": "src/core/analyzer/vector-index.ts" }] },
+    { "kind": "identifier", "query": "atomicWriteFile", "targets": [{ "name": "atomicWriteFile", "file": "src/core/decisions/atomic-store.ts" }] },
+    { "kind": "identifier", "query": "repairInBackground", "targets": [{ "name": "repairInBackground", "file": "src/core/services/cold-start-bootstrap.ts" }] },
+    { "kind": "paraphrase", "query": "strip control sequences so a repository cannot forge terminal output", "targets": [{ "name": "sanitizeForTerminal", "file": "src/utils/misc.ts" }] },
+    { "kind": "paraphrase", "query": "make sure a joined path stays inside the project root", "targets": [{ "name": "safeJoin", "file": "src/utils/path-confinement.ts" }] },
+    { "kind": "paraphrase", "query": "choose which embedding provider to use from environment and configuration", "targets": [{ "name": "resolveEmbedder", "file": "src/core/analyzer/embedder.ts" }] },
+    { "kind": "paraphrase", "query": "which tests should run for this change", "targets": [{ "name": "handleSelectTests" }] },
+    { "kind": "paraphrase", "query": "record an architectural decision", "targets": [{ "name": "handleRecordDecision" }] },
+    { "kind": "paraphrase", "query": "detect when specifications no longer match the code", "targets": [{ "name": "handleCheckSpecDrift" }] },
+    { "kind": "paraphrase", "query": "find unreachable functions that nothing calls", "targets": [{ "name": "handleFindDeadCode" }] },
+    { "kind": "paraphrase", "query": "cheapest call route between two functions", "targets": [{ "name": "handleFindPath" }] },
+    { "kind": "paraphrase", "query": "files that are usually edited in the same commit", "targets": [{ "name": "analyzeChangeCoupling" }, { "name": "handleGetChangeCoupling" }] },
+    { "kind": "paraphrase", "query": "hide API keys and passwords before printing text", "targets": [{ "name": "redactSecretText" }, { "name": "redactSecrets" }, { "name": "redactSecretTextWithKnownValues" }] },
+    { "kind": "paraphrase", "query": "write a file so a crash never leaves it half written", "targets": [{ "name": "atomicWriteFile" }] },
+    { "kind": "paraphrase", "query": "split identifiers into words for keyword ranking", "targets": [{ "name": "tokenize", "file": "src/core/analyzer/bm25-tokenizer.ts" }] },
+    { "kind": "paraphrase", "query": "persist a note tied to a symbol for later sessions", "targets": [{ "name": "handleRemember" }] },
+    { "kind": "paraphrase", "query": "what breaks downstream if I commit this diff", "targets": [{ "name": "handleBlastRadius" }] }
+  ]
+}

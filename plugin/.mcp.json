@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "openlore": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/runtime/openlore.mjs",
+        "mcp",
+        "--preset",
+        "substrate"
+      ]
+    }
+  }
+}

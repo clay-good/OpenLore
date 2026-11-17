@@ -1,0 +1,10 @@
+{
+  "name": "openlore",
+  "version": "3.7.0",
+  "description": "Deterministic, local-only structural context for coding agents: the call graph, tests, specs, and decisions that bear on each edit, delivered through hooks and MCP.",
+  "author": { "name": "Clay Good" },
+  "homepage": "https://openlore.sh",
+  "repository": "https://github.com/clay-good/openlore",
+  "license": "MIT",
+  "keywords": ["code-intelligence", "call-graph", "mcp", "static-analysis", "agent-memory"]
+}

@@ -1,3 +1,6 @@
+import { configurationCandidateSchema } from '../../core/configuration/tool-schema.js';
+import { redactSecretString } from '../../core/services/secret-redaction.js';
+import { configureOpenLoreMcp } from '../../core/configuration/mcp.js';
 /**
  * openlore MCP Server
  *
@@ -36,8 +39,10 @@ import {
 } from '../../core/services/mcp-handlers/tool-guard.js';
 
 import { sanitizeMcpError, validateDirectory } from '../../core/services/mcp-handlers/utils.js';
+import { setActiveToolSurface } from '../../core/services/mcp-handlers/active-surface.js';
 import { createTracker, updateTracker, updatePanic, resetPanicOnOrient, getFreshnessSignal, trackerToPanicState } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import type { EpistemicTracker } from '../../core/services/mcp-handlers/epistemic-lease.js';
+import { SessionLedger, servedItems } from '../../core/services/session-ledger.js';
 import {
   registerRepairBuilder,
   registerRepairHost,
@@ -75,6 +80,7 @@ import {
 import { dispatchTool, UnknownToolError } from '../../core/services/tool-dispatch.js';
 import { ensureServeDaemon, callServeTool, isServePresetRejection, type ServeEndpoint } from '../../core/services/serve-client.js';
 import { createShutdownCoordinator } from '../../utils/shutdown.js';
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import { buildToolListPayload } from '../../core/services/mcp-standing-cost.js';
 import {
   handleAnalyzeCodebase,
@@ -177,6 +183,11 @@ const FEDERATION_PROPS = {
 } as const;
 
 export const TOOL_DEFINITIONS = [
+  {
+    name:'configure_openlore',
+    description:'Inspect repository configuration without an index or daemon; preview, apply, verify or revert a revision-bound plan. Writes require a scoped host startup grant. Does not reason with an internal model.',
+    inputSchema:{type:'object',additionalProperties:false,properties:{directory:{type:'string',description:'Absolute path; default cwd'},action:{type:'string',enum:['inspect','preview','apply','verify','revert'],description:'inspect; preview a candidate; apply/verify/revert a preview plan.'},scope:{type:'string',description:'Repository-relative directory to inspect (default: root).'},candidate:configurationCandidateSchema,plan:{type:'object',description:'Exact complete preview result, unchanged, required for apply/verify/revert.'}},required:['action']},
+  },
   {
     name: 'orient',
     description:
@@ -642,6 +653,27 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'verify_change',
+    description:
+      'USE THIS WHEN: you just made a change and want ONE actionable checklist before landing — ' +
+      '"what did I break and what must I re-run?". Flattens the diff-based signals into one ' +
+      'severity-ranked receipt — each item names its subject, the check that produced it, a ' +
+      'severity, and the single next action — plus the tests to run. Composes blast_radius (which ' +
+      'already folds in select_tests and spec/memory/decision drift) and structural_diff ' +
+      '(removed/re-signed functions, new calls into deprecated code); no LLM, no new analysis. ' +
+      'Advisory and grader-not-author: it names what to fix and run, but runs and edits nothing. ' +
+      'Its sibling blast_radius returns the full structured briefing; this is the flattened ' +
+      'next-action list for a propose-verify-correct loop. Run analyze_codebase first.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        baseRef: { type: 'string', description: 'Git ref to diff the working tree against (e.g. "HEAD", "main"). Default HEAD (uncommitted changes).' },
+      },
+    },
+  },
+  {
     name: 'find_dead_code',
     description:
       'USE THIS WHEN: "what code is unreachable / dead?", "is anything calling X?", or ' +
@@ -668,10 +700,11 @@ export const TOOL_DEFINITIONS = [
     description:
       'USE THIS BEFORE asserting a structural fact ("X is dead", "Y calls Z", "this is safe to change") ' +
       'or citing a decision ("ADR abc12345 governs this"). ' +
-      'Returns a deterministic verdict (confirmed | refuted | unverifiable) + a citation receipt (spans, ' +
-      'content hashes, index commit) — a graph computation, never an LLM guess. kinds: calls, reaches, ' +
+      'Returns a deterministic verdict (confirmed | refuted | unverifiable) + a citation receipt — a ' +
+      'graph computation, never an LLM guess. kinds: calls, reaches, ' +
       'impacts, dead, safe-to-change (structural); decision-current (is a recorded decision still ' +
-      'authoritative, or superseded/rejected?). "unverifiable" is first-class when the claim hits a ' +
+      'authoritative or superseded?); decision-governed (a symbol); endpoint-implemented, ' +
+      'endpoint-consumed ("METHOD /path"). "unverifiable" is first-class when the claim hits a ' +
       'dynamic-dispatch blind spot or names an unknown decision — hedge or read the source. Run ' +
       'analyze_codebase first for structural kinds.',
     inputSchema: {
@@ -681,10 +714,10 @@ export const TOOL_DEFINITIONS = [
         directory: { type: 'string', description: DIR_DESC },
         kind: {
           type: 'string',
-          enum: ['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current'],
-          description: 'The kind of claim to verify (structural, or decision-current for decision authority).',
+          enum: ['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current', 'decision-governed', 'endpoint-implemented', 'endpoint-consumed', 'lease-current'],
+          description: 'The kind of claim to verify.',
         },
-        subject: { type: 'string', description: 'What the claim is about: a function/method name for structural kinds, or an 8-character decision id for decision-current.' },
+        subject: { type: 'string', description: 'A symbol; a decision id; "METHOD /path"; or a leaseToken.' },
         object: { type: 'string', description: 'The second symbol — required for relational kinds (calls, reaches, impacts).' },
       },
       required: ['kind', 'subject'],
@@ -722,20 +755,21 @@ export const TOOL_DEFINITIONS = [
             'Shape { taskId?, writeSet: [{ id:"file::name", filePath?, writeMode?:append|modify }], readSet?:string[] }. ' +
             'Adds an `escapeAnalysis` block; omit = unchanged behavior.',
           properties: {
-            taskId: { type: 'string' },
+            taskId: { type: 'string', description: 'The task id, as named in plan_parallel_work.' },
             writeSet: {
               type: 'array',
+              description: 'The symbols the task declared it would edit.',
               items: {
                 type: 'object',
                 properties: {
-                  id: { type: 'string' },
-                  filePath: { type: 'string' },
-                  writeMode: { type: 'string', enum: ['append', 'modify'] },
+                  id: { type: 'string', description: 'Symbol id, "file::name".' },
+                  filePath: { type: 'string', description: 'The file that holds the symbol.' },
+                  writeMode: { type: 'string', enum: ['append', 'modify'], description: '"append" for pure registration-site additions (default "modify").' },
                 },
                 required: ['id'],
               },
             },
-            readSet: { type: 'array', items: { type: 'string' } },
+            readSet: { type: 'array', items: { type: 'string' }, description: 'Symbol ids the task reads but declared it would not edit.' },
           },
         },
         peerFootprints: {
@@ -1065,37 +1099,42 @@ export const TOOL_DEFINITIONS = [
       additionalProperties: false,
       properties: {
         directory: { type: 'string', description: DIR_DESC },
-        query: { type: 'string', maxLength: 1000 },
+        query: { type: 'string', maxLength: 1000, description: 'The query that missed, exactly as passed to the search.' },
         surface: {
           type: 'string',
           enum: ['code', 'spec'],
+          description: '"code" for search_code, "spec" for search_specs.',
         },
         target: {
           type: 'object',
           additionalProperties: false,
+          description: 'The result you expected the search to return.',
           properties: {
             kind: {
               type: 'string',
               enum: ['symbol', 'file', 'requirement'],
+              description: '"symbol" or "file" on surface "code"; "requirement" on surface "spec".',
             },
             value: {
               type: 'string',
               minLength: 1,
               maxLength: 2048,
+              description: 'A symbol name or node id, a repository-relative file path, or a requirement id.',
             },
             filePath: {
               type: 'string',
               minLength: 1,
               maxLength: 2048,
+              description: 'Symbol targets only: the file that declares it, when the name is in more than one file.',
             },
           },
           required: ['kind', 'value'],
         },
-        limit: { type: 'integer', minimum: 1, maximum: 100 },
-        language: { type: 'string', maxLength: 256 },
-        minFanIn: { type: 'integer', minimum: 0 },
-        domain: { type: 'string', maxLength: 256 },
-        section: { type: 'string', maxLength: 256 },
+        limit: { type: 'integer', minimum: 1, maximum: 100, description: 'The limit the search used (default 10).' },
+        language: { type: 'string', maxLength: 256, description: 'The language filter the search used (surface "code" only).' },
+        minFanIn: { type: 'integer', minimum: 0, description: 'The minFanIn filter the search used (surface "code" only).' },
+        domain: { type: 'string', maxLength: 256, description: 'The domain filter the search used (surface "spec" only).' },
+        section: { type: 'string', maxLength: 256, description: 'The section filter the search used (surface "spec" only).' },
       },
       required: ['query', 'surface', 'target'],
     },
@@ -1678,6 +1717,99 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'certify_provenance',
+    description:
+      'Emit a reproducible, content-addressed record of WHAT A CHANGE DOES, for attachment to the ' +
+      'repo\'s supply-chain provenance (SLSA / in-toto). Composes change_impact_certificate (blast ' +
+      'radius, paths newly opened into a declared surface, drifted specs, tests to run) + ' +
+      'structural_diff (added/removed/re-signed functions), serialized canonically and hashed (sha256) ' +
+      'so any consumer can RECOMPUTE and verify it — checkable, not merely signed. Emit as an in-toto ' +
+      'predicate (format "in-toto") or standalone JSON. OpenLore emits, it does not sign. Bad base is ' +
+      'fatal; boundaries disclosed (the claim is a lower bound, never "safe"). Sibling ' +
+      'change_impact_certificate briefs YOUR pending diff in-session; this is the portable attestation ' +
+      'a third party recomputes. No LLM.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        baseRef: { type: 'string', description: 'Git ref to diff the working tree against (default HEAD).' },
+        change: { type: 'string', description: 'Change id recorded on the certificate (spec-store context; default "working-tree").' },
+        allowBaseFallback: { type: 'boolean', description: 'Accept the disclosed main → master → HEAD~1 base fallback instead of failing on an unresolvable base.' },
+        format: { type: 'string', enum: ['in-toto', 'json'], description: 'Output shape: an unsigned in-toto Statement v1 envelope (its shape structurally checked locally), or standalone JSON (default json).'  },
+      },
+    },
+  },
+  {
+    name: 'certify_merge',
+    description:
+      'USE THIS WHEN: before landing two branches that merge cleanly — "will these combine correctly, ' +
+      'or does one break what the other calls?". Builds the call graph at the merge-base and each ' +
+      'side, and reports where one side ADDS a call into a symbol the other side changed incompatibly ' +
+      'or removed — the "git merges cleanly, the combination is broken" failure textual merge cannot ' +
+      'see. Verdict per finding: incompatible (removed / breaking signature) or ' +
+      'potentially-incompatible (unprovable), never silently safe; the overall verdict is a sound ' +
+      'lower bound ("no detected incompatibility"). Completes the coordination arc after ' +
+      'plan_parallel_work (dispatch) and map_in_flight_conflicts (in flight); distinct from the ' +
+      'merge-tree oracle (will git textually conflict) — this answers what breaks when it does not. No LLM.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        ours: { type: 'string', description: 'One side to merge (a git ref).' },
+        theirs: { type: 'string', description: 'The other side to merge (a git ref).' },
+        base: { type: 'string', description: 'Merge base to compare against (default: the git merge-base of ours and theirs).' },
+        maxFindings: { type: 'number', description: 'Cap on reported conflicts (default 200).' },
+      },
+      required: ['ours', 'theirs'],
+    },
+  },
+  {
+    name: 'declare_footprint',
+    description:
+      'USE THIS WHEN: several agents work in worktrees of one clone and you start a task. Publishes ' +
+      'your writeSet/readSet (symbols or files; unknown names = intended creations) to the clone\'s ' +
+      'peer board and returns hazards vs live peers (the plan_parallel_work classes plus ' +
+      'duplicate-intent). action: release when done, list to read. Entries end on release, merged or ' +
+      'deleted branch, or 30 min idle, never on a check git could not answer. ' +
+      'Advisory; peer text local-unreviewed.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        action: { type: 'string', enum: ['declare', 'release', 'list'], description: 'declare (default), release, or list.' },
+        actorId: { type: 'string', description: 'Stable agent id (default <branch>@<worktree>).' },
+        title: { type: 'string', description: 'Task title (120 chars).' },
+        writeSet: { type: 'array', items: { type: 'string' }, description: 'Symbols or files this agent will edit; a name not in the index is an intended creation.' },
+        readSet: { type: 'array', items: { type: 'string' }, description: 'Symbols or files this agent depends on but will not edit.' },
+        writeMode: { type: 'string', enum: ['modify', 'append'], description: '"append" for pure registration-site additions (default "modify").' },
+      },
+    },
+  },
+  {
+    name: 'fleet_status',
+    description:
+      'USE THIS WHEN: coordinating parallel agents/branches off a moving base — "which of my recorded ' +
+      'verdicts still hold, and what is the coordination picture?". Re-checks each recorded ' +
+      'coordination verdict (a clean blast radius, a stable public surface, a passed certify_merge) ' +
+      'against the current graph via the freshness lease: still-valid / carried / invalidated / ' +
+      'needs-reverification — a verdict is never served fresh once its base moved without the check. ' +
+      'Composes the coordination arc (plan_parallel_work → map_in_flight_conflicts → certify_merge), ' +
+      'referencing each tool. A record ENDS on board-entry evidence (30 min idle, recorded dir gone, branch ' +
+      'deleted or merged): then a count with its reason, not a live verdict. A rule it could not evaluate is ' +
+      'in unknownPredicates, never read as ended. Advisory.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        branches: { type: 'array', items: { type: 'string' }, description: 'In-flight branches to compose the arc for (attribution + the tools to run per branch).' },
+      },
+    },
+  },
+  {
     name: 'plan_parallel_work',
     description:
       'USE THIS WHEN: before fanning N tasks out across agents/worktrees — "which of these tasks are ' +
@@ -1709,6 +1841,7 @@ export const TOOL_DEFINITIONS = [
             required: ['id'],
           },
         },
+        includeBoard: { type: 'boolean', description: 'Also plan the live peer-board agents (declare_footprint) as tasks board:<actorId>.' },
       },
       required: ['tasks'],
     },
@@ -1743,11 +1876,11 @@ export const TOOL_DEFINITIONS = [
           items: {
             type: 'object',
             properties: {
-              id: { type: 'string' },
-              seedSymbols: { type: 'array', items: { type: 'string' } },
-              seedFiles: { type: 'array', items: { type: 'string' } },
-              intent: { type: 'string' },
-              writeMode: { type: 'string', enum: ['append', 'modify'] },
+              id: { type: 'string', description: 'Unique task id within this call.' },
+              seedSymbols: { type: 'array', items: { type: 'string' }, description: 'Symbol names/ids the task will edit.' },
+              seedFiles: { type: 'array', items: { type: 'string' }, description: 'File paths the task will edit (every symbol in the file enters the write-set).' },
+              intent: { type: 'string', description: 'Optional intent text (widens sparse seeds only; never guesses edits).' },
+              writeMode: { type: 'string', enum: ['append', 'modify'], description: '"append" for pure registration-site additions (default "modify").' },
             },
             required: ['id'],
           },
@@ -1850,6 +1983,50 @@ export const TOOL_DEFINITIONS = [
         communityId: { type: 'string', description: 'Profile one community/region by id (list ids with get_map).' },
         filePath: { type: 'string', description: 'Profile a single file (exact path or a unique path suffix). Most specific scope: if both filePath and communityId are given, filePath wins.' },
         language: { type: 'string', description: 'Restrict the returned languages to this one (e.g. "TypeScript").' },
+      },
+    },
+  },
+  {
+    name: 'certify_service_contract',
+    description:
+      'USE THIS WHEN: you change an OpenAPI, protobuf or GraphQL schema or the code serving it. Unlike ' +
+      'certify_public_surface (exported code), this certifies the HTTP contract. No baseRef: declared ' +
+      'operations and parity with indexed route handlers. With baseRef: a closed-table verdict per ' +
+      'changed element vs the merge-base (breaking | dangerous | non-breaking | potentially-breaking), ' +
+      'breaking ones with their in-repo client call sites, and a suggestedBump. An unreadable spec is ' +
+      'notAssessed, never unchanged. Advisory findings can be gated by enforcement.policy.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        baseRef: { type: 'string', description: 'Compare with this ref (its merge-base with HEAD).' },
+        maxResults: { type: 'number', description: 'Cap per list (default 100, max 1000).' },
+        allowBaseFallback: { type: 'boolean', description: 'Fall back to the default branch when baseRef does not resolve (disclosed).' },
+        federation: { type: 'boolean', description: 'Also census client call sites in indexed sibling repositories (.openlore/federation.json). A service\'s consumers are usually not in its own repository; every sibling not censused is disclosed.' },
+        federationRepos: { type: 'array', items: { type: 'string' }, maxItems: 100, description: 'Limit the federation census to these registry repo names (default: all).' },
+      },
+    },
+  },
+  {
+    name: 'get_handoff_briefing',
+    description:
+      'USE THIS WHEN: you take over in-flight work in a fresh context (after compaction, a cleared ' +
+      'session, or another machine) and need the state of the change, not a prose summary. Unlike ' +
+      'blast_radius (reviews a pending diff), briefing_since (catches up on others\' landed changes) ' +
+      'and orient (starts a task), this hands an in-flight change over: the symbols touched (working ' +
+      'tree, plus those this session committed when a session ledger is live) with callers, the open ' +
+      'openspec changes naming them with unchecked tasks quoted, the tests that reach them, anchored ' +
+      'memories and decisions in scope (orphaned ones withheld), specs that may go stale, and the ' +
+      'uncommitted files and index lease. Every element names the call that expands it; a budget trims ' +
+      'the least central sections first with omission receipts. Deterministic: the same repository ' +
+      'state gives the same briefing. A clean tree says nothing is in flight. Reads no transcript.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        directory: { type: 'string', description: DIR_DESC },
+        tokenBudget: { type: 'number', description: 'Approximate token budget for the briefing (default 1500, 300-8000).' },
       },
     },
   },
@@ -2059,9 +2236,11 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'record_decision',
     description:
-      'Record a DRAFT architectural decision — a proposal, not a final record. ' +
+      'Record an architectural decision. ' +
       'Call this on a significant design choice: data structure, library, API contract, auth strategy. ' +
-      'Diff-grounded consolidation then promotes it (possibly rewording it, keeping your text as ' +
+      'Under decision autopilot (the default unless a blocking decisions gate is installed) it is accepted ' +
+      'at once as auto-approved and a human reviews it later; otherwise it is a DRAFT, and ' +
+      'diff-grounded consolidation then promotes it (possibly rewording it, keeping your text as ' +
       'authorStatement), merges it, or rejects it — always with a stated reason. The response returns ' +
       'the draft id and the command that reads the verdict; re-recording a decided draft returns that ' +
       'verdict instead of a second draft. Use supersedes when a later decision replaces an earlier one.',
@@ -2092,8 +2271,9 @@ export const TOOL_DEFINITIONS = [
           additionalProperties: false,
           description: 'Optional versioned architecture constraints. Rules use the existing layers / forbidden / allowedOnly vocabulary and inherit this decision\'s lifecycle.',
           properties: {
-            version: { type: 'integer', enum: [1] },
+            version: { type: 'integer', enum: [1], description: 'Constraint format version; always 1.' },
             eligibility: {
+              description: 'Whether the decision reduces to a checkable repository property: eligible (state the enforced boundary), ineligible (state why), or unclassified.',
               oneOf: [
                 {
                   type: 'object', additionalProperties: false,
@@ -2122,6 +2302,7 @@ export const TOOL_DEFINITIONS = [
             rules: {
               type: 'array',
               maxItems: 10,
+              description: 'The checkable rules: layers, forbidden, or allowedOnly, each with an id and a scope.',
               items: {
                 oneOf: [
                   {
@@ -2258,6 +2439,7 @@ export const TOOL_DEFINITIONS = [
             properties: {
               symbol: { type: 'string', description: 'Function/method name (optional)' },
               file: { type: 'string', description: 'Repo-relative file path (optional)' },
+              span: { type: 'string', minLength: 1, maxLength: 2000, description: 'Exact text inside the symbol (optional); only edits to it drift the memory' },
             },
           },
         },
@@ -2268,6 +2450,34 @@ export const TOOL_DEFINITIONS = [
           description: 'Classification (default note); never inferred.',
         },
         supersedes: { type: 'string', description: 'Id of a prior memory to retire (kept queryable via asOf).' },
+        trigger: {
+          type: 'object',
+          additionalProperties: false,
+          maxProperties: 1,
+          description: 'One predicate; pushed into orient/blast_radius on a match. Globs: * ? **.',
+          properties: {
+            fileGlob: { type: 'string', minLength: 1, maxLength: 256, description: 'Fires when a touched file matches this glob.' },
+            symbolPattern: { type: 'string', minLength: 1, maxLength: 256, description: 'Fires when a touched symbol name matches this glob.' },
+            specDomain: { type: 'string', minLength: 1, maxLength: 256, description: 'Fires when the touched code is in this spec domain.' },
+            withinHops: { type: 'integer', minimum: 1, maximum: 20, description: 'Call hops from a touched symbol.' },
+          },
+        },
+        pinned: { type: 'boolean', description: 'Push into every full orient briefing (cap 10).' },
+        claims: {
+          type: 'array',
+          maxItems: 10,
+          description: 'verify_claim claims it rests on; must hold now, rechecked at recall.',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['kind', 'subject'],
+            properties: {
+              kind: { type: 'string', enum: ['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current'], description: 'The verify_claim kind.' },
+              subject: { type: 'string', minLength: 1, maxLength: 256, description: 'A symbol, or a decision id for decision-current.' },
+              object: { type: 'string', minLength: 1, maxLength: 256, description: 'The second symbol, for calls, reaches and impacts.' },
+            },
+          },
+        },
       },
       required: ['content'],
     },
@@ -2310,11 +2520,12 @@ const _RWD  = { readOnlyHint: false, destructiveHint: true, idempotentHint: fals
 const _RWDI = { readOnlyHint: false, destructiveHint: true, idempotentHint: true  } as const;
 
 const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW | typeof _RWD | typeof _RWDI> = {
+  configure_openlore: _RWD,
   orient: _RO, analyze_codebase: _RWI, get_architecture_overview: _RO,
   prepare_spec_generation: _RO, prepare_spec_repair: _RO,
   get_refactor_report: _RO, get_call_graph: _RO, get_duplicate_report: _RO,
   get_signatures: _RO, get_subgraph: _RO, trace_execution_path: _RO,
-  get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO, select_tests: _RO, blast_radius: _RO, find_dead_code: _RO, structural_diff: _RO, get_change_coupling: _RO, check_architecture: _RO,
+  get_mapping: _RO, check_spec_drift: _RO, analyze_impact: _RO, select_tests: _RO, blast_radius: _RO, verify_change: _RO, find_dead_code: _RO, structural_diff: _RO, get_change_coupling: _RO, check_architecture: _RO,
   get_low_risk_refactor_candidates: _RO, get_leaf_functions: _RO,
   get_critical_hubs: _RO, get_function_skeleton: _RO, get_god_functions: _RO,
   suggest_insertion_points: _RO, search_code: _RO, list_spec_domains: _RO,
@@ -2328,15 +2539,19 @@ const TOOL_ANNOTATIONS: Record<string, typeof _RO | typeof _RWI | typeof _RW | t
   detect_changes: _RO, get_health_map: _RO, get_surprising_connections: _RO, record_decision: _RW, list_decisions: _RO,
   approve_decision: _RWI, reject_decision: _RWDI, sync_decisions: _RWI,
   remember: _RW, recall: _RO, verify_claim: _RO,
+  declare_footprint: _RW,
   // Audited writers (change: adopt-mcp-protocol-conformance): `persist: true` writes a certificate,
   // and federation_status adopts newly indexed fingerprints into the federation manifest.
   spec_store_status: _RO, working_set_context: _RO, change_impact_certificate: _RWI, federation_status: _RWI,
+  certify_provenance: _RO,
   get_landmarks: _RO, get_map: _RO, find_path: _RO,
-  plan_parallel_work: _RO, map_in_flight_conflicts: _RO, get_language_support: _RO,
+  plan_parallel_work: _RO, map_in_flight_conflicts: _RO, certify_merge: _RO, fleet_status: _RO, get_language_support: _RO,
   report_coverage_gaps: _RO,
   certify_public_surface: _RO,
   get_style_fingerprint: _RO,
   briefing_since: _RO,
+  get_handoff_briefing: _RO,
+  certify_service_contract: _RO,
   find_clones: _RO,
   analyze_error_propagation: _RO,
   analyze_env_impact: _RO,
@@ -2420,6 +2635,7 @@ const MINIMAL_TOOLS = new Set([
 // (orient + search + governance) omits. CodeGraph wins its benchmark with a
 // surface like this; openlore's was either too lean (no traversal) or all ~60.
 export const TOOL_PRESETS: Record<string, Set<string>> = {
+  configuration: new Set(['configure_openlore']),
   minimal: MINIMAL_TOOLS,
   // Graph-navigation core: orient to enter, then traverse/trace/impact + compact
   // symbol bodies — no governance tools, no inventories.
@@ -2441,7 +2657,7 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
   // Deliberately NOT in the default or `minimal` surface (mcp-quality: minimize the
   // tools an agent must consider). search_code helps the agent name the subject precisely.
   verify: new Set([
-    'orient', 'search_code', 'verify_claim',
+    'orient', 'search_code', 'verify_claim', 'verify_change', 'certify_provenance',
   ]),
   // Multi-repo federation (opt-in): the cross-repo conclusion tools plus the
   // registry status tool. `federation_status` exists ONLY here — the default and
@@ -2459,7 +2675,7 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
   // (mcp-quality: minimize the tools an agent must consider; changes: add-parallel-work-plan,
   // add-cross-actor-interference-map).
   coordination: new Set([
-    'orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'analyze_impact', 'find_path',
+    'orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'certify_merge', 'fleet_status', 'declare_footprint', 'analyze_impact', 'find_path',
   ]),
   // The navigation core plus governance reads (change: unify-navigation-and-governance-substrate;
   // architecture: UnifiedStructuralSubstrate). The `navigation` graph-traversal core
@@ -2482,6 +2698,17 @@ export const TOOL_PRESETS: Record<string, Set<string>> = {
     'recall', 'verify_claim', 'blast_radius',
     'prepare_spec_generation', 'prepare_spec_repair',
   ]),
+  // The Claude Code plugin's set (change: reframe-governance-as-agent-evidence, design 1-2):
+  // deterministic evidence tools only. It leaves out spec generation (prepare_spec_*) and the
+  // orientation views a plugin user rarely needs (trace_execution_path, get_landmarks, get_map),
+  // and adds verify_change, the pull form of the before-stop moment. Every other tool is in
+  // `substrate` too; verify_change joins `substrate` only after a benchmark-protocol run
+  // (DefaultSurfaceDecisionsRideTheBenchmarkProtocol). Every tool left out stays available under
+  // its own name through another preset, `--preset full`, and Pi.
+  plugin: new Set([
+    'orient', 'search_code', 'get_subgraph', 'analyze_impact', 'suggest_insertion_points',
+    'get_function_skeleton', 'find_path', 'recall', 'verify_claim', 'blast_radius', 'verify_change',
+  ]),
 };
 
 /**
@@ -2499,14 +2726,16 @@ export const STANDING_CONTEXT_BUDGETS: Record<string, {
   maxTokens: number;
   rationale: string;
 }> = {
+  configuration: {baselineTokens:707,maxTokens:760,rationale:'Expanded candidate schema after live agent trial exposed five rejected preview guesses, then a description on each of its 13 inputs (mcp-quality Complete Input Schemas); exact measured baseline plus 7.5% headroom, default surface unchanged.'},
   minimal: { baselineTokens: 2_736, maxTokens: 2_950, rationale: 'Exact v1 wire baseline plus 7.8% headroom.' },
   navigation: { baselineTokens: 3_533, maxTokens: 3_800, rationale: 'Exact v1 wire baseline plus 7.6% headroom.' },
-  memory: { baselineTokens: 1_216, maxTokens: 1_300, rationale: 'Exact v1 wire baseline plus 6.9% headroom.' },
-  verify: { baselineTokens: 1_262, maxTokens: 1_350, rationale: 'Exact v1 wire baseline plus 7.0% headroom.' },
+  memory: { baselineTokens: 1_510, maxTokens: 1_610, rationale: 'Re-baselined from 1,216 for remember\'s trigger and pinned inputs (change: add-memory-trigger-predicates), then from 1,399 for its bounded claims input (change: add-memory-claim-verdicts), plus 6.6% headroom.' },
+  verify: { baselineTokens: 2_075, maxTokens: 2_220, rationale: 'Grew with verify_change then certify_provenance (add-verification-feedback-loop, add-change-provenance-certificate); exact measured baseline plus 7.0% headroom.' },
   federation: { baselineTokens: 3_837, maxTokens: 4_100, rationale: 'Exact v1 wire baseline plus 6.9% headroom.' },
-  coordination: { baselineTokens: 2_487, maxTokens: 2_650, rationale: 'Exact v1 wire baseline plus 6.6% headroom.' },
+  coordination: { baselineTokens: 3_721, maxTokens: 3_980, rationale: 'Grew with certify_merge, fleet_status, then declare_footprint (add-merge-semantic-certificate, add-fleet-coordination-arc, add-peer-footprint-board), then a description on every input (mcp-quality Complete Input Schemas); exact measured baseline plus 7.0% headroom.' },
+  plugin: { baselineTokens: 4_225, maxTokens: 4_520, rationale: 'The Claude Code plugin set (change: reframe-governance-as-agent-evidence); exact measured baseline plus 7.0% headroom.' },
   substrate: { baselineTokens: 5_131, maxTokens: 5_500, rationale: 'Exact v1 wire baseline plus 7.2% headroom.' },
-  full: { baselineTokens: 24_140, maxTokens: 25_500, rationale: 'Exact v1 wire baseline plus 5.6% headroom.' },
+  full: { baselineTokens: 28_680, maxTokens: 30_000, rationale: 'Grew with verify_change, certify_provenance, certify_merge, get_handoff_briefing, certify_service_contract, and declare_footprint; re-baselined at 28,680 measured after a description on each of the 47 inputs that had none (mcp-quality Complete Input Schemas) plus 4.6% headroom.' },
 };
 
 /**
@@ -2702,6 +2931,9 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   }
   const activePreset = resolvePresetName(selectorOpts);
   const activeToolNames = new Set(activeTools.map((tool) => tool.name));
+  // Tell the guidance renderers what this process actually serves, so `orient` cannot
+  // prescribe a tool this preset does not expose (change: fix-orient-guidance-preset).
+  setActiveToolSurface(activeToolNames);
   // Advertise breadth once via server instructions only when the active surface
   // IS the lean default (LEAN_DEFAULT_PRESET) — whether reached by no selector or
   // an explicit `--preset <that name>` (how install wires it). Adds no tool schemas.
@@ -2725,6 +2957,20 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
 
   // --watch-auto: start the watcher on the first tool call that carries a directory
   let autoWatcher: import('../../core/services/mcp-watcher.js').McpWatcher | undefined;
+  let autoWatcherRoot = '';
+
+  // Session ledger (change: add-session-structural-ledger): the symbols this session served and
+  // the versions edited symbols took. One per directory, like the tracker; removed on shutdown.
+  let ledger: SessionLedger | undefined;
+  const ledgerFor = (dir: string): SessionLedger => {
+    const root = resolve(dir);
+    if (!ledger || ledger.root !== root) {
+      ledger?.dispose();
+      ledger = new SessionLedger(root);
+    }
+    ledger.setWatcherActive(autoWatcherRoot === root);
+    return ledger;
+  };
 
   // change: fix-process-exit-lifecycle
   // The stdio server's lifetime is its stdin. Every long-lived resource acquired
@@ -2734,6 +2980,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   // event loop alive after the client closes the pipe, leaking a zombie process
   // per agent session.
   const lifecycle = createShutdownCoordinator();
+  lifecycle.register(async () => { ledger?.dispose(); });
   enableChildProcessBuilds();
   lifecycle.register(stopChildProcessBuilds);
 
@@ -2851,6 +3098,16 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       (args as Record<string, unknown>).directory = directory;
     }
 
+    if (name === 'configure_openlore') {
+      try {
+        const result = await configureOpenLoreMcp(args as Record<string,unknown>,directory,extra.signal);
+        const outcome = (result as {outcome?:string}).outcome;
+        return {content:[{type:'text' as const,text:JSON.stringify(result)}],isError:outcome !== undefined && ['blocked','stale-plan','needs-input','failed'].includes(outcome)};
+      } catch (error) {
+        return {content:[{type:'text' as const,text:JSON.stringify({version:1,outcome:'failed',reason:sanitizeForTerminal(redactSecretString(error instanceof Error ? error.message : String(error)),{keepNewlines:true}),recovery:'Inspect current configuration and retry the original plan to recover its retained operation receipt.'})}],isError:true};
+      }
+    }
+
     if (options.watchAuto && !autoWatcher) {
       const dir = (args as Record<string, unknown>).directory;
       if (typeof dir === 'string') {
@@ -2865,10 +3122,22 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
           // the session warms up on its own. Non-blocking and fail-soft. We inject
           // install's full buildIndex (init + analyze + BM25 search index, no API
           // key) so orient is warmed to full parity, not just the structural graph.
-          const { bootstrapAnalysisInBackground } = await import('../../core/services/cold-start-bootstrap.js');
-          bootstrapAnalysisInBackground(resolve(dir), {
-            analyze: buildIndexInChildProcess,
-          });
+          const { bootstrapAnalysisInBackground, hasAnalysis, repairInBackground } = await import('../../core/services/cold-start-bootstrap.js');
+          // A new worktree first copies a sibling checkout's verified index, awaited so this
+          // very call answers from it; the rebuild then reuses its per-file memo
+          // (change: seed-worktree-index-from-sibling-checkout).
+          const { seedFromSiblingCheckout, servingSeededIndex } = await import('../../core/runtime/seed-from-sibling.js');
+          const root = resolve(dir);
+          if (!hasAnalysis(root) && !autoInitSuppression(root)) await seedFromSiblingCheckout(root);
+          if (await servingSeededIndex(root)) {
+            repairInBackground(root, 'seeded', {
+              analyze: (d, buildOpts) => buildIndexInChildProcess(d, { repair: true, mode: buildOpts?.mode }),
+            });
+          } else {
+            bootstrapAnalysisInBackground(root, {
+              analyze: buildIndexInChildProcess,
+            });
+          }
           const { McpWatcher } = await import('../../core/services/mcp-watcher.js');
           const debounceMs = parseInt(options.watchDebounce ?? '400', 10);
           const watchConfig = await readOpenLoreConfig(resolve(dir));
@@ -2883,8 +3152,14 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
             // HEAD change / budget-exceeded stale region — the graph stays fresh
             // without a post-commit hook or a running daemon.
             selfRebuild: true,
+            // Each re-indexed file's new symbol versions feed the session ledger.
+            onFilesReindexed: files => {
+              if (ledger && ledger.root === resolve(dir)) void ledger.recordReindexed(files);
+            },
           });
           const watcherStart = autoWatcher.start();
+          // The ledger takes versions from the watcher only once it is running.
+          void watcherStart.then(() => { autoWatcherRoot = resolve(dir); ledger?.setWatcherActive(ledger.root === autoWatcherRoot); }, () => {});
           void watcherStart.catch(error => {
             process.stderr.write(`[mcp-watcher] startup failed: ${(error as Error).message}\n`);
           });
@@ -2917,6 +3192,10 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       // Invariant: only MCP tool calls (this path) feed panic. CLI commands (panic-check,
       // telemetry) are separate processes that read state but never call updateTracker —
       // no recursive panic feedback loop from openlore internal commands.
+      // The ledger samples what changed since the last call before panic reads its loops.
+      const sessionLedger = directory ? ledgerFor(directory) : undefined;
+      if (sessionLedger) await sessionLedger.refresh().catch(() => {});
+
       if (tracker && directory) {
         const isOrient = name === 'orient';
         updateTracker(tracker, name, directory, typeof filePath === 'string' ? filePath : undefined);
@@ -2937,6 +3216,8 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
               staleDepth: tracker.staleDepth,
               directory,
               tool: name,
+              // Taken only here, where panic reads them, so a loop is never consumed unread.
+              editOscillation: sessionLedger?.takeNewOscillations().length ?? 0,
             });
           }
           // Locked read-modify-write so this per-call score/level update cannot clobber a
@@ -3020,6 +3301,8 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
           }
           throw err;
         }
+        // What this response served, with each symbol's version now (hashed off the response path).
+        if (sessionLedger) void sessionLedger.recordServed(servedItems(name, result));
         // orient emits navigation telemetry tied to the MCP session's agent.
         if (name === 'orient' && result && typeof result === 'object') {
           const r = result as Record<string, unknown>;
@@ -3067,6 +3350,9 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       if (signal?.prepend) content.push({ type: 'text', text: signal.text });
       content.push({ type: 'text', text });
       if (signal && !signal.prepend) content.push({ type: 'text', text: signal.text });
+      // Named background changes and edit loops: a separate neutral note, each fact stated once.
+      const ledgerNote = sessionLedger?.takeNote();
+      if (ledgerNote) content.push({ type: 'text', text: ledgerNote });
 
       // Index self-healing disclosure (change: make-index-self-healing). When a
       // read-path staleness signal has triggered a background repair for this repo,
@@ -3147,7 +3433,12 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
         }
       }
 
-      return { content };
+      // Last gate before the transport: every content item is screened, not just the result
+      // body. The freshness/panic/ledger notes are OpenLore-authored templates, but they quote
+      // repository text (a file name, a memory, a decision title), and a forged line in the note
+      // beside a verdict is the same attack as one inside it. Idempotent with the screening
+      // `capStructuredResult` already did on the body.
+      return { content: content.map((c) => ({ ...c, text: sanitizeForTerminal(c.text, { keepNewlines: true }) })) };
     } catch (err) {
       // A thrown McpError is a protocol-level error — let the SDK serialize it as a JSON-RPC
       // error response. Argument validation no longer throws one (it returns an `isError` result).
@@ -3231,7 +3522,7 @@ export const mcpCommand = new Command('mcp')
   .option('--watch-debounce <ms>', 'Debounce delay in ms before re-indexing after a file change (default: 400)', '400')
   .option('--watch-no-embed', 'Watch signatures only — skip live vector re-embedding (embeddings refresh at commit). Large repos auto-degrade to this.')
   .option('--minimal', 'Expose only core 6 tools (orient, search_code, record_decision, detect_changes, check_spec_drift, get_health_map). Pair with alwaysLoad: true in Claude Code for always-visible core tools.')
-  .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the "${LEAN_DEFAULT_PRESET}" surface — the graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path), spec preparation (prepare_spec_generation + prepare_spec_repair), and governance reads (recall + verify_claim + blast_radius) — NOT the full registry. "navigation" = the lean navigate-only escape (the graph-traversal core alone, no governance or spec-workflow reads); "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + analyze_impact + find_path; "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
+  .option('--preset <name>', `Expose a named tool preset. Default (no preset) is the "${LEAN_DEFAULT_PRESET}" surface — the graph-traversal core (orient, search_code, get_subgraph, trace_execution_path, analyze_impact, suggest_insertion_points, get_function_skeleton, get_landmarks, get_map, find_path), spec preparation (prepare_spec_generation + prepare_spec_repair), and governance reads (recall + verify_claim + blast_radius) — NOT the full registry. "navigation" = the lean navigate-only escape (the graph-traversal core alone, no governance or spec-workflow reads); "minimal" = orient+search+governance; "memory" = orient+remember+recall; "verify" = orient+search+verify_claim; "federation" = orient + federation_status + spec_store_status + working_set_context + change_impact_certificate + map_in_flight_conflicts + the four cross-repo conclusion tools; "configuration" = provider-free configure_openlore management; "coordination" = orient + plan_parallel_work + map_in_flight_conflicts + certify_merge + fleet_status + declare_footprint + analyze_impact + find_path; "plugin" = the Claude Code plugin's 11 evidence tools (orient, search_code, get_subgraph, analyze_impact, suggest_insertion_points, get_function_skeleton, find_path, recall, verify_claim, blast_radius, verify_change); "full" = all ${TOOL_DEFINITIONS.length} tools (the prior default). Takes precedence over --minimal.`)
   .option('--all-tools', `Expose the full surface — all ${TOOL_DEFINITIONS.length} tools (alias for --preset full). Opt-in breadth; the "${LEAN_DEFAULT_PRESET}" default is recommended.`)
   .option('--list-tools', 'Print the active tool surface grouped by capability family (navigate/change/remember/verify/coordinate/federate) and exit — does not start the server. Respects --preset / --all-tools.')
   .action((options: McpServerOptions) => startMcpServer(options));

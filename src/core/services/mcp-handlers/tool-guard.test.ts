@@ -192,6 +192,45 @@ describe('capOutput', () => {
   });
 });
 
+describe('capStructuredResult — the MCP response is screened', () => {
+  const ESC = String.fromCharCode(27);
+
+  it('removes bidi overrides and zero-width characters a repository put in a path', () => {
+    // These leaked raw into orient / search_code / get_subgraph / find_path / find_dead_code /
+    // get_map responses. Only the STRING branch of this function screened anything, and ESC
+    // looked handled because JSON.stringify escapes it by itself — so nobody noticed that the
+    // rest of the class passes through verbatim.
+    const result = { relevantFunctions: [{ name: 'evil\u200bFn', filePath: 'src/\u202eesc.ts' }] };
+    const text = capStructuredResult(result, 64 * 1024).text;
+
+    expect(text).not.toContain('\u202e');
+    expect(text).not.toContain('\u200b');
+    const parsed = JSON.parse(text) as { relevantFunctions: { name: string; filePath: string }[] };
+    expect(parsed.relevantFunctions[0]).toEqual({ name: 'evilFn', filePath: 'src/esc.ts' });
+  });
+
+  it('screens the values, so a consumer that parses the response does not get ESC back', () => {
+    // JSON.stringify turns a real ESC into the six characters \\u001b: a text-only pass has
+    // nothing left to remove, and the control character reappears the moment the document is
+    // parsed. Screening runs at the values for exactly this reason.
+    const text = capStructuredResult({ filePath: `src/zz${ESC}[2K${ESC}[1GFAKE.ts` }, 64 * 1024).text;
+    expect(text).not.toContain('u001b');
+    const parsed = JSON.parse(text) as { filePath: string };
+    expect(parsed.filePath).toBe('src/zzFAKE.ts');
+    expect(parsed.filePath).not.toContain(ESC);
+  });
+
+  it('keeps legitimate non-ASCII in a path', () => {
+    const file = 'src/spåce dir ünicode/日本語/🙈.ts';
+    const parsed = JSON.parse(capStructuredResult({ file }, 64 * 1024).text) as { file: string };
+    expect(parsed.file).toBe(file);
+  });
+
+  it('still screens a plain string result', () => {
+    expect(capStructuredResult(`a${ESC}[31mb`, 1024).text).toBe('ab');
+  });
+});
+
 describe('capStructuredResult', () => {
   it('leaves a within-budget object as pretty JSON, untruncated', () => {
     const r = capStructuredResult({ a: 1, b: 'hi' }, 1024);
@@ -218,15 +257,149 @@ describe('capStructuredResult', () => {
     expect(r.text).toMatch(/output truncated/i);
   });
 
-  it('falls back to a valid JSON envelope when there is no dominant string field', () => {
-    // A huge array with no big top-level string field — still must stay parseable.
-    const result = { items: Array.from({ length: 50_000 }, (_, i) => ({ id: i, name: `n${i}` })) };
+  it('shortens a long list instead of discarding the answer, with an exact dropped count', () => {
+    // A whole-repository answer is a summary plus ranked arrays. Keeping the top of the list and
+    // saying how many were dropped is usable; a JSON string cut mid-structure is not
+    // (change: fix-whole-repo-answers-under-budget).
+    const result = { summary: { total: 50_000 }, items: Array.from({ length: 50_000 }, (_, i) => ({ id: i, name: `n${i}` })) };
     const r = capStructuredResult(result, 64 * 1024);
     expect(r.truncated).toBe(true);
     expect(Buffer.byteLength(r.text, 'utf8')).toBeLessThanOrEqual(64 * 1024);
-    const parsed = JSON.parse(r.text) as { truncated: boolean; note: string; partial: string };
+    const parsed = JSON.parse(r.text) as {
+      summary: { total: number }; items: Array<{ id: number }>;
+      responseBudget?: { trimmed: boolean; omitted: Record<string, number> }; partial?: string;
+    };
+    expect(parsed.partial).toBeUndefined();
+    expect(parsed.summary).toEqual({ total: 50_000 });
+    expect(parsed.items.length).toBeGreaterThan(0);
+    // The ranked prefix is what is kept, in order.
+    expect(parsed.items[0].id).toBe(0);
+    expect(parsed.items.map(i => i.id)).toEqual(parsed.items.map((_, i) => i));
+    // And the count is exact.
+    expect(parsed.responseBudget?.omitted.items).toBe(50_000 - parsed.items.length);
+  });
+
+  it('bounds every list, each with its own dropped count', () => {
+    const result = {
+      big: Array.from({ length: 20_000 }, (_, i) => ({ id: i, pad: 'x'.repeat(40) })),
+      small: Array.from({ length: 2_000 }, (_, i) => ({ id: i })),
+    };
+    const r = capStructuredResult(result, 32 * 1024);
+    const parsed = JSON.parse(r.text) as {
+      big: unknown[]; small: unknown[];
+      responseBudget: { omitted: Record<string, number> };
+    };
+    expect(Buffer.byteLength(r.text, 'utf8')).toBeLessThanOrEqual(32 * 1024);
+    for (const key of Object.keys(parsed.responseBudget.omitted)) {
+      const kept = (parsed[key as 'big' | 'small'] as unknown[]).length;
+      const total = key === 'big' ? 20_000 : 2_000;
+      expect(parsed.responseBudget.omitted[key]).toBe(total - kept);
+    }
+    // Both lists are served. The growth loop used to run largest-first with every other list
+    // still at zero, so the big list took the whole budget and `small` came back EMPTY.
+    expect(parsed.small.length).toBeGreaterThan(0);
+    expect(parsed.big.length).toBeGreaterThan(0);
+  });
+
+  // A fair share per list, not first-come. On a `get_mapping` answer, 1,549 `linked` rows used
+  // the whole 256 KB and the `ambiguous` / `stale` / `unmapped` lanes the tool exists to
+  // surface were all served empty (change: fix-budget-trim-allocation).
+  it('serves the short lists whole and bounds the dominant list', () => {
+    const row = (i: number) => ({ requirement: `Req${i}`, domain: 'd', specFile: 'openspec/specs/d/spec.md', anchors: [{ raw: `sym${i}::src/f.ts` }] });
+    const result = {
+      stats: { totalRequirements: 40_000 },
+      linked: Array.from({ length: 40_000 }, (_, i) => row(i)),
+      unmapped: Array.from({ length: 12 }, (_, i) => row(i)),
+      ambiguous: Array.from({ length: 7 }, (_, i) => row(i)),
+      stale: Array.from({ length: 5 }, (_, i) => row(i)),
+    };
+    const parsed = JSON.parse(capStructuredResult(result, 256 * 1024).text) as {
+      linked: unknown[]; unmapped: unknown[]; ambiguous: unknown[]; stale: unknown[];
+      responseBudget: { omitted: Record<string, number> };
+    };
+    expect(parsed.unmapped.length).toBe(12);
+    expect(parsed.ambiguous.length).toBe(7);
+    expect(parsed.stale.length).toBe(5);
+    expect(parsed.linked.length).toBeGreaterThan(0);
+    // Only the dominant list paid.
+    expect(Object.keys(parsed.responseBudget.omitted)).toEqual(['linked']);
+  });
+
+  it('gives eight equal lists a share each rather than all of it to the first', () => {
+    const lists = Object.fromEntries(
+      Array.from({ length: 8 }, (_, k) => [`list${k}`, Array.from({ length: 20_000 }, (_, i) => ({ id: i, pad: 'y'.repeat(30) }))]),
+    );
+    const parsed = JSON.parse(capStructuredResult(lists, 256 * 1024).text) as Record<string, unknown[]>;
+    for (let k = 0; k < 8; k++) expect(parsed[`list${k}`].length).toBeGreaterThan(0);
+  });
+
+  // The receipt used to be written as top-level `truncated` / `omitted` / `truncationNote`,
+  // which overwrote payloads that already define them.
+  it("never overwrites the tool's own omitted disclosure", () => {
+    const result = {
+      summary: { files: 1_478 },
+      clusters: Array.from({ length: 2_000 }, (_, i) => ({ id: i, files: Array.from({ length: 20 }, (_, j) => `src/f${i}_${j}.ts`) })),
+      omitted: ['hubs', 'entryPoints', 'godFunctions', 'layers', 'cycles'],
+      omittedBecause: 'they are derived from the call graph, which this first build has not produced yet',
+    };
+    const parsed = JSON.parse(capStructuredResult(result, 60_000).text) as {
+      omitted: string[]; omittedBecause: string; responseBudget: { omitted: Record<string, number> };
+    };
+    expect(parsed.omitted).toEqual(['hubs', 'entryPoints', 'godFunctions', 'layers', 'cycles']);
+    expect(parsed.omittedBecause).toContain('first build has not produced');
+    expect(parsed.responseBudget.omitted.clusters).toBeGreaterThan(0);
+  });
+
+  // The string-cut branch is tried BEFORE list trimming, and it kept writing a top-level
+  // `truncated: true` — the very collision the list branch was fixed for, 70 lines up in the
+  // same file (change: fix-budget-receipt-collision).
+  it("never overwrites the tool's own truncated object when cutting a dominant string", () => {
+    const result = {
+      truncated: { limit: 5_000, atPath: 'src/huge' },
+      report: 'x'.repeat(5_000),
+      summary: 'ok',
+    };
+    const parsed = JSON.parse(capStructuredResult(result, 1_200).text) as {
+      truncated: { limit: number; atPath: string };
+      summary: string;
+      responseBudget: { trimmed: boolean };
+    };
+    expect(parsed.truncated).toEqual({ limit: 5_000, atPath: 'src/huge' });
+    expect(parsed.summary).toBe('ok');
+    expect(parsed.responseBudget.trimmed).toBe(true);
+  });
+
+  it("never overwrites the tool's own truncated object", () => {
+    const result = {
+      changes: Array.from({ length: 5_000 }, (_, i) => ({ symbol: `s${i}`, verdict: 'breaking', detail: 'x'.repeat(60) })),
+      truncated: { omitted: 1_200 },
+    };
+    const parsed = JSON.parse(capStructuredResult(result, 60_000).text) as {
+      truncated: { omitted: number }; responseBudget: { omitted: Record<string, number> };
+    };
+    expect(parsed.truncated).toEqual({ omitted: 1_200 });
+    expect(parsed.responseBudget.omitted.changes).toBeGreaterThan(0);
+  });
+
+  it('still falls back to the partial envelope when the non-list part alone is over budget', () => {
+    // Nothing to shrink: the summary itself does not fit, so a cut partial is the honest answer.
+    const result = { summary: { blob: Array.from({ length: 4_000 }, (_, i) => `field-${i}`) }, items: [{ id: 1 }] };
+    const r = capStructuredResult(result, 2 * 1024);
+    expect(r.truncated).toBe(true);
+    expect(Buffer.byteLength(r.text, 'utf8')).toBeLessThanOrEqual(2 * 1024);
+    const parsed = JSON.parse(r.text) as { truncated: boolean; partial?: string };
     expect(parsed.truncated).toBe(true);
     expect(typeof parsed.partial).toBe('string');
+  });
+
+  it('is deterministic: the same oversized result trims identically every time', () => {
+    const result = {
+      a: Array.from({ length: 5_000 }, (_, i) => ({ id: i, pad: 'y'.repeat(20) })),
+      b: Array.from({ length: 5_000 }, (_, i) => ({ id: i, pad: 'z'.repeat(20) })),
+    };
+    const one = capStructuredResult(result, 48 * 1024);
+    const two = capStructuredResult(result, 48 * 1024);
+    expect(one.text).toBe(two.text);
   });
 
   it('preserves a redaction receipt when capping a nested source result', () => {
@@ -306,7 +479,9 @@ describe('capStructuredResult', () => {
       ['quote',            '"'],
       ['backslash',        '\\'],
       ['short control',    '\n'],
-      ['long control',     '\u0001'],
+      // A \uXXXX-escaped control character (the 'long control' class) is no longer reachable
+      // here: values are screened before they are capped, so a C0 control never survives to be
+      // measured. The class above covers the escape arithmetic that is still live.
       ['two-byte utf-8',   'é'],
       ['three-byte utf-8', '☃'],
       ['astral pair',      '😀'],

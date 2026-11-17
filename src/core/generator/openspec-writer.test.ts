@@ -236,6 +236,9 @@ describe('OpenSpecWriter', () => {
       });
       const specs = createMockSpecs();
       const survey = createMockSurvey();
+      // First run creates no spec folder, so the writer creates what it writes
+      // (change: spec-framework-neutrality, task 1.2).
+      expect(await fileExists(join(tempDir, 'openspec'))).toBe(false);
 
       const report = await writer.writeSpecs(specs, survey);
 

@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analyzeCommand, formatIndexedFunctionPopulation, formatSpecIndexFailure, runAnalysis } from './analyze.js';
+import { analyzeCommand, defaultSpecsDir, formatIndexedFunctionPopulation, formatSpecIndexFailure, runAnalysis } from './analyze.js';
 import { ARTIFACT_FINGERPRINT } from '../../constants.js';
 
 // ============================================================================
@@ -282,8 +282,45 @@ describe('analyze command', () => {
       expect(line).not.toContain('⚠');
     });
 
-    it('preserves the warning for an empty spec directory not created by this run', () => {
-      expect(formatSpecIndexFailure('exists but contains no spec.md files', false)).toContain('⚠ Spec index skipped');
+    // The discriminator is WHOSE directory it is, not when it appeared. Requiring
+    // `freshSpecDirectory` meant every run after the one that created it warned about a
+    // directory OpenLore had made itself (change: fix-self-inflicted-spec-warning).
+    it('presents the default empty spec directory as normal state on every later run too', () => {
+      const specs = defaultSpecsDir('/repo');
+      const line = formatSpecIndexFailure(
+        `Spec directory ${specs} exists but contains no spec.md files — run 'openlore generate'`,
+        false,
+        specs,
+      );
+      expect(line).toContain('ℹ No specs yet');
+      expect(line).not.toContain('⚠');
+    });
+
+    // Compared as a PATH, not as a slash pattern over the prose: the old regex never matched a
+    // Windows `C:\repo\openspec\specs` (so the distinction was inert there) and DID match any
+    // configured path ending in those two segments, which is the user's directory, not ours
+    // (change: fix-spec-skip-path-comparison).
+    it.each([
+      ['a path the user configured elsewhere', '/repo/docs/my-specs'],
+      ['a vendored path ending in openspec/specs', '/repo/vendor/openspec/specs'],
+      ['a documentation path ending in openspec/specs', '/repo/docs/openspec/specs'],
+    ])('still warns for %s', (_label, dir) => {
+      const line = formatSpecIndexFailure(
+        `Spec directory ${dir} exists but contains no spec.md files`,
+        false,
+        defaultSpecsDir('/repo'),
+      );
+      expect(line).toContain('⚠ Spec index skipped');
+    });
+
+    it('recognizes the default directory on a Windows-style root', () => {
+      const specs = defaultSpecsDir('C:\\repo');
+      const line = formatSpecIndexFailure(
+        `Spec directory ${specs} exists but contains no spec.md files`,
+        false,
+        specs,
+      );
+      expect(line).toContain('ℹ No specs yet');
     });
 
     describe('collect function', () => {
@@ -816,7 +853,7 @@ describe('analyze command', () => {
         expect(fingerprint().commit).toBe(head);
         expect(fingerprint().sourceTreeState).toBe('clean');
       } finally {
-        rmSync(dir, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       }
     });
 

@@ -464,7 +464,7 @@ describe('per-file store reads are answered through the file_path index', () => 
     store.insertChangeCoupling({
       churn: new Map([['src/a.ts', 4], ['src/b.ts', 9]]),
       coupling: new Map([['src/a.ts', [{ file: 'src/b.ts', support: 3, confidence: 0.75 }]]]),
-      stats: { commitsScanned: 10, bulkCommitsFiltered: 0, filesTracked: 2 },
+      stats: { commitsScanned: 10, bulkCommitsFiltered: 0, filesTracked: 2, couplingComputed: true, coPairsCounted: 3 },
     });
     expect(store.getChangeCouplingForFiles(['src/b.ts']).map(r => r.filePath)).toEqual(['src/b.ts']);
     expect(store.getChangeCouplingForFiles(['/repo/src/a.ts']).map(r => r.filePath)).toEqual(['src/a.ts']);

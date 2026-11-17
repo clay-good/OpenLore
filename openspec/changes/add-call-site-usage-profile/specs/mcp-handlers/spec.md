@@ -4,43 +4,30 @@
 
 ### Requirement: CallSiteUsageProfileIsDescriptive
 
-The system SHALL provide an opt-in `get_usage_profile` conclusion tool that, for one resolved
-symbol, computes a deterministic census of its resolved call sites: argument-count distribution,
-literal-versus-variable per position, named options passed, result context (awaited, returned,
-assigned, discarded), and enclosing error-handling context — each facet reported as dominant
-choice, ratio, and sampled file:line receipts. The profile SHALL be descriptive only: observed
-frequency, never a correctness or lint judgment. A facet below the evidence floor SHALL report a
-null signal; a call site whose facet is syntactically uncountable (spread or dynamic arguments)
-SHALL be disclosed as uncountable rather than guessed; call sites reachable only through
-synthesized or low-confidence edges SHALL be excluded with the exclusion disclosed. An unknown
-symbol SHALL return not-found with candidates, an ambiguous name SHALL return path-qualified
-candidates, and an unsupported language SHALL return an explicit unsupported result — never an
-empty profile implying the symbol is never called.
+`orient` SHALL carry a `callProfile` for each target function whose resolved call sites meet the
+existing style evidence floor: counts of argument number, named options passed, result use, and
+enclosing `try`, with up to three example call sites as `file:line`. `blast_radius` SHALL carry the
+same profile for a changed function whose parameter list differs from the merge-base. The profile
+SHALL report observed counts only, never a correctness judgment. Below the floor, or in an
+unsupported language, the field SHALL be absent. A site that cannot be counted for a facet, or that
+is reached only through a synthesized or name-only edge, SHALL be disclosed as a count and not
+guessed.
 
-#### Scenario: The profile reports how the codebase calls the symbol
+#### Scenario: The agent sees how the codebase calls the function
 
-- **GIVEN** a symbol with twenty resolved call sites, seventeen of which pass a `timeout` option
-  and all of which await the result
-- **WHEN** `get_usage_profile` runs
-- **THEN** the options facet reports `timeout` dominant at 0.85 and the result-context facet
-  reports awaited at 1.0, each with sample receipts
+- **GIVEN** a function with twenty resolved call sites, seventeen that pass `timeout` and all awaited
+- **WHEN** `orient` runs for a task that targets it
+- **THEN** `callProfile` reports `timeout` in 17/20 and awaited in 20/20, with example call sites
 
-#### Scenario: Thin evidence yields null, not a guess
+#### Scenario: Thin evidence yields no profile
 
-- **GIVEN** a symbol with two call sites
-- **WHEN** a facet falls below the evidence floor
-- **THEN** that facet reports a null signal with the site count
+- **GIVEN** a function with two call sites
+- **WHEN** `orient` runs
+- **THEN** the function has no `callProfile`
 
-#### Scenario: The uncountable is disclosed
+#### Scenario: A signature change shows the callers' shape
 
-- **GIVEN** a call site invoking the symbol with spread arguments
-- **WHEN** the census runs
-- **THEN** that site is counted for the facets it can support and disclosed uncountable for
-  arity, and no facet total silently omits it
-
-#### Scenario: Resolution failures are explicit
-
-- **GIVEN** a query for a name matching no indexed symbol, and a second query matching several
-- **WHEN** the tool runs
-- **THEN** the first returns not-found with candidates and the second returns path-qualified
-  candidates, and neither returns an empty profile
+- **GIVEN** a diff that adds a required parameter to a function with enough call sites
+- **WHEN** `blast_radius` runs
+- **THEN** the changed function carries `callProfile`, and a call site with spread arguments is
+  counted as uncountable for argument number

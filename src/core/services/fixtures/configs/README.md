@@ -21,6 +21,18 @@ They intentionally do not move with the current schema.
   schema 1.2.0. `3.3.0-pi-all.json` captures the explicit Pi all-tools option.
 - `3.3.1-default.json` captures the unchanged default configuration factory shape for v3.3.1 and
   schema 1.2.0.
+- `3.4.0-default.json` captures the unchanged default configuration factory shape for v3.4.0 and
+  schema 1.2.0. `3.4.0-embedding-null.json` captures `embedding: null`, which v3.4.0 accepts to turn
+  off an embedding inherited from the user-wide `~/.openlore/config.json` defaults.
+- `3.5.0-default.json` captures the unchanged default configuration factory shape for v3.5.0 and
+  schema 1.2.0 (the release added MCP tools and index self-healing, not config behavior).
+- `3.6.0-default.json` captures the unchanged default configuration factory shape for v3.6.0 and
+  schema 1.2.0 (the release added the contract graph, agent-loop receipts, and IaC binding, not
+  config behavior).
+- `3.7.0-default.json` captures the default configuration factory shape for v3.7.0 and schema
+  1.2.0: `openspecPath` is no longer written when no spec corpus exists. `3.7.0-customized.json`
+  captures the keys v3.7.0 adds: `adrPaths`, per-lane `filePolicies`, and
+  `configurationAssistant.reviewMode`, with `openspecPath` set to `docs`.
 
 For each release, add at least one `<package-version>-*.json` fixture before changing the package
 version. Include both a factory-default shape and a realistic customized shape when the release

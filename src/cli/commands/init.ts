@@ -21,7 +21,6 @@ import {
   readOpenSpecConfig,
   openspecDirExists,
   openspecConfigExists,
-  createOpenSpecStructure,
   detectExistingSpecDir,
 } from '../../core/services/config-manager.js';
 import {
@@ -41,8 +40,9 @@ export const initCommand = new Command('init')
   .option('--force', 'Overwrite existing configuration', false)
   .option(
     '--openspec-path <path>',
-    'Custom path for openspec/ output directory',
-    DEFAULT_OPENSPEC_PATH
+    // No commander default: an always-set value hid the detection below (it never ran) and
+    // recorded a spec path in every config (change: spec-framework-neutrality, task 3.1).
+    `Path of an OpenSpec folder (default: an OpenSpec corpus found here, else ${DEFAULT_OPENSPEC_PATH} when generate writes)`,
   )
   .addHelpText(
     'after',
@@ -177,16 +177,14 @@ After initialization, run 'openlore analyze' to scan your codebase.
     // Step 3: Create configuration
     logger.analysis('Creating configuration...');
 
-    const config = getDefaultConfig(detection.projectType, openspecRelPath);
+    // The spec path is recorded only when a corpus was found or named (spec-framework-neutrality 3.1).
+    const config = getDefaultConfig(detection.projectType, options.openspecPath ?? (detectedSpecDir ? openspecRelPath : undefined));
 
     await writeOpenLoreConfig(rootPath, config);
     logger.success(`Created ${OPENLORE_CONFIG_REL_PATH}`);
 
-    // Step 4: Create OpenSpec structure if needed
-    if (!existingOpenspecDir) {
-      await createOpenSpecStructure(openspecPath);
-      logger.success(`Created ${openspecRelPath}/ directory structure`);
-    }
+    // No spec folder is created here: OpenLore works without one, and `openlore generate` creates
+    // what it writes (change: spec-framework-neutrality, task 1.1).
 
     // Step 5: Update .gitignore
     logger.blank();
@@ -212,7 +210,7 @@ After initialization, run 'openlore analyze' to scan your codebase.
       }
 
       if (shouldAdd) {
-        const result = await ensureGitignored(rootPath, `${OPENLORE_DIR}/`, 'openlore analysis artifacts');
+        const result = await ensureGitignored(rootPath, `${OPENLORE_DIR}/`);
         logger.success(
           result === 'created'
             ? `Created .gitignore with ${OPENLORE_DIR}/`
@@ -230,7 +228,7 @@ After initialization, run 'openlore analyze' to scan your codebase.
 
     logger.info('Project type', getProjectTypeName(detection.projectType));
     logger.info('Config file', OPENLORE_CONFIG_REL_PATH);
-    logger.info('Output path', openspecRelPath);
+    logger.info('Spec source', options.openspecPath || detectedSpecDir ? openspecRelPath : 'none found (OpenSpec is optional)');
 
     if (existingOpenspecDir) {
       logger.info('Integration', 'Will add to existing OpenSpec setup');

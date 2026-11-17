@@ -1,3 +1,4 @@
+import { configureOpenLoreMcp } from '../configuration/mcp.js';
 /**
  * Shared tool dispatch — single source of truth mapping a tool name + args to its
  * handler. Consumed by BOTH transports:
@@ -18,6 +19,8 @@
 import { DEFAULT_DRIFT_MAX_FILES } from '../../constants.js';
 import type { DecisionScope } from '../../types/index.js';
 import { resolveCanonicalToolName, enforceConclusionContract } from './mcp-handlers/tool-contract.js';
+import { reconcileCompleteness } from './mcp-handlers/confidence-boundary.js';
+import { withFollowupHints } from './mcp-handlers/followup-hints.js';
 import { withPartialReceiptScope, partialReceiptForThisRequest } from './mcp-handlers/partial-request.js';
 import {
   PARTIAL_INDEX_ABSENT_FACTS,
@@ -52,6 +55,7 @@ import { handleFindDeadCode } from './mcp-handlers/reachability.js';
 import { handleVerifyClaim } from './mcp-handlers/claim-verification.js';
 import type { ClaimKind } from './mcp-handlers/claim-verification.js';
 import { handleStructuralDiff } from './mcp-handlers/structural-diff.js';
+import { handleVerifyChange } from './mcp-handlers/verify-change.js';
 import { handleGetChangeCoupling } from './mcp-handlers/change-coupling.js';
 import { handleGetHealthMap } from './mcp-handlers/health-map.js';
 import { handleGetSurprisingConnections } from './mcp-handlers/surprising-connections.js';
@@ -62,6 +66,9 @@ import { handleFederationStatus } from './mcp-handlers/federation.js';
 import { handleSpecStoreStatus } from './mcp-handlers/spec-store.js';
 import { handleWorkingSetContext } from './mcp-handlers/working-set.js';
 import { computeImpactCertificate } from './mcp-handlers/impact-certificate.js';
+import { handleCertifyProvenance } from './mcp-handlers/change-provenance.js';
+import { handleCertifyMerge } from './mcp-handlers/merge-semantic-certificate.js';
+import { handleFleetStatus } from './mcp-handlers/fleet-coordination.js';
 import { handleCheckArchitecture } from './mcp-handlers/architecture.js';
 import { handleGenerateChangeProposal, handleAnnotateStory } from './mcp-handlers/change.js';
 import {
@@ -154,11 +161,44 @@ export async function dispatchTool(
   signal?: AbortSignal,
 ): Promise<unknown> {
   const canonical = resolveCanonicalToolName(name);
+  if (canonical === 'configure_openlore') return configureOpenLoreMcp(args,directory,signal);
   return withPartialReceiptScope(async () => {
     const result = await dispatchToolImpl(canonical, args, directory, signal);
     const checked = enforceConclusionContract(canonical, result, (msg) => logger.warning(msg));
-    return withPartialIndexReceipt(await redactSourceToolResult(canonical, checked, directory), directory);
+    // Data-dependent next-call receipts (change: add-conclusion-followup-hints).
+    const hinted = withFollowupHints(canonical, checked);
+    const leased = await withLeaseToken(canonical, hinted, args, directory);
+    const received = await withPartialIndexReceipt(
+      await redactSourceToolResult(canonical, leased, directory),
+      directory,
+    );
+    // LAST, after every receipt above has been attached: `complete: true` must be
+    // unsayable in the same response as a disclosed refusal, cap, fallback, degradation
+    // or discarded input (NoCompleteBesideADisclosure). Here, in the one place both
+    // transports and every CLI wrapper funnel through, so a tool — including one that
+    // does not exist yet — cannot opt out of the invariant.
+    return reconcileCompleteness(received);
   });
+}
+
+/**
+ * `orient` and `recall` carry a `leaseToken` naming what they served, so another process can ask
+ * `verify_claim` (`lease-current`) whether it is still current (change: add-session-lease-tokens).
+ * Best effort: no token is attached when nothing was served or the token cannot be written.
+ */
+async function withLeaseToken(tool: string, result: unknown, args: Record<string, unknown>, directory: string): Promise<unknown> {
+  if ((tool !== 'orient' && tool !== 'recall') || !result || typeof result !== 'object' || Array.isArray(result) || 'error' in result) return result;
+  try {
+    const { resolve } = await import('node:path');
+    const { existsSync } = await import('node:fs');
+    const root = resolve(typeof args.directory === 'string' ? args.directory : directory);
+    if (!existsSync(resolve(root, '.openlore'))) return result;
+    const { servedForLease, issueLeaseToken } = await import('./lease-tokens.js');
+    const token = await issueLeaseToken(root, servedForLease(tool, result));
+    return token ? { ...(result as Record<string, unknown>), leaseToken: token } : result;
+  } catch {
+    return result;
+  }
 }
 
 /**
@@ -259,6 +299,7 @@ async function dispatchToolImpl(
   // Resolve a deprecated tool-name alias (e.g. get_ui_components) to its canonical
   // name so both transports dispatch identically and old callers keep working.
   name = resolveCanonicalToolName(name);
+  if (name === 'configure_openlore') return configureOpenLoreMcp(args,directory,signal);
   if (name === 'orient') {
     const { task, limit = 5, tokenBudget, lean, rankBy } = args as { task: string; limit?: number; tokenBudget?: number; lean?: boolean; rankBy?: 'distance' | 'pagerank' };
     return rankBy === undefined
@@ -319,6 +360,9 @@ async function dispatchToolImpl(
         declaredFootprint?: import('./mcp-handlers/footprint-escape.js').DeclaredFootprintInput;
         peerFootprints?: import('./mcp-handlers/footprint-escape.js').DeclaredFootprintInput[] };
     return handleStructuralDiff({ directory, baseRef, headRef, maxResults, files, declaredFootprint, peerFootprints });
+  } else if (name === 'verify_change') {
+    const { directory, baseRef } = args as { directory: string; baseRef?: string };
+    return handleVerifyChange({ directory, baseRef });
   } else if (name === 'get_change_coupling') {
     const { directory, file, limit } = args as { directory: string; file?: string; limit?: number };
     return handleGetChangeCoupling({ directory, file, limit });
@@ -471,6 +515,21 @@ async function dispatchToolImpl(
   } else if (name === 'change_impact_certificate') {
     const { directory, baseRef, change, persist, allowBaseFallback } = args as { directory: string; baseRef?: string; change?: string; persist?: boolean; allowBaseFallback?: boolean };
     return computeImpactCertificate({ directory, baseRef, change, persist, allowBaseFallback });
+  } else if (name === 'certify_provenance') {
+    const { directory, baseRef, change, allowBaseFallback, format } = args as { directory: string; baseRef?: string; change?: string; allowBaseFallback?: boolean; format?: 'in-toto' | 'json' };
+    return handleCertifyProvenance({ directory, baseRef, change, allowBaseFallback, format });
+  } else if (name === 'certify_merge') {
+    const { directory, ours, theirs, base, maxFindings } = args as { directory: string; ours: string; theirs: string; base?: string; maxFindings?: number };
+    return handleCertifyMerge({ directory, ours, theirs, base, maxFindings });
+  } else if (name === 'declare_footprint') {
+    const { directory, action, actorId, title, writeSet, readSet, writeMode } = args as {
+      directory: string; action?: 'declare' | 'release' | 'list'; actorId?: string; title?: string; writeSet?: string[]; readSet?: string[]; writeMode?: 'append' | 'modify';
+    };
+    const { handleDeclareFootprint } = await import('./mcp-handlers/declare-footprint.js');
+    return handleDeclareFootprint({ directory, action, actorId, title, writeSet, readSet, writeMode });
+  } else if (name === 'fleet_status') {
+    const { directory, branches } = args as { directory: string; branches?: string[] };
+    return handleFleetStatus({ directory, branches });
   } else if (name === 'detect_changes') {
     const { directory, base } = args as { directory: string; base?: string };
     return handleDetectChanges(directory, base);
@@ -497,9 +556,9 @@ async function dispatchToolImpl(
     const { directory, dryRun = false, id } = args as { directory: string; dryRun?: boolean; id?: string };
     return handleSyncDecisions(directory, dryRun, id);
   } else if (name === 'remember') {
-    const { directory, content, anchors, tags, type, supersedes } =
-      args as { directory: string; content: string; anchors?: AnchorHint[]; tags?: string[]; type?: string; supersedes?: string };
-    return handleRemember(directory, content, anchors, tags, type, supersedes);
+    const { directory, content, anchors, tags, type, supersedes, trigger, pinned, claims } =
+      args as { directory: string; content: string; anchors?: AnchorHint[]; tags?: string[]; type?: string; supersedes?: string; trigger?: unknown; pinned?: unknown; claims?: unknown };
+    return handleRemember(directory, content, anchors, tags, type, supersedes, trigger, pinned, claims);
   } else if (name === 'recall') {
     const { directory, task, limit = 10, tokenBudget, asOf, changedSince, type, federation, federationRepos } =
       args as { directory: string; task?: string; limit?: number; tokenBudget?: number; asOf?: string; changedSince?: string; type?: string; federation?: boolean; federationRepos?: string[] };
@@ -509,9 +568,9 @@ async function dispatchToolImpl(
       args as { directory: string; kind: ClaimKind; subject: string; object?: string };
     return handleVerifyClaim({ directory, kind, subject, object });
   } else if (name === 'plan_parallel_work') {
-    const { directory, tasks, readMaxDistance, affectedMaxDepth, ambientFanInPercentile } =
-      args as { directory: string; tasks: TaskDescriptor[]; readMaxDistance?: number; affectedMaxDepth?: number; ambientFanInPercentile?: number };
-    return handlePlanParallelWork({ directory, tasks, readMaxDistance, affectedMaxDepth, ambientFanInPercentile });
+    const { directory, tasks, readMaxDistance, affectedMaxDepth, ambientFanInPercentile, includeBoard } =
+      args as { directory: string; tasks: TaskDescriptor[]; readMaxDistance?: number; affectedMaxDepth?: number; ambientFanInPercentile?: number; includeBoard?: boolean };
+    return handlePlanParallelWork({ directory, tasks, readMaxDistance, affectedMaxDepth, ambientFanInPercentile, includeBoard });
   } else if (name === 'map_in_flight_conflicts') {
     const { directory, baseRef, includeBranches, branches, includePullRequests, tasks, maxChanges, readMaxDistance, affectedMaxDepth, ambientFanInPercentile, federation, federationRepos } =
       args as {
@@ -536,6 +595,15 @@ async function dispatchToolImpl(
     const { directory, communityId, filePath, language } =
       args as { directory: string; communityId?: string; filePath?: string; language?: string };
     return handleGetStyleFingerprint({ directory, communityId, filePath, language });
+  } else if (name === 'certify_service_contract') {
+    const { directory, baseRef, maxResults, allowBaseFallback, federation, federationRepos } =
+      args as { directory: string; baseRef?: string; maxResults?: number; allowBaseFallback?: boolean; federation?: boolean; federationRepos?: string[] };
+    const { handleCertifyServiceContract } = await import('./mcp-handlers/service-contract.js');
+    return handleCertifyServiceContract({ directory, baseRef, maxResults, allowBaseFallback, federation, federationRepos });
+  } else if (name === 'get_handoff_briefing') {
+    const { directory, tokenBudget } = args as { directory: string; tokenBudget?: number };
+    const { handleGetHandoffBriefing } = await import('./mcp-handlers/handoff.js');
+    return handleGetHandoffBriefing({ directory, tokenBudget });
   } else if (name === 'briefing_since') {
     const { directory, baseRef, filePattern, maxResults } =
       args as { directory: string; baseRef?: string; filePattern?: string; maxResults?: number };

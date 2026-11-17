@@ -14,9 +14,11 @@ path and never to fabricate structure.
 OpenLore is one substrate with two faces: **navigation** (read the graph — orient, search, trace,
 map) and **governance/memory** (anchor facts, record decisions, weigh changes against the graph).
 Both faces share one graph, one anchored-fact store, and one freshness lease. It is distinct from
-OpenSpec, the spec-driven-development format whose `openspec/` layout OpenLore reads and writes;
-OpenLore delegates the change lifecycle (proposal → archive) to the `openspec` CLI rather than
-reimplementing it.
+OpenSpec, the spec-driven-development format whose `openspec/` layout OpenLore reads and writes.
+OpenLore does not reimplement the OpenSpec change lifecycle: authoring, archiving, and validating
+changes is done with the `openspec` CLI. The only place OpenLore runs that CLI is the validation
+step of `openlore change-status` (`openspec validate`). Making every feature work without OpenSpec
+is planned in the change `spec-framework-neutrality`.
 
 ## Domains
 
@@ -24,8 +26,9 @@ This system is organized into the following domains (each link resolves to a spe
 
 | Domain | Description | Spec |
 |--------|-------------|------|
+| Agent-neutral-spec-reconciliation | The client-neutral Generate and Repair protocol and the shared evidence layer it uses. | [spec.md](../agent-neutral-spec-reconciliation/spec.md) |
 | Analyzer | Parses the codebase into a persisted call graph, signatures, imports, CFG/def-use overlays, type inference, and structural metrics; the substrate every other domain reads. | [spec.md](../analyzer/spec.md) |
-| Api | The programmatic (embeddable) API exposed by `src/api/` — in-process functions (`init`, `analyze`, `generate`, `drift`, `run`) a host process calls to drive OpenLore. | [spec.md](../api/spec.md) |
+| Api | The programmatic (embeddable) API exposed by `src/api/` — in-process functions (`openloreInit`, `openloreAnalyze`, `openloreGenerate`, `openloreVerify`, `openloreDrift`, `openloreRun`, `openloreAudit`, `openloreServe`, and status and decision helpers) a host process calls to drive OpenLore. | [spec.md](../api/spec.md) |
 | Architecture | The layered architecture, the unified structural substrate, and the six closed capability families every MCP tool declares. | [spec.md](../architecture/spec.md) |
 | Cli | The `openlore` command surface (analyze, orient, mcp, install, decisions, drift, status, …) and its progress/output rendering. | [spec.md](../cli/spec.md) |
 | Config | Reads, writes, and merges `.openlore/config.json` and `openspec/config.yaml`, including directory setup and the spec-store binding. | [spec.md](../config/spec.md) |
@@ -35,8 +38,12 @@ This system is organized into the following domains (each link resolves to a spe
 | Mcp-handlers | The MCP tool handlers (orient, search, subgraph, blast_radius, recall, verify_claim, …) plus the shared directory/path/error utilities they use. | [spec.md](../mcp-handlers/spec.md) |
 | Mcp-quality | The MCP tool-surface contract: capability families, conclusion-over-graph output, tool-count/preset guards, and the epistemic-lease weighting. | [spec.md](../mcp-quality/spec.md) |
 | Mcp-security | Hardening of the local HTTP surfaces — the MCP serve daemon and view server — against DNS rebinding and untrusted-descriptor SSRF. | [spec.md](../mcp-security/spec.md) |
+| Mcp-spec-workflow-composites | The read-only `prepare_spec_generation` and `prepare_spec_repair` MCP composites that prepare deterministic evidence for host-authored spec generation and repair. | [spec.md](../mcp-spec-workflow-composites/spec.md) |
 | Openspec | Compatibility and validation of OpenSpec configurations and spec structure (config load/save/validate, markdown/heading checks). | [spec.md](../openspec/spec.md) |
+| Operator-tls-trust | Which principal may relax TLS certificate verification for outbound requests, and for which network surface. | [spec.md](../operator-tls-trust/spec.md) |
+| Overview | This document: the system purpose, the domain index, the technical stack, and the north-star requirement. | [spec.md](../overview/spec.md) |
 | Project | Detects the project type of an analyzed repository and maps each type key to its display name. | [spec.md](../project/spec.md) |
+| Validator | Surfaces generation-time OpenSpec validation errors and warnings in the generation report (advisory). | [spec.md](../validator/spec.md) |
 | Verifier | Verifies the accuracy of a generated spec against the codebase by analyzing file purposes, imports, exports, and requirement coverage. | [spec.md](../verifier/spec.md) |
 
 ## Technical Stack
@@ -55,6 +62,13 @@ This system is organized into the following domains (each link resolves to a spe
 
 The system SHALL provide deterministic, locally-computed structural context as a substrate for coding agents, grounding all capabilities in static analysis rather than LLM inference.
 
+The system SHALL deliver that context to the agent as evidence at four moments: when a prompt is
+submitted, before an edit, after an edit, and before the agent stops. Every finding SHALL carry
+proof (a file and line, a graph edge, or a receipt) and SHALL lead to one of three actions: the
+agent fixes it; the agent decides and records the decision with a link to the proof; or the agent
+raises it to a human in its own final message or pull-request body. The system SHALL stay quiet
+unless a finding is new and real.
+
 > Decision recorded: c6d1ad07
 > Date: 2026-06-01
 
@@ -62,6 +76,16 @@ The system SHALL provide deterministic, locally-computed structural context as a
 
 - **WHEN** any capability serves structural context to an agent
 - **THEN** the answer is computed deterministically and locally from static analysis, with no LLM in the retrieval or guardrail path
+
+#### Scenario: A finding carries proof and one action
+
+- **WHEN** a moment gives the agent a finding
+- **THEN** the finding names its proof and exactly one of the actions fix, decide, or raise
+
+#### Scenario: Nothing new means nothing said
+
+- **WHEN** a moment runs and no finding is new and real
+- **THEN** the system gives the agent no finding
 
 ## Technical Notes
 

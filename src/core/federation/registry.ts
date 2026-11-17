@@ -38,7 +38,7 @@ export function federationManifestPath(homeDir: string): string {
  * home-repo self-add guard, path de-dup, and remove-by-path all compare canonically.
  * Falls back to `resolve()` when the path does not exist (realpath would throw).
  */
-function canonicalize(p: string): string {
+export function canonicalize(p: string): string {
   const abs = resolve(p);
   try {
     return realpathSync(abs);
@@ -220,7 +220,7 @@ export function repoStatus(entry: FederationRepoEntry, consulted: boolean): Cons
   const state = evaluateRepoState(entry);
   const reasons: Record<Exclude<RepoIndexState, 'indexed'>, string> = {
     unbaselined: `index present but no fingerprint baseline yet — staleness not assessable until "openlore analyze" or re-registration in ${entry.path}`,
-    stale: `index fingerprint changed since registration — re-run "openlore analyze" in ${entry.path}`,
+    stale: `index changed since registration (fingerprint differs from the registry baseline) — re-baseline it: openlore federation add ${entry.path} --name ${entry.name}`,
     unindexed: `no .openlore index found — run "openlore analyze" in ${entry.path}`,
     missing: `repo path no longer exists: ${entry.path}`,
   };

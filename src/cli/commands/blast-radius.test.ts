@@ -162,6 +162,7 @@ describe('runBlastRadiusCli (advisory posture & exit codes)', () => {
       tests: {
         count: 0,
         toRun: [],
+        files: [],
         truncatedAtDepth: 2,
         soundness: { caveats: ['Symbol scope resolved by substring fallback and may have widened.'] },
       },
@@ -171,6 +172,27 @@ describe('runBlastRadiusCli (advisory posture & exit codes)', () => {
     const out = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
     expect(out).toContain('truncated at depth 2');
     expect(out).toContain('substring fallback');
+  });
+
+  it('human render lists pushed memories on one safe line each, with flags and the note (change: add-memory-trigger-predicates)', async () => {
+    const pushed = {
+      ...orphanBriefing,
+      injectedMemories: [
+        { id: 'm1', content: 'line1\nline2 \u001b[31mred\u001b[0m', provenance: 'local-unreviewed', firedPredicate: { kind: 'fileGlob' }, verify: true, unreconciledWith: ['m2'] },
+        { id: 'm2', content: 'x'.repeat(400), provenance: 'local-unreviewed', firedPredicate: { kind: 'withinHops' } },
+      ],
+      staleTriggeredMemories: [{ id: 'm3' }],
+      injectedMemoriesNote: '3 more triggered or pinned memories matched but were not pushed (cap 10).',
+    } as unknown as BlastRadiusBriefing;
+    vi.mocked(computeBlastRadius).mockResolvedValue(pushed);
+    expect(await runBlastRadiusCli({ cwd: '/p' })).toBe(0);
+    const out = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    // ESC is removed (so no sequence can act); the inert remainder stays visible.
+    expect(out).toContain('📌 memory m1 [local-unreviewed] via fileGlob (conflicts with another memory or decision): line1 line2 red');
+    expect(out).not.toContain('\u001b');
+    expect(out).toMatch(/📌 memory m2 \[local-unreviewed\] via withinHops: x{159}…/);
+    expect(out).toContain('1 triggered memory is not shown');
+    expect(out).toContain('3 more triggered or pinned memories matched');
   });
 
   it('never blocks on a malformed blastRadius.block (valid JSON, wrong type)', async () => {
@@ -217,6 +239,25 @@ describe('runBlastRadiusCli (advisory posture & exit codes)', () => {
     expect(code).toBe(0);
     const out = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
     expect(out).toMatch(/and 3 more spec/i);
-    expect(out).toMatch(/and 3 more decision/i); // 23 affected − 20 shown
+    // Domain-level gaps are one summary line carrying the full count: none is dropped silently.
+    expect(out).toMatch(/23 ADR\(s\) name a domain this change touches/);
+  });
+
+  it('prints a decision issue on its own line and folds domain-level gaps into one line with their ids', async () => {
+    const gap = (id: string) => ({ kind: 'adr-gap', message: `Code changed in domain(s) analyzer referenced by ${id}: "t"`, domain: 'analyzer', provenance: 'reviewed-corpus' });
+    const b = {
+      headline: 'h', posture: 'advisory',
+      impact: { hubsTouched: [], layersCrossed: [], governingDecisions: [] },
+      tests: { count: 0, toRun: [] },
+      memory: { orphaned: 0, drifted: 0, willDrift: [] },
+      specs: { willGoStale: 0, items: [] },
+      decisions: { affected: 3, orphaned: 1, items: [{ kind: 'adr-orphaned', message: 'ADR-0001 names missing domain x', domain: null, provenance: 'reviewed-corpus' }, gap('ADR-0003'), gap('ADR-0004')] },
+    } as unknown as BlastRadiusBriefing;
+    vi.mocked(computeBlastRadius).mockResolvedValue(b);
+    expect(await runBlastRadiusCli({ cwd: '/p' })).toBe(0);
+    const out = outSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(out).toContain('⚠ decision [reviewed-corpus] adr-orphaned: ADR-0001 names missing domain x');
+    expect(out).toContain('2 ADR(s) name a domain this change touches: ADR-0003, ADR-0004');
+    expect(out).not.toContain('⚠ decision [reviewed-corpus] adr-gap');
   });
 });

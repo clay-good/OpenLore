@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { EditVerdict, EditVerdictRead, EditVerdictStoreBoundary } from '../../core/services/edit-verdict.js';
@@ -182,6 +183,9 @@ describe('runCheckEditCli', () => {
 
     expect(mocks.stdin).toHaveBeenCalledTimes(1);
     expect(mocks.read).toHaveBeenCalledWith(root, ['src/api.ts']);
+    // The agent's own edit is recorded for the session ledger: path and time only.
+    const log = readFileSync(join(root, '.openlore', 'session-ledger', 'agent-edits.jsonl'), 'utf-8').trim().split('\n');
+    expect(JSON.parse(log.at(-1)!)).toEqual({ file: 'src/api.ts', at: expect.any(Number) });
   });
 
   it('fails open without reading verdicts when bounded stdin rejects an oversized payload', async () => {

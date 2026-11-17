@@ -13,6 +13,7 @@
  */
 
 import { parseDocument } from 'yaml';
+import { YAML_QUIET } from '../yaml-diagnostics.js';
 import type { IacGraph, IacReference } from './types.js';
 import { emptyIacGraph } from './types.js';
 
@@ -23,15 +24,7 @@ interface InFile { path: string; content: string; language: string }
  * `<name>.Dockerfile`, or `Containerfile` (Podman's equivalent). Compose files are
  * `.yaml`/`.yml` and are classified by `classifyYaml`, not here.
  */
-export function isDockerfilePath(path: string): boolean {
-  const base = path.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? '';
-  return (
-    base === 'dockerfile' ||
-    base === 'containerfile' ||
-    base.startsWith('dockerfile.') ||
-    base.endsWith('.dockerfile')
-  );
-}
+export { isDockerfilePath } from '../language-detection.js';
 
 const posixDir = (p: string): string => {
   const posix = p.replace(/\\/g, '/');
@@ -283,7 +276,7 @@ function parseCompose(
     // `x-*: &anchor` compose extension pattern — so inherited image/depends_on/build
     // keys are present rather than left under a literal `<<` property. (It must be set
     // at parse time, not on toJS.)
-    doc = parseDocument(content, { merge: true });
+    doc = parseDocument(content, { ...YAML_QUIET, merge: true });
   } catch {
     return;
   }

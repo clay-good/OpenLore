@@ -14,18 +14,22 @@
  * → suggest_insertion_points manually.
  */
 
+import { classifyGeneratedFiles, type GeneratedFileFact } from '../generated-file-guard.js';
+import { toolIsWired } from './active-surface.js';
 import { join, relative } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
-import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult, getCachedNodeStartLine } from './utils.js';
+import { validateDirectory, loadMappingIndex, specsForFile, functionsForDomain, readCachedContext, safeJoin, safeOpenspecDir, queryTooLongError, notReadyResult, getCachedNodeStartLine, refuseUnattestedIndex } from './utils.js';
 import { readJsonArtifactCached, readDependencyGraphOrPartial } from './artifact-cache.js';
 import { expandHandle, omissionNote } from './progressive.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { repairStatusFor, repairDisclosureText } from '../cold-start-bootstrap.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
+import { isContractLanguage } from '../../analyzer/contract/types.js';
 import type { RagManifest } from '../../generator/rag-manifest-generator.js';
-import { ARTIFACT_RAG_MANIFEST, ARTIFACT_STYLE_FINGERPRINT, ORIENT_BUDGET_CANDIDATE_POOL } from '../../../constants.js';
+import { ARTIFACT_RAG_MANIFEST, ARTIFACT_STYLE_FINGERPRINT, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, ORIENT_BUDGET_CANDIDATE_POOL } from '../../../constants.js';
+import { SPEC_SOURCES_LOOKED_FOR } from '../../spec-sources/state.js';
 import { fitPayloadToBudget } from './budget-fit.js';
 import { estimateTokens } from '../llm-service.js';
 import { loadArchitectureRules } from '../../architecture/rules.js';
@@ -37,27 +41,30 @@ import {
 } from '../../analyzer/style-fingerprint.js';
 import { scanViolations } from '../../architecture/check.js';
 import type { DependencyGraphResult } from '../../analyzer/dependency-graph.js';
-import { coverageDisclosure, coverageVerdict, requireMatchEvidence, type MatchEvidence } from '../../analyzer/retrieval-evidence.js';
-import { loadParseHealthReport, parseHealthBoundary } from './parse-health-boundary.js';
+import { coverageVerdict, resolveCoverage, requireMatchEvidence, type MatchEvidence } from '../../analyzer/retrieval-evidence.js';
+import { loadParseHealth, parseHealthBoundary, readabilityShortfall } from './parse-health-boundary.js';
 import {
   classifyRole,
   deriveStrategy,
   compositeScore,
   buildReason,
 } from './semantic.js';
-import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type UnreconciledGroup } from '../../decisions/anchor.js';
+import { indexedSpecProvenanceAt, specRootRelOrNull } from './spec-paths.js';
+import { memoryFreshness, decisionAnchors, findUnreconciled, isStaleRegionOnly, type AnchoredItem, type GraphFreshnessView, type UnreconciledGroup } from '../../decisions/anchor.js';
 import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
 import { loadMemoryStore } from '../../decisions/memory-store.js';
-import type { MemoryFreshness } from '../../../types/index.js';
+import { hasPushableMemory, hasSpecDomainTrigger, isWellFormedMemory, injectionFields, reconcileInjectionNote, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW, type InjectedMemory, type MemoryInjection, type StaleTriggeredMemory } from './memory-triggers.js';
+import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
+import { buildRetirementGraph } from './stale-decision-reference.js';
+import type { AnchoredMemory, MemoryFreshness, PendingDecision } from '../../../types/index.js';
 
 import { type Reversal, collectReversals, fileScope, supersededDecisionIds } from './reversals.js';
 import { getSourceRoots, moduleFromPath } from './epistemic-lease.js';
 import { readHotspotArtifact, hotspotsForModules } from './behavioral-hotspots.js';
 import {
   decisionContentProvenance,
-  indexedSpecContentProvenance,
   readAnalysisContentProvenance,
-  reviewedFileContentProvenance,
+  specCorpusContentProvenance,
   type AnalysisContentProvenance,
   type ServedContentProvenance,
 } from '../served-content.js';
@@ -150,8 +157,9 @@ interface OrientFunction {
 interface CallNeighbour {
   name: string;
   filePath: string;
-  /** Present only for infrastructure neighbors (IaC resources) — spec-17 cross-domain. */
-  domain?: 'infra';
+
+  /** Set when the neighbour is a projected declaration, not code: infrastructure or a contract. */
+  domain?: 'infra' | 'contract';
   /** The synthesis rule, when only a synthesized edge links this neighbour (a message or event hop, not a call). */
   via?: string;
   provenance: AnalysisContentProvenance;
@@ -203,6 +211,22 @@ interface InlineSpec {
 // HANDLER
 // ============================================================================
 
+/**
+ * How many spec domains the corpus holds, for the one question `specDomains: []` cannot answer on
+ * its own: is this repository ungoverned, or is the link index simply not built? A depth-bounded
+ * scan through the OpenSpec adapter; a folder it cannot read adds nothing, and every other failure
+ * is "no disclosure" rather than a broken orient (change: fix-governance-face-dark).
+ */
+async function countSpecDomains(absDir: string, openspecPath?: string): Promise<number> {
+  try {
+    const { findNestedSpecFiles } = await import('../../spec-sources/openspec.js');
+    const specsDir = join(absDir, openspecPath ?? OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR);
+    return (await findNestedSpecFiles(specsDir, 3)).length;
+  } catch {
+    return 0;
+  }
+}
+
 export async function handleOrient(
   directory: string,
   task: string,
@@ -210,6 +234,19 @@ export async function handleOrient(
   tokenBudget?: number,
   lean = false,
   rankBy: 'distance' | 'pagerank' = 'distance',
+  /**
+   * Lean mode only: also push triggered and pinned memories (the prompt-hook injection path), so
+   * the one briefing an agent gets unasked carries them (change: add-memory-trigger-predicates).
+   */
+  opts: {
+    pushMemories?: boolean;
+    /**
+     * Include the repository-wide readability sentence (default true). It qualifies a SEARCH over
+     * the whole index; the prompt hook's exact-anchor briefing makes no absence claim, so it
+     * passes false (change: anchor-gated-prompt-briefing).
+     */
+    repoWideParseHealth?: boolean;
+  } = {},
 ): Promise<unknown> {
   const tooLong = queryTooLongError(task, 'task'); if (tooLong) return tooLong;
   // A JSON `null` budget means no budget, as before.
@@ -223,6 +260,7 @@ export async function handleOrient(
   const { VectorIndex } = await import('../../analyzer/vector-index.js');
   const { embedderMode, resolveEmbedder, servedRetrievalMode, isKeywordRetrievalMode } = await import('../../analyzer/embedder.js');
   const { SpecVectorIndex } = await import('../../analyzer/spec-vector-index.js');
+  const { specRowProse } = await import('../../analyzer/spec-row-text.js');
 
   const hasCodeIndex = VectorIndex.exists(outputDir);
   const hasSpecIndex = SpecVectorIndex.exists(outputDir);
@@ -230,13 +268,13 @@ export async function handleOrient(
   if (!hasCodeIndex) {
     return {
       ...notReadyResult('No analysis found. Run "openlore analyze" first.', 'index-absent'),
-      hint: 'Plain "openlore analyze" builds a keyword (BM25) index that orient can use; add EMBED_* (or --embed) for semantic search.',
+      hint: 'Plain "openlore analyze" builds a keyword (BM25) index that orient can use.',
     };
   }
 
   const [analysisProvenance, specProvenance] = await Promise.all([
     readAnalysisContentProvenance(absDir),
-    reviewedFileContentProvenance(absDir, 'openspec'),
+    specCorpusContentProvenance(absDir),
   ]);
 
   // Resolve the active embedder (env → local provider → remote config); null is
@@ -244,7 +282,7 @@ export async function handleOrient(
   // internal score-scale token (bounded `hybrid` vs unbounded keyword) for the
   // relevance gate; `retrievalMode` is the honest, human-facing mode.
   const cfg = await readOpenLoreConfig(absDir);
-  const embedSvc = await resolveEmbedder(cfg);
+  const embedSvc = await resolveEmbedder(cfg, outputDir);
   const vocabularyExpansion = cfg?.retrieval?.vocabularyExpansion !== false;
   let retrievalMode = servedRetrievalMode(embedSvc, outputDir, 'code', vocabularyExpansion);
 
@@ -254,7 +292,7 @@ export async function handleOrient(
   const entryPool = tokenBudget ? Math.max(clampedLimit, ORIENT_BUDGET_CANDIDATE_POOL) : clampedLimit;
 
   // ── Parallel data loading ──────────────────────────────────────────────────
-  const [rawResults, mappingIdx, llmCtx] = await Promise.all([
+  const [rawResults, mappingIdx, llmCtx, parseHealth] = await Promise.all([
     VectorIndex.search(outputDir, task, embedSvc, {
       limit: tokenBudget ? Math.max(clampedLimit * 3, entryPool) : clampedLimit * 3,
       vocabularyExpansion,
@@ -264,8 +302,25 @@ export async function handleOrient(
     }),
     loadMappingIndex(absDir),
     readCachedContext(absDir),
+    // Read here, not at response time: the coverage verdict below needs it, and one artifact
+    // read inside the existing parallel block costs nothing on the hot path (change:
+    // fix-retrieval-coverage-over-unread-content).
+    loadParseHealth(absDir),
   ]);
   const searchMode = isKeywordRetrievalMode(retrievalMode) ? 'bm25_fallback' : 'hybrid';
+
+  // An index that exists and cannot be vouched for is refused here with the SAME conclusion
+  // `get_subgraph` and `blast_radius` already return, instead of being served as a confident
+  // briefing stamped `source-derived`. An absent index or an unavailable graph still falls
+  // through to the ordinary (and honestly disclosed) answer below.
+  if (!llmCtx) {
+    const refusal = await refuseUnattestedIndex(absDir);
+    if (refusal) return refusal;
+  }
+
+  // What the retrieval could not read, repository-wide. The verdict reads this; so does the
+  // boundary text below.
+  const unreadable = readabilityShortfall(parseHealth.report, parseHealth.artifactUnreadable);
 
 
   // ── Relevant functions (top-N) ────────────────────────────────────────────
@@ -314,10 +369,11 @@ export async function handleOrient(
   // An uncovered selection returns no symbols at all; the rest of the briefing (specs,
   // decisions, staleness) has its own evidence and is unaffected (spec `mcp-handlers`
   // RetrievalHandlersCarryTheCoverageVerdict).
+  // A `covered` verdict is unsayable when material in scope went unread: the briefing is then
+  // `partial`, carrying the evidence verdict and the named cause (change:
+  // fix-retrieval-coverage-over-unread-content).
   const symbolCoverage = coverageVerdict(relevantFunctionsAll.map(f => f.matchEvidence));
-  const coverage = symbolCoverage === 'covered'
-    ? { verdict: symbolCoverage, questionKind: 'where-is' as const }
-    : coverageDisclosure(symbolCoverage, 'where-is');
+  const coverage = resolveCoverage(symbolCoverage, 'where-is', unreadable);
 
   // ── Relevant files (deduplicated) ─────────────────────────────────────────
   const relevantFiles = [...new Set(relevantFunctions.map(f => f.filePath))];
@@ -345,6 +401,23 @@ export async function handleOrient(
   }
 
   // ── Spec domains covering those files ─────────────────────────────────────
+  // With no mapping index there is nothing to match against, and `specDomains: []` would read as
+  // "no spec governs this code". Say which it is: an absent index is a missing CACHE, not a
+  // finding about the repository (change: fix-governance-face-dark).
+  let specLinkage: { state: 'unavailable'; reason: string; remediation: string } | undefined;
+  const specCount = await countSpecDomains(absDir, cfg?.openspecPath);
+  // No spec source at all is a state of the repository, not an empty result: `specDomains: []`
+  // alone would read as "nothing governs this code" (change: spec-framework-neutrality, task 2.1).
+  const specSources = specCount === 0 ? { found: [] as string[], lookedFor: [...SPEC_SOURCES_LOOKED_FOR] } : undefined;
+  if (!mappingIdx) {
+    if (specCount > 0) {
+      specLinkage = {
+        state: 'unavailable',
+        reason: `${specCount} spec domain(s) exist, but the spec→code link index has not been built, so no requirement could be matched to the code in scope.`,
+        remediation: 'Run `openlore analyze` (it writes the index), or `openlore mapping refresh`.',
+      };
+    }
+  }
   const domainScores = new Map<string, { specFile: string; matchCount: number }>();
   if (mappingIdx) {
     for (const filePath of relevantFiles) {
@@ -377,6 +450,9 @@ export async function handleOrient(
         ? {
           name: n.name, filePath: n.filePath, provenance: analysisProvenance,
           ...(isIacLanguage(n.language) ? { domain: 'infra' as const } : {}),
+          // A declared operation is not code the agent can edit; say which domain it is
+          // (change: add-contract-node-projection).
+          ...(isContractLanguage(n.language) ? { domain: 'contract' as const } : {}),
           ...(via ? { via } : {}),
         }
         : null;
@@ -428,7 +504,20 @@ export async function handleOrient(
   // Normalise search scores to [0, 1] for compositeScore (scores are RRF/BM25: higher = better)
   // With a budget the search is widened for the function pool; insertion points still come from the
   // default search width, so they match the no-budget answer.
-  const insertionResults = tokenBudget ? rawResults.slice(0, clampedLimit * 3) : rawResults;
+  // A test function is never where a feature is added. The candidates come straight from the
+  // search results, which include test code: on a Rust workspace the top insertion points were
+  // `#[test]` functions, so `orient` told the agent to write the feature inside a test
+  // (change: fix-rust-test-detection). Filtered here rather than in the search, because a test
+  // IS a legitimate `relevantFunction` — it shows how the code is used.
+  // The search index carries no test flag, so the graph answers it: a node the build marked
+  // `isTest` (a path convention, or a Rust `#[test]` attribute) is not an insertion point.
+  const isTestNode = (id: string): boolean => {
+    const node = llmCtx?.edgeStore?.getNode(id);
+    if (node) return node.isTest === true;
+    return llmCtx?.callGraph?.nodes.find(n => n.id === id)?.isTest === true;
+  };
+  const nonTestResults = rawResults.filter(r => !isTestNode(r.record.id));
+  const insertionResults = tokenBudget ? nonTestResults.slice(0, clampedLimit * 3) : nonTestResults;
   const maxRawScore = insertionResults.length > 0 ? Math.max(...insertionResults.map(r => r.score)) : 1;
   const normalise = (s: number) => maxRawScore > 0 ? s / maxRawScore : 0;
 
@@ -466,6 +555,7 @@ export async function handleOrient(
         limit: 3,
         vocabularyExpansion,
       });
+      const specRootRel = await specRootRelOrNull(absDir);
       matchingSpecs = await Promise.all(specResults.map(async r => ({
         domain: r.record.domain,
         section: r.record.section,
@@ -474,10 +564,11 @@ export async function handleOrient(
         matchEvidence: requireMatchEvidence(r.matchEvidence),
         ...(r.expansionTerms?.length ? { expansionTerms: r.expansionTerms } : {}),
         text: r.record.text.slice(0, 300) + (r.record.text.length > 300 ? '…' : ''),
-        provenance: await indexedSpecContentProvenance(
+        provenance: await indexedSpecProvenanceAt(
           absDir,
-          `openspec/specs/${r.record.domain}/spec.md`,
-          [r.record.title, r.record.text],
+          specRootRel,
+          r.record.domain,
+          [r.record.title, specRowProse(r.record.domain, r.record.title, r.record.text)],
         ),
       })));
     } catch {
@@ -573,6 +664,9 @@ export async function handleOrient(
   // (ReversalAwareness). Read from the bitemporal supersession record + decision
   // supersedes links; never re-served as authoritative current context.
   let reversals: Reversal[] | undefined;
+  // Notes pushed into the briefing by a matching trigger or `pinned`, with their receipts
+  // (change: add-memory-trigger-predicates).
+  let memoryInjection: ReturnType<typeof injectionFields> = {};
   // Ids of decisions superseded by another (shared by every authoritative decision
   // surface below — pendingDecisions and governingDecisions — so a superseded decision
   // is never served as current intent on any of them). Populated in the block below.
@@ -639,7 +733,10 @@ export async function handleOrient(
     const scopeFiles = new Set<string>(relevantFileSet);
     for (const d of active) for (const f of d.affectedFiles) scopeFiles.add(f);
     // Loaded once and reused for both the contradiction fold and the reversal scan.
+    // notes.json is committed repo content: an entry OpenLore could not have written is skipped
+    // here, once, so no section below can throw on it.
     const memStore = await loadMemoryStore(absDir);
+    memStore.memories = memStore.memories.filter(isWellFormedMemory);
     if (view && scopeFiles.size > 0) {
       for (const m of memStore.memories) {
         if (m.invalidatedAt) continue;
@@ -648,6 +745,24 @@ export async function handleOrient(
         contradictionItems.push({ id: m.id, anchors: m.anchors, freshness: f.freshness, invalidated: false });
       }
     }
+
+    // ── Triggered and pinned memories (push, not pull) ───────────────────────
+    // Evaluated against the touched set this briefing computed — under a tokenBudget the whole
+    // candidate pool, since the budget may add those functions back. Without a graph the anchors
+    // cannot be verified, so a note is judged exactly as recall would judge it then. Its own
+    // try/catch: a failure here must not take the decision and reversal sections with it. Skipped
+    // outright when no live note has a trigger or a pin, so a repo without them pays nothing.
+    if (hasPushableMemory(memStore.memories)) try {
+      const touchedResults = tokenBudget ? topResults : topResults.slice(0, relevantFunctions.length);
+      const injection = await evaluatePushedMemories(absDir, memStore.memories, store.decisions, touchedResults, specDomains, llmCtx, view);
+      // A pushed note joins the contradiction check, wherever it is anchored.
+      if (view) contradictionItems.push(...injection.authoritative);
+      memoryInjection = injectionFields(injection);
+    } catch (err) {
+      // Non-fatal: the briefing is served without pushed memories, and says so.
+      memoryInjection = { injectedMemoriesNote: `Triggered memories could not be evaluated: ${err instanceof Error ? err.message : String(err)}` };
+    }
+
     const groups = findUnreconciled(contradictionItems);
     if (groups.length > 0) unreconciledMemories = groups;
 
@@ -889,7 +1004,10 @@ export async function handleOrient(
   if (/\b(cluster|community|coupled|group)\b/.test(_taskLow)) _suggested.push('get_cluster');
   if (!emptyResult) _suggested.push('check_spec_drift');
   const _seen = new Set<string>();
-  const suggestedTools = _suggested.filter(t => (_seen.has(t) ? false : (_seen.add(t), true)));
+  // `suggestedTools` is a CALL LIST: an entry this process does not serve is a wasted turn.
+  const suggestedTools = _suggested
+    .filter(t => (_seen.has(t) ? false : (_seen.add(t), true)))
+    .filter(toolIsWired);
 
   // ── Next steps ────────────────────────────────────────────────────────────
   const nextSteps: string[] = [];
@@ -906,9 +1024,13 @@ export async function handleOrient(
       );
     }
   } else {
-    nextSteps.push(
-      'Before making an architectural choice, call record_decision(title, rationale, consequences, affectedFiles) to document it',
-    );
+    // Named only when this process serves it. The default `substrate` preset does not, and an
+    // agent that followed the old unconditional advice got "Tool \"record_decision\" is not
+    // available in the active preset" — in the same session where install had promised the
+    // guidance names only wired tools (change: fix-orient-guidance-preset).
+    nextSteps.push(toolIsWired('record_decision')
+      ? 'Before making an architectural choice, call record_decision(title, rationale, consequences, affectedFiles) to document it'
+      : 'Before making an architectural choice, record it with `openlore decisions record --title "…" --rationale "…"` (the record_decision tool is not in the wired preset)');
   }
   if (!emptyResult && insertionPoints.length > 0) {
     nextSteps.push(
@@ -916,13 +1038,18 @@ export async function handleOrient(
     );
   }
   if (!emptyResult && specDomains.length > 0) {
-    const hint = inlineSpecs
-      ? `Domain purposes included in inlineSpecs — call get_spec("${specDomains[0].domain}") for requirements and implementation details`
-      : `Call get_spec("${specDomains[0].domain}") to read the full spec before writing code`;
+    const domain = specDomains[0].domain;
+    const hint = !toolIsWired('get_spec')
+      ? `Read the spec before writing code: ${specDomains[0].specFile} (the get_spec tool is not in the wired preset)`
+      : inlineSpecs
+        ? `Domain purposes included in inlineSpecs — call get_spec("${domain}") for requirements and implementation details`
+        : `Call get_spec("${domain}") to read the full spec before writing code`;
     nextSteps.push(hint);
   }
   if (!emptyResult) {
-    nextSteps.push('After implementing, run check_spec_drift to verify the code matches the spec');
+    nextSteps.push(toolIsWired('check_spec_drift')
+      ? 'After implementing, run check_spec_drift to verify the code matches the spec'
+      : 'After implementing, run `openlore drift` to verify the code matches the spec (the check_spec_drift tool is not in the wired preset)');
   }
 
   // Signal when the graph index is unavailable (e.g. wiped by a version upgrade and
@@ -1014,6 +1141,28 @@ export async function handleOrient(
     }
   }
 
+  // ── The OpenAPI contract of route handlers in scope (change: add-contract-graph-projection) ──
+  // An agent editing a handler sees, unasked, the operation it serves and what that declares.
+  // Read only when a file in scope has an indexed route. Additive + fail-open.
+  let contracts: import('../contract/contract-briefing.js').ContractBriefing | undefined;
+  if (!lean && relevantFunctions.length > 0) {
+    try {
+      const { contractsForFiles } = await import('../contract/contract-briefing.js');
+      contracts = await contractsForFiles(absDir, [...new Set(relevantFunctions.map(f => f.filePath))], relevantFunctions.map(f => f.name));
+    } catch { /* never fail orient over the contract summary */ }
+  }
+
+  // ── The infrastructure a handler in scope depends on (change: add-iac-deploy-binding-commands) ──
+  // The resource that runs it, and the sites that set the env vars it reads. The env scan runs
+  // only when a function in scope actually reads one, so a non-handler task pays nothing.
+  let infrastructure: import('./deploy-briefing.js').InfrastructureBriefing | undefined;
+  if (!lean && relevantFunctions.length > 0 && llmCtx?.callGraph) {
+    try {
+      const { infrastructureForFunctions } = await import('./deploy-briefing.js');
+      infrastructure = await infrastructureForFunctions(absDir, llmCtx.callGraph as SerializedCallGraph, relevantFunctions.map(f => ({ name: f.name, filePath: f.filePath })));
+    } catch { /* never fail orient over the infrastructure summary */ }
+  }
+
   // ReadyOrHonestFirstUse (change: make-index-self-healing): distinguish *repairing*
   // from *absent* (the not-ready result above) and plain *stale*. readCachedContext,
   // awaited above, fires the background repair for a stale/mismatched index; surface
@@ -1024,7 +1173,27 @@ export async function handleOrient(
   // Parse-health boundary (change: add-parse-health-boundary-disclosure): if any file this orient
   // surfaced parsed with errors, disclose that its symbols/edges are a lower bound rather than
   // letting the agent read the missing symbols as genuinely absent. Absent on a clean repo.
-  const parseHealthNote = parseHealthBoundary(await loadParseHealthReport(absDir), relevantFiles);
+  // `repoWide`: the per-file half of this boundary is scoped to the files orient SURFACED, so it
+  // can never fire for the worst case — a file that produced zero symbols never surfaces.
+  const parseHealthNote = parseHealthBoundary(parseHealth.report, relevantFiles, {
+    repoWide: opts.repoWideParseHealth !== false,
+    artifactUnreadable: parseHealth.artifactUnreadable,
+  });
+
+  // Generated-file guard (change: add-generated-file-guard): mark the files in scope that are
+  // generated or vendored, with the literal source and regenerate command, so an agent edits the
+  // source instead of output the next generator run erases. Full mode only: the lean prompt-hook
+  // path renders none of it. The budget-held-back files are classified too, so a file the budget
+  // fit adds keeps its mark. Best-effort; absent when none are.
+  let generatedByFile = new Map<string, GeneratedFileFact>();
+  if (!lean) {
+    try {
+      generatedByFile = (await classifyGeneratedFiles(absDir, [...relevantFiles, ...extraPairs.map(p => p.fn.filePath)])).facts;
+    } catch {
+      // additive enrichment — never fail orient over the generated-file marks
+    }
+  }
+  const generatedFiles = generatedFilesFor(relevantFiles, generatedByFile);
 
   // Minimal-sufficient navigation core — always returned (Spec 27).
   const core = {
@@ -1032,9 +1201,6 @@ export async function handleOrient(
     searchMode,
     retrievalMode,
     ...(parseHealthNote ? { parseHealth: parseHealthNote } : {}),
-    ...(isKeywordRetrievalMode(retrievalMode)
-      ? { note: 'Keyword (BM25) search — the zero-config default. For semantic ranking, run "openlore embed --local" (on-device, no API key) or set EMBED_* for a remote endpoint.' }
-      : {}),
     ...(graphIndexStale
       ? { graphIndexNote: 'Graph index unavailable — call paths, provenance, decisions, and change-coupling are omitted. Run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).' }
       : {}),
@@ -1046,6 +1212,7 @@ export async function handleOrient(
         } }
       : {}),
     relevantFiles,
+    ...(generatedFiles.length ? { generatedFiles } : {}),
     relevantFunctions,
     coverage,
     ...(emptyResult ? { emptyResult } : {}),
@@ -1064,9 +1231,24 @@ export async function handleOrient(
   // below are pure overhead on a shallow "who calls X" lookup and each is one
   // exact `expand` handle or one dedicated tool call away — so we trim bytes per
   // turn without forcing a follow-up round-trip. The rich default is unchanged.
+  /** Lean mode's opt-in push: the same evaluation as the full briefing, best-effort and disclosed. */
+  async function leanMemoryInjection(): Promise<ReturnType<typeof injectionFields>> {
+    try {
+      const memories = (await loadMemoryStore(absDir)).memories.filter(isWellFormedMemory);
+      if (!hasPushableMemory(memories)) return {};
+      const { loadDecisionStore } = await import('../../decisions/store.js');
+      const { decisions } = await loadDecisionStore(absDir);
+      const es = llmCtx?.edgeStore;
+      const view = es ? makeFreshnessView(es, absDir) : null;
+      return injectionFields(await evaluatePushedMemories(absDir, memories, decisions, topResults.slice(0, relevantFunctions.length), specDomains, llmCtx, view));
+    } catch (err) {
+      return { injectedMemoriesNote: `Triggered memories could not be evaluated: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
   const extras = extraPairs;
   if (lean) {
-    const leanPayload = { ...core, lean: true };
+    const leanPayload = { ...core, lean: true, ...(opts.pushMemories ? await leanMemoryInjection() : {}) };
     return tokenBudget
       ? fitOrientToBudget(absDir, leanPayload, tokenBudget, extras, llmCtx)
       : withIndexStaleness(absDir, leanPayload, llmCtx);
@@ -1082,6 +1264,7 @@ export async function handleOrient(
     ...(staleDecisions !== undefined ? { staleDecisions } : {}),
     ...(unreconciledMemories !== undefined ? { unreconciledMemories } : {}),
     ...(reversals !== undefined ? { reversals } : {}),
+    ...memoryInjection,
     ...(governingDecisions !== undefined ? { governingDecisions } : {}),
     ...(provenance !== undefined ? { provenance } : {}),
     ...(changeCoupling !== undefined ? { changeCoupling } : {}),
@@ -1089,23 +1272,68 @@ export async function handleOrient(
     ...(landmarks !== undefined ? { landmarks } : {}),
     ...(behavioralHotspots !== undefined ? { behavioralHotspots } : {}),
     ...(regionStyle !== undefined ? { regionStyle } : {}),
+    ...(specLinkage ? { specLinkage } : {}),
+    ...(specSources ? { specSources } : {}),
+    ...(contracts !== undefined ? { contracts } : {}),
+    ...(infrastructure !== undefined ? { infrastructure } : {}),
     nextSteps,
   };
   return tokenBudget
-    ? fitOrientToBudget(absDir, result, tokenBudget, extras, llmCtx)
+    ? fitOrientToBudget(absDir, result, tokenBudget, extras, llmCtx, generatedByFile)
     : withIndexStaleness(absDir, result, llmCtx);
+}
+
+/** The generated-file marks for `files`, in their order; empty when none is generated. */
+function generatedFilesFor(files: readonly string[], byFile: ReadonlyMap<string, GeneratedFileFact>): GeneratedFileFact[] {
+  return files.map(f => byFile.get(f)).filter((f): f is GeneratedFileFact => f !== undefined);
+}
+
+/**
+ * Evaluate memory triggers and pins against the functions a briefing touched (change:
+ * add-memory-trigger-predicates). Shared by the full briefing and by lean mode's opt-in push.
+ * Without a graph view the anchors cannot be verified, so a note is judged as recall judges it then.
+ */
+async function evaluatePushedMemories(
+  absDir: string,
+  memories: AnchoredMemory[],
+  decisions: PendingDecision[],
+  touchedResults: Array<{ record: { id: string; name: string; filePath: string; className?: string } }>,
+  specDomains: Array<{ domain: string }>,
+  llmCtx: Awaited<ReturnType<typeof readCachedContext>>,
+  view: GraphFreshnessView | null,
+): Promise<MemoryInjection> {
+  const touchedSymbols = touchedResults.map((r) => ({
+    id: r.record.id,
+    name: r.record.name,
+    ...(r.record.className ? { className: r.record.className } : {}),
+  }));
+  const touchedFiles = [...new Set(touchedResults.map((r) => r.record.filePath))];
+  const fileDomains = hasSpecDomainTrigger(memories) ? await specDomainsForFiles(absDir, touchedFiles) : [];
+  const domains = fileDomains === undefined
+    ? (specDomains.length > 0 ? specDomains.map((d) => d.domain) : undefined)
+    : [...new Set([...fileDomains, ...specDomains.map((d) => d.domain)])].sort();
+  const touched = { files: touchedFiles, symbols: touchedSymbols, domains };
+  const cg = llmCtx?.callGraph as SerializedCallGraph | undefined;
+  const hops = maxTriggerHops(memories);
+  const probe = cg && hops > 0
+    ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), touchedSymbols, hops)
+    : undefined;
+  return selectInjectedMemories(memories, touched, view ?? UNVERIFIABLE_VIEW, {
+    includePinned: true, probe, retirement: buildRetirementGraph(decisions), graphUnavailable: !view, decisions,
+  });
 }
 
 /**
  * Sections trimmed when the top-`limit` answer itself exceeds a `tokenBudget`, most peripheral first;
  * each is drained before the next is touched, always from its lowest-ranked end. A call path is kept
- * exactly when its function is. Never trimmed: governance context (pending, stale, reversed, and
+ * exactly when its function is. Triggered and pinned memories are trimmed from their pinned end, and the
+ * receipt counts them (change: add-memory-trigger-predicates). Never trimmed: governance context (pending, stale, reversed, and
  * governing decisions, unreconciled memories), architecture violations, matching specs (they carry
  * synced decisions), the file scope the answer was computed for, and next steps.
  */
 const ORIENT_BUDGET_TRIM_ORDER = [
-  'behavioralHotspots', 'landmarks', 'changeCoupling', 'specLinkedFunctions', 'inlineSpecs',
-  'insertionPoints', 'specDomains', 'relevantFunctions',
+  'infrastructure', 'contracts', 'behavioralHotspots', 'landmarks', 'changeCoupling', 'specLinkedFunctions', 'inlineSpecs',
+  'insertionPoints', 'staleTriggeredMemories', 'injectedMemories', 'specDomains', 'relevantFunctions',
 ] as const;
 
 /** Estimated tokens of a payload as it is sent: pretty-printed JSON, as the MCP server and `--json` emit. */
@@ -1128,6 +1356,7 @@ async function fitOrientToBudget(
   tokenBudget: number,
   extras: Array<{ fn: OrientFunction; path: OrientCallPath }>,
   llmCtx: Awaited<ReturnType<typeof readCachedContext>>,
+  generatedByFile: ReadonlyMap<string, GeneratedFileFact> = new Map(),
 ): Promise<Record<string, unknown>> {
   // The final response with its receipt settled: `estimatedTokens` is the size of exactly this rendering,
   // so every candidate is measured as it would be sent.
@@ -1149,9 +1378,12 @@ async function fitOrientToBudget(
   if (fitsBudget(baseFinal)) {
     const extend = (count: number) => {
       const added = extras.slice(0, count);
+      const relevantFiles = [...new Set([...payload.relevantFiles, ...added.map(pair => pair.fn.filePath)])];
+      const generatedFiles = generatedFilesFor(relevantFiles, generatedByFile);
       return {
         ...payload,
-        relevantFiles: [...new Set([...payload.relevantFiles, ...added.map(pair => pair.fn.filePath)])],
+        ...(generatedFiles.length ? { generatedFiles } : {}),
+        relevantFiles,
         relevantFunctions: [...payload.relevantFunctions, ...added.map(pair => pair.fn)],
         callPaths: [...payload.callPaths, ...added.map(pair => pair.path)],
       };
@@ -1180,6 +1412,20 @@ async function fitOrientToBudget(
     const callPaths = allPaths.slice(0, kept);
     if (allPaths.length > callPaths.length) receipt.callPaths = allPaths.length - callPaths.length;
     const droppedFunctions = omitted.relevantFunctions ?? 0;
+    // A fully trimmed pushed-memory list reads as "none fired" only when absent; the receipt counts it.
+    for (const key of ['injectedMemories', 'staleTriggeredMemories'] as const) {
+      if (Array.isArray(trimmed[key]) && (trimmed[key] as unknown[]).length === 0) delete trimmed[key];
+    }
+    // The note's item sentences describe the lists as trimmed, never items that were cut.
+    if (typeof trimmed.injectedMemoriesNote === 'string') {
+      const note = reconcileInjectionNote(
+        trimmed.injectedMemoriesNote,
+        trimmed.injectedMemories as InjectedMemory[] | undefined,
+        trimmed.staleTriggeredMemories as StaleTriggeredMemory[] | undefined,
+      );
+      if (note) trimmed.injectedMemoriesNote = note;
+      else delete trimmed.injectedMemoriesNote;
+    }
     return finish({
       ...trimmed,
       callPaths,

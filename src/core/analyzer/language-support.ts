@@ -17,9 +17,12 @@
  *   - `cfgOverlay`     ← {@link cfgSupportsLanguage}        (cfg.ts)
  *   - `typeInference`  ← {@link TYPE_INFERENCE_LANGUAGES}   (type-inference-engine.ts)
  *   - `iacProjection`  ← {@link isIacLanguage}              (iac/types.ts)
+ *   - `iacCodeBinding` ← {@link IAC_CODE_BINDING_LANGUAGES} (iac/deploy-binding.ts)
+ *   - `contractSchemas`← {@link isContractLanguage}         (contract/types.ts)
  *   - `styleFingerprint`← {@link STYLE_FINGERPRINT_LANGUAGES} (style-fingerprint.ts)
  *   - `dynamicBoundary`← {@link supportsDynamicBoundary}    (dynamic-boundary.ts)
  *   - `messageTopology`← {@link MESSAGE_TOPOLOGY_LANGUAGES} (message-topology.ts)
+ *   - `deprecationMarkers`← {@link DEPRECATION_MARKER_LANGUAGES} (call-graph-extract.ts)
  * A behavioral test (`language-support.test.ts`) cross-checks each flag against the live
  * extractor on a fixture, so the registry cannot silently drift from reality.
  *
@@ -33,6 +36,8 @@
 
 import { cfgSupportsLanguage } from './cfg.js';
 import { isIacLanguage, IAC_LANGUAGES } from './iac/types.js';
+import { isContractLanguage, CONTRACT_LANGUAGES } from './contract/types.js';
+import { IAC_CODE_BINDING_LANGUAGES } from './iac/deploy-binding.js';
 import { CALLGRAPH_LANGUAGES } from './call-graph.js';
 import { SIGNATURE_LANGUAGES } from './signature-extractor.js';
 import { TYPE_INFERENCE_LANGUAGES } from './type-inference-engine.js';
@@ -45,6 +50,7 @@ import { RECEIVER_REGISTRY_LANGUAGES } from './receiver-registry.js';
 import { TEST_DETECTION_DECISIONS } from './test-file.js';
 import { COMPLEXITY_LANGUAGES } from './call-graph-complexity.js';
 import { MESSAGE_TOPOLOGY_LANGUAGES } from './message-topology.js';
+import { DEPRECATION_MARKER_LANGUAGES } from './call-graph-extract.js';
 import {
   SCRIPT_CONTAINER_LIMITATIONS,
 } from './sfc-script-extractor.js';
@@ -65,11 +71,14 @@ export const CAPABILITIES = [
   'receiverResolution',
   'styleFingerprint',
   'iacProjection',
+  'iacCodeBinding',
+  'contractSchemas',
   'crossServiceHttp',
   'errorPropagation',
   'dynamicBoundary',
   'literalReflection',
   'messageTopology',
+  'deprecationMarkers',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -86,11 +95,14 @@ export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
   receiverResolution: 'Chained intra-object receiver resolution (`this.<field>.m()` / `self.<field>.m()`) through a per-file registry of declared field and return types, with the residue disclosed as a boundary by `analyze_error_propagation` rather than left silent (that tool is the only surface that discloses it). A language WITHOUT this does NOT bind that call shape; what it does instead varies by that language\'s own call query — Java, C# and Ruby capture the chained receiver and fall through to their ordinary member-call handling, while Go captures no chained receiver at all and so records nothing for it.',
   styleFingerprint: 'Descriptive idiom fingerprint (function form, binding, naming case, …) with an evidence floor + enforcement-awareness.',
   iacProjection: 'Infrastructure-as-code projection (resources/edges) onto the unified graph.',
+  iacCodeBinding: 'Infrastructure-to-code binding: a resource that names the code it runs (a Lambda handler, a Serverless function handler) is linked to the indexed function by a `deploys_symbol` edge, resolved literally against the source — through the project\'s own `outDir`/`rootDir` or `main`/`source` mapping when the handler names built output. An ecosystem WITHOUT this names no code, so no binding is looked for; a handler that resolves to nothing is disclosed as unresolved, never dropped.',
+  contractSchemas: 'Interface-schema reading and projection: declared operations become graph nodes bound to the route handler that serves each (`implements_endpoint`) and the client call that consumes it (`consumes_endpoint`), matched literally by method and normalized path; protobuf RPCs are bound to the implementation a gRPC server registration names (Go, Python, Node); GraphQL root fields to the function a literal resolver map names (JS/TS, Python Ariadne). A format WITHOUT this is not read, so it declares no operation — never "this repository declares none".',
   crossServiceHttp: 'Cross-service API topology: outbound HTTP client call sites and/or server route registrations matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary.',
   errorPropagation: 'Error-flow analysis (`analyze_error_propagation`): exception escape/handler extraction for TS/JS/Python/Java/C#, plus Go returned-error and panic/recover value flow.',
   dynamicBoundary: 'Dynamic-boundary site recording: reflective invocation, computed-member dispatch, `eval`, dynamic import, metaprogrammed definition and DI-container resolution are recorded as disclosed boundaries. A language WITHOUT this reports no site because none is looked for — never because it contains no dynamic dispatch.',
   literalReflection: 'Literal reflective dispatch recovery: a stable module-private JS/TS `const` dispatch table (`HANDLERS[k]()`, `HANDLERS["create"]()`) whose entries bind by their same-file declarations (never by name) becomes `literal-reflective` synthesized edges; every refusal stays a disclosed dynamic-boundary site. Self-typed receivers (`this["m"]()`, `getattr(self, "m")()`) and bare-name reflection are never resolved. A language WITHOUT this binds none of these shapes.',
   messageTopology: 'Message-topology recovery: an object literal with a static discriminant (`type`/`kind`/`action`/`event`/`op`/`cmd`/`command`/`tag` set to a literal or a module-bound `Const.MEMBER`) that is handed to a transport call (`send`, `postMessage`, `dispatch`, …, or via `JSON.stringify`) is paired with each clause selecting the same field and tag (`switch` case, `if (m.type === …)`, an early-exit `!==` guard, a ternary) as a `message-topology` synthesized edge. A computed or spread-overridden tag pairs nothing; a send no recognized clause selects is a disclosed `message-send` dynamic-boundary site. A message hop is never a call: claims, error propagation and test reach do not treat it as one. A language WITHOUT this recovers no message hop.',
+  deprecationMarkers: 'Deprecation markers: the language\'s standard marker (JSDoc `@deprecated`, a Go `Deprecated:` comment paragraph, a Python PEP 702 `@deprecated` decorator) is recorded on the symbol, and `structural_diff` reports added calls into marked symbols as `deprecated-symbol-use`. A language WITHOUT this records no marker, so no call into it is reported.',
 };
 
 /**
@@ -116,8 +128,19 @@ export const IAC_TAG_LANGUAGES: readonly string[] = IAC_LANGUAGES.filter(
   l => !CODE_LANGUAGES.includes(l),
 );
 
+/**
+ * Interface-schema format tags a contract node can carry (change: add-contract-node-projection).
+ * Derived from the projector's authoritative {@link CONTRACT_LANGUAGES}: a specification is not
+ * an extension-detected code language, but the projector tags the operation nodes it derives with
+ * the format name, so a node CAN have this language and the registry must represent it (its only
+ * backed capability is `contractSchemas`).
+ */
+export const CONTRACT_TAG_LANGUAGES: readonly string[] = CONTRACT_LANGUAGES.filter(
+  l => !CODE_LANGUAGES.includes(l),
+);
+
 /** Every language a node can be tagged with — the registry's complete key universe (sorted). */
-export const ALL_LANGUAGES: readonly string[] = [...CODE_LANGUAGES, ...IAC_TAG_LANGUAGES]
+export const ALL_LANGUAGES: readonly string[] = [...CODE_LANGUAGES, ...IAC_TAG_LANGUAGES, ...CONTRACT_TAG_LANGUAGES]
   .slice()
   .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
@@ -159,11 +182,14 @@ function deriveCapabilities(language: string): Capability[] {
   if (RECEIVER_REGISTRY_LANGUAGES.has(language)) out.push('receiverResolution');
   if (STYLE_FINGERPRINT_LANGUAGES.has(language)) out.push('styleFingerprint');
   if (isIacLanguage(language)) out.push('iacProjection');
+  if (IAC_CODE_BINDING_LANGUAGES.has(language)) out.push('iacCodeBinding');
+  if (isContractLanguage(language)) out.push('contractSchemas');
   if (CROSS_SERVICE_HTTP_LANGUAGES.has(language)) out.push('crossServiceHttp');
   if (ERROR_PROPAGATION_LANGUAGES.has(language)) out.push('errorPropagation');
   if (supportsDynamicBoundary(language)) out.push('dynamicBoundary');
   if (supportsLiteralReflection(language)) out.push('literalReflection');
   if (MESSAGE_TOPOLOGY_LANGUAGES.has(language)) out.push('messageTopology');
+  if (DEPRECATION_MARKER_LANGUAGES.has(language)) out.push('deprecationMarkers');
   // Return in canonical CAPABILITIES order for determinism.
   return CAPABILITIES.filter(c => out.includes(c));
 }

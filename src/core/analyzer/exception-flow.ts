@@ -27,9 +27,12 @@
  */
 
 import type Parser from 'tree-sitter';
+import { importGrammar } from './grammar-entry.js';
 import { usesTsxGrammar } from './language-detection.js';
-import { parseWithBudget, type BudgetableParser } from './parse-budget.js';
+import { readNamedChildren } from './ast-children.js';
+import { parseWithBudget, type BudgetableParser } from './extraction-budget.js';
 import { RECEIVER_REGISTRY_LANGUAGES } from './receiver-registry.js';
+import { sameNode } from './same-node.js';
 
 /** The languages whose exception flow is statically extractable here. This is the
  *  single authoritative source the language-support registry derives the
@@ -321,7 +324,7 @@ export async function getExceptionParser(
       case 'JavaScript': {
         if (usesTsxGrammar(filePath)) {
           if (!_tsxParser) {
-            const m = await import('tree-sitter-typescript');
+            const m = await importGrammar('tree-sitter-typescript');
             _tsxParser = new NP();
             _tsxParser.setLanguage(
               ((m.default ?? m) as { tsx: object }).tsx as Parser.Language,
@@ -330,7 +333,7 @@ export async function getExceptionParser(
           return _tsxParser!;
         }
         if (!_tsParser) {
-          const m = await import('tree-sitter-typescript');
+          const m = await importGrammar('tree-sitter-typescript');
           _tsParser = new NP();
           _tsParser.setLanguage(
             ((m.default ?? m) as { typescript: object }).typescript as Parser.Language,
@@ -340,22 +343,22 @@ export async function getExceptionParser(
       }
       case 'Python': {
         if (!_pyParser) {
-          const m = await import('tree-sitter-python');
+          const m = await importGrammar('tree-sitter-python');
           _pyParser = new NP();
           _pyParser.setLanguage((m.default ?? m) as Parser.Language);
         }
         return _pyParser!;
       }
       case 'Go': {
-        if (!_goParser) { const m = await import('tree-sitter-go'); _goParser = new NP(); _goParser.setLanguage((m.default ?? m) as Parser.Language); }
+        if (!_goParser) { const m = await importGrammar('tree-sitter-go'); _goParser = new NP(); _goParser.setLanguage((m.default ?? m) as Parser.Language); }
         return _goParser;
       }
       case 'Java': {
-        if (!_javaParser) { const m = await import('tree-sitter-java'); _javaParser = new NP(); _javaParser.setLanguage((m.default ?? m) as Parser.Language); }
+        if (!_javaParser) { const m = await importGrammar('tree-sitter-java'); _javaParser = new NP(); _javaParser.setLanguage((m.default ?? m) as Parser.Language); }
         return _javaParser;
       }
       case 'C#': {
-        if (!_csharpParser) { const m = await import('tree-sitter-c-sharp'); _csharpParser = new NP(); _csharpParser.setLanguage((m.default ?? m) as Parser.Language); }
+        if (!_csharpParser) { const m = await importGrammar('tree-sitter-c-sharp'); _csharpParser = new NP(); _csharpParser.setLanguage((m.default ?? m) as Parser.Language); }
         return _csharpParser;
       }
       default:
@@ -424,7 +427,10 @@ function rootAstIndex(root: Node): RootAstIndex | null {
       const type = node.childForFieldName('type') ?? node.namedChildren.at(-1);
       if (name && (type?.text === 'error' || /\bError\s*\(\s*\)/.test(type?.text ?? ''))) customGoErrorTypes.add(name);
     }
-    for (let i = node.namedChildren.length - 1; i >= 0; i--) stack.push({ node: node.namedChildren[i], depth: depth + 1 });
+    // ONE read of the children getter per node — see `readNamedChildren`. Re-reading it per
+    // child made this walk O(k²) on a wide node (a generated literal of a few thousand elements).
+    const kids = readNamedChildren(node);
+    for (let i = kids.length - 1; i >= 0; i--) stack.push({ node: kids[i], depth: depth + 1 });
   }
   const index = { nodesByType, customGoErrorTypes };
   rootAstIndexes.set(root as object, index);
@@ -455,8 +461,10 @@ function astTraversalWithinBudget(root: Node): boolean {
   while (stack.length > 0) {
     const { node, depth } = stack.pop()!;
     if (depth > MAX_TRAVERSAL_DEPTH || ++visited > MAX_TRAVERSAL_NODES) return false;
-    for (let i = node.namedChildren.length - 1; i >= 0; i--) {
-      stack.push({ node: node.namedChildren[i], depth: depth + 1 });
+    // ONE read of the children getter per node — see `readNamedChildren`.
+    const kids = readNamedChildren(node);
+    for (let i = kids.length - 1; i >= 0; i--) {
+      stack.push({ node: kids[i], depth: depth + 1 });
     }
   }
   return true;
@@ -1040,7 +1048,7 @@ export function extractGoErrorFacts(
   const fnBody = fnNode.childForFieldName('body');
   const scopeOf = (node: Node): Node => {
     let current: Node | null = node.parent;
-    while (current && current !== fnNode && current.type !== 'block') current = current.parent;
+    while (current && !sameNode(current, fnNode) && current.type !== 'block') current = current.parent;
     return current?.type === 'block' ? current : (fnBody ?? fnNode);
   };
   const visibleBinding = (name: string, index: number): Binding | undefined =>
@@ -1089,7 +1097,7 @@ export function extractGoErrorFacts(
   if (allRecoveryDefers.length > recoveryDefers.length) boundaries.add('panic recovery inside conditional or nested control flow is not proven unconditional');
 
   const walk = (node: Node, nested: boolean): void => {
-    const isNested = node !== fnNode && (node.type === 'function_declaration' || node.type === 'method_declaration' || node.type === 'func_literal');
+    const isNested = !sameNode(node, fnNode) && (node.type === 'function_declaration' || node.type === 'method_declaration' || node.type === 'func_literal');
     if (nested || isNested) return;
     if (node.type === 'call_expression') {
       const name = callName(node);
@@ -1220,8 +1228,8 @@ export function extractGoErrorFacts(
     const panics = literalPanics(body);
     if (panics.length !== 1) return null;
     let parent = panics[0].parent;
-    while (parent && parent.parent !== body) parent = parent.parent;
-    return parent?.parent === body ? panics[0] : null;
+    while (parent && !sameNode(parent.parent, body)) parent = parent.parent;
+    return sameNode(parent?.parent, body) ? panics[0] : null;
   };
   const panicDefers = topLevelDefers.filter(d => literalBody(d) && literalPanics(literalBody(d)!).length > 0);
   if (panicDefers.length > 0) {
@@ -1280,7 +1288,7 @@ export function extractGoErrorFacts(
   }
   const inspectDeferredAndAsyncLiterals = (node: Node): void => {
     if (node.type === 'defer_statement') {
-      if (!topLevelDefers.includes(node)) {
+      if (!topLevelDefers.some(d => sameNode(d, node))) {
         const body = literalBody(node);
         if (body && literalPanics(body).length > 0) boundaries.add(`panic in conditional or nested defer at line ${node.startPosition.row + 1} is not proven registered`);
       }
@@ -1292,7 +1300,7 @@ export function extractGoErrorFacts(
       if (body && containsCallNamed(body, 'panic')) boundaries.add(`panic in goroutine literal at line ${node.startPosition.row + 1} is asynchronous and does not propagate on the caller stack`);
       return;
     }
-    if (node !== fnNode && (node.type === 'function_declaration' || node.type === 'method_declaration' || node.type === 'func_literal')) return;
+    if (!sameNode(node, fnNode) && (node.type === 'function_declaration' || node.type === 'method_declaration' || node.type === 'func_literal')) return;
     for (const child of node.namedChildren) inspectDeferredAndAsyncLiterals(child);
   };
   inspectDeferredAndAsyncLiterals(fnNode);

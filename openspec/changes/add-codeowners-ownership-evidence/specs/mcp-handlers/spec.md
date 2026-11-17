@@ -4,43 +4,30 @@
 
 ### Requirement: OwnershipEvidenceJoinsExistingConclusions
 
-The system SHALL join declared CODEOWNERS ownership into existing conclusions rather than adding
-a new tool: `blast_radius` SHALL report the distinct ownership domains a diff's radius spans
-(count and owner names, as raw evidence with no composite score); `map_in_flight_conflicts` SHALL
-name the owning team for each conflict's witness symbols; `briefing_since` SHALL offer grouping
-by owner alongside its region grouping. The system SHALL register an `unowned-critical-path`
-finding code in `FINDING_CODE_REGISTRY` — advisory by default — emitted when a symbol carrying an
-existing `hub` or `chokepoint` landmark label resides in a file no CODEOWNERS rule covers, using
-only the existing landmark classifiers with no new threshold. When no CODEOWNERS file exists,
-each join SHALL disclose that ownership was not assessed rather than omitting silently or
-implying "unowned".
+`blast_radius` SHALL report the declared owners of a diff's changed files and affected-caller files
+in an `ownership` field, as names and file counts with no score, and `verify_change` SHALL show the
+owners to raise the change to. No tool SHALL be added for this. The system SHALL register an
+advisory `unowned-critical-path` finding code, emitted when the diff changes a symbol that carries
+the existing `hub` or `chokepoint` label in a file no CODEOWNERS rule covers. When no CODEOWNERS
+file exists, `ownership` SHALL state that ownership was not assessed, and the finding SHALL NOT be
+emitted.
 
-#### Scenario: A blast radius crossing team boundaries is a stated conclusion
+#### Scenario: A change that crosses owners names them
 
 - **GIVEN** a diff whose changed and affected files resolve to `@org/api-team` and `@org/infra`
+- **WHEN** `blast_radius` and `verify_change` run
+- **THEN** `ownership` names both owners with their file counts, and the `verify_change` receipt
+  lists both under "raise to"
+
+#### Scenario: A changed hub with no owner is an advisory finding
+
+- **GIVEN** a diff that changes a function labeled `hub`, in a file no rule matches
 - **WHEN** `blast_radius` runs
-- **THEN** the briefing states the radius spans 2 ownership domains, naming both owners
-- **AND** no numeric ownership-risk score is produced
+- **THEN** an `unowned-critical-path` finding names the symbol and file, and it is advisory unless
+  the enforcement policy says otherwise
 
-#### Scenario: An in-flight conflict names the owning team
-
-- **GIVEN** two open PRs with a WAW conflict on a symbol in a file owned by `@platform-team`
-- **WHEN** `map_in_flight_conflicts` runs
-- **THEN** the conflict entry names `@platform-team` as the owner of the witness symbol's file
-
-#### Scenario: An unowned hub is a registered, advisory finding
-
-- **GIVEN** a function labeled `hub` by the existing landmark classifier, in a file no CODEOWNERS
-  rule matches
-- **WHEN** the ownership join evaluates findings
-- **THEN** an `unowned-critical-path` `GovernanceFinding` is emitted with the symbol and file as
-  subject
-- **AND** `resolveEnforcementClass` resolves it `advisory` unless the operator's policy says
-  otherwise
-
-#### Scenario: Ownership absence never masquerades as assessment
+#### Scenario: No CODEOWNERS is not "unowned"
 
 - **GIVEN** a repository with no CODEOWNERS file
 - **WHEN** `blast_radius` runs
-- **THEN** the briefing carries an explicit "ownership not assessed (no CODEOWNERS)" disclosure
-- **AND** no `unowned-critical-path` finding is emitted
+- **THEN** `ownership` says "not assessed (no CODEOWNERS)" and no finding is emitted

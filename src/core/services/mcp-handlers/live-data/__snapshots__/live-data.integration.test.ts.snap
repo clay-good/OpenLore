@@ -31,8 +31,8 @@ exports[`spec-09 MCP live-data harness > snapshots stable architecture-overview 
   "globalEntryPoints": 20,
   "layerViolations": 0,
   "totalClusters": 12,
-  "totalEdges": 401,
-  "totalFiles": 110,
+  "totalEdges": 424,
+  "totalFiles": 109,
 }
 `;
 
@@ -56,7 +56,7 @@ exports[`spec-09 MCP live-data harness > snapshots stable architecture-overview 
   "layerViolations": 0,
   "totalClusters": 12,
   "totalEdges": 0,
-  "totalFiles": 174,
+  "totalFiles": 173,
 }
 `;
 

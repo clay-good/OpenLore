@@ -5,6 +5,256 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-11-15
+
+OpenLore now ships as a Claude Code plugin, and most of this release makes its answers to agents
+more accurate. Test selection finds more of the tests a change breaks, `blast_radius` reports less
+noise, and the prompt hook only speaks when you name code. Your existing configuration keeps
+working as it is.
+
+### Highlights
+
+- **Claude Code plugin.** Run `claude plugin marketplace add clay-good/OpenLore`, then
+  `claude plugin install openlore@openlore`. It sets up the MCP server and the hooks with no global
+  npm install and no config. (#727)
+- **Better test selection.** `select_tests` now finds tests that load their module with a dynamic
+  import, guard tests that read a source file by its path, tests for a function you just added, and
+  tests that import a class or an object. Replayed over the last 20 commits, it found 98% of the
+  tests each change had to edit, up from 84%. The high-confidence part alone, about 22 files on
+  average, found 79%. (#776, #781, #782, #783, #786)
+- **`blast_radius` lists every test file to run**, not only the first 15 tests. (#775)
+- **`npm run bench:select-tests`** replays recent commits and reports how well test selection did,
+  per confidence tier. (#780, #785)
+- **The prompt hook only briefs code you name exactly**: a backticked name, a file path, or an
+  identifier. A prose prompt gets no briefing. (#758, #760)
+- **`openlore install --scope user` also sets up the edit and stop hooks**, and they only run in
+  projects that use OpenLore. (#762)
+- **Spec frameworks are optional.** A repository without specs gets a plain "no spec source" answer
+  instead of an error or a 0% score. `openspecPath` is optional, and `adrPaths` is a new setting.
+  (#751, #753, #754, #756)
+- **Per-lane file rules** (`filePolicies`) can keep a path out of indexing, watching or embeddings
+  separately, with a guided `openlore configure` workflow. (#720)
+- **The before-stop receipt names breaking changes** to exported functions and to OpenAPI,
+  protobuf and GraphQL contracts. (#749)
+
+### Behavior changes
+
+- `openlore init` and `openlore install` no longer create an empty `openspec/` folder, and the
+  `.gitignore` entry is just `.openlore/`. (#751)
+- Corpus-integrity findings are advisory by default. To keep them blocking, list them in
+  `enforcement.policy` in `.openlore/config.json`. (#747)
+- Hook time limits are shorter and measured: before-edit stops after 3 s (was 8 s). Each finding
+  is shown once per session, and hooks stay silent when something inside them fails. (#733, #736–#743)
+- `openlore doctor --json` calls the spec check `Spec source` (was `OpenSpec directory`). (#753)
+
+### Fixes
+
+- `blast_radius`: an empty `**Domains**:` line in an ADR is no longer read as a domain named
+  `## Context` (#787). ADRs that only mention a touched area are summarized in one line (#788). The
+  change you are checking is no longer reported as a stale index (#789).
+- Spec text is labeled reviewed only when it is, and spec paths follow `openspecPath`. (#771, #773)
+- The file watcher honors `.openlore-ignore` and `excludePatterns`, and picks up edits to ignore
+  files. (#766)
+- The hooks, the status line and Pi use one rule to find the project root. (#768, #723)
+- Call graph: JavaScript files are labeled JavaScript (#764); Java and C# calls through a field use
+  the field's type (#765); TypeScript files with `import()` types or `using` parse cleanly (#759);
+  `new C()` and Python `C()` reach the constructor, and `super.m()` is no longer matched to every
+  method named `m` (#724).
+- OpenAPI enum changes show their values instead of escaped JSON. (#767)
+- Every MCP tool input has a description. (#769)
+- Hooks: a failed run records why (#778), and a `try/catch` moved to another file is no longer
+  reported as a new swallowed error (#777).
+- `find_dead_code` no longer rates package entry points, functions called from module scope,
+  closures, or code in languages without import data as certainly dead. (#724)
+- `orient` and `search_code` no longer claim coverage over content they could not read. (#725)
+- GraphQL schemas in a monorepo are graded per project. (#726)
+- `openlore change-status` no longer fails in a repository with no open changes, and a fresh
+  install no longer leaves its own index stale. (#724)
+
+## [3.6.0] - 2026-11-09
+
+**The graph learns your service contracts, and the agent loop leaves receipts.**
+
+OpenLore now reads your service contracts — OpenAPI, protobuf, and GraphQL — into the same call
+graph as your code, binds handlers and generated clients to the operations they serve and call, and
+grades a contract change against its real consumers, including those in sibling repositories. The
+agent loop gained receipts that arrive when you can act on them, a session ledger, cross-worktree
+coordination, and new verifiable claim kinds. Infrastructure definitions are bound to the code they
+run, and onboarding keeps the index current in the background. Everything is additive and behind
+existing or opt-in presets; the default tool surface and your configuration are unchanged.
+
+### The service-contract graph
+
+- **`certify_service_contract`** grades an OpenAPI 3.x / Swagger 2.0, protobuf (proto3), or GraphQL
+  change against the code: two-way parity with the indexed handlers, a closed-table
+  breaking/dangerous verdict per changed element, each joined to the in-repo clients it breaks and
+  the tests that reach them, and a suggested version bump withheld when compatibility cannot be
+  proven. (#639, #659, #687, #688)
+- **Declared operations, messages, and named schemas are graph nodes**, bound to the handler that
+  serves each (`implements_endpoint`) and the function that calls it (`consumes_endpoint`), so
+  `orient`, `analyze_impact`, and `get_subgraph` cross the API boundary. Matching is literal — an
+  ambiguous address binds nothing and says so. (#660, #682, #687, #688)
+- **A generated client is bound to the operations it calls** by `operationId`, read from a header
+  that names its source spec — never a name match alone. (#680)
+- **Consumers in sibling repositories are censused** with `--federation`, so a breaking verdict is
+  not read as safe just because this repository has no caller. (#681)
+- **`orient` names the contract of a handler in scope** — operation, spec `file:line`, required
+  parameters and body — unasked, and **`blast_radius` briefs a spec-only diff** on the elements it
+  declares and who serves and consumes them. (#655, #679)
+- **A literal request body missing a required property is reported** and carried in `verify_change`.
+  (#656, #658)
+
+### The agent loop leaves receipts
+
+- **Loop hooks push OpenLore's receipts at the moments a harness offers** — after an edit, after a
+  compaction, before stopping, at sub-agent start, and before a write — in Claude Code, Codex, and
+  Pi. (#637, #649, #650, #651, #652, #654)
+- **A session ledger** names the symbol that changed under you, tells a background change from your
+  own edit, tracks declared operations and resources like code symbols, and counts how the session's
+  symbols changed. (#636, #657, #661)
+- **Weakened checks, invented references, and hand-edited generated files are reported** on a diff —
+  deleted or skipped tests and relaxed gates, an import or package that does not exist, an edit a
+  regenerate will overwrite. (#629, #632, #634)
+- **`get_handoff_briefing`** states the in-flight change so a compaction or a new session does not
+  lose it, and **lease tokens** let any process ask `verify_claim` whether what it was served still
+  holds. (#638, #644)
+- **`verify_claim` gains `endpoint-implemented`, `endpoint-consumed`, `decision-governed`, and
+  `lease-current`**, and answers `unverifiable` (naming the disagreement) rather than a confident
+  "no". (#642)
+
+### Infrastructure bound to the code it runs
+
+- **Function resources are bound to their handlers** (`deploys_symbol`) across Terraform,
+  CloudFormation/SAM, and Serverless, and **`orient` names the infrastructure a deployed handler
+  depends on** — the resource that runs it and the sites that set each variable it reads. Serverless
+  Framework joins the supported ecosystems (13 in all). (#640, #645, #662)
+
+### Coordination across worktrees
+
+- **A shared footprint board** across every worktree of a clone shows who is about to write which
+  symbols, with hazard-typed conflicts and duplicate-intent detection; **peer-change notices** fire
+  when another agent touches what you read; and `plan_parallel_work` can plan against the live agents
+  on the board. (#641, #646, #647, #648)
+- **Verification records expire on the same evidence as board entries:** a merged or deleted branch,
+  a removed worktree, or 30 minutes without being re-proven; `fleet_status` reports an ended record
+  as a count with its reason, never as a live verdict. (#698)
+
+### Onboarding and the background
+
+- **OpenLore sets itself up and stays current** in the background: a cold start builds the index, a
+  stale one repairs itself (judged by content, not file mtimes), and the first touch is disclosed
+  once rather than read as a broken install. (#630, #631)
+- **An OpenSpec `propose` prompt is grounded in repository structure** before drafting, and Claude
+  Code gets a **color-coded OpenLore status line**. (#622, #623)
+- **Local semantic vectors build 8–10x faster.** (#633)
+
+### Breaking and behavior changes
+
+- **Minimum Node.js is now 22.22** (`^22.22.0 || >=23.5.0`), matching the file watcher's floor
+  (chokidar 6); 22.19–22.21 exits with code 78 and asks you to upgrade. (#620)
+- **The Pi repository digest is on-demand.** The Pi extension no longer appends the architecture
+  digest to every turn; call `openlore_orient` when you have a task, or set
+  `"pi": { "contextMode": "full" }` to restore the previous every-turn injection. (#623)
+- **Removed** the OpenSpec plugin manifest (`plugin-manifest`); the host side was never built. (#692)
+
+### Fixed
+
+- A failed command prints one legible line, not a V8 stack trace; `install` preserves an
+  `mcpServers.openlore` entry it did not write, no longer edits your pre-commit hook, and describes a
+  refusal by its cause. (#671, #695)
+- Rust tests are detected from their attributes (`#[test]`, `#[tokio::test]`, …), and `orient` never
+  offers a test function as an insertion point or prescribes a tool the wired preset does not expose.
+  (#674)
+- A watcher save no longer drops the projected contract and deploy edges, one unreadable manifest no
+  longer erases the whole infrastructure graph, and an infrastructure declaration is never served as
+  code (a hub, an entry point, or a term in the fan-in/fan-out averages).
+- Over-budget answers keep a fair share of every list and no longer overwrite a tool's own
+  disclosure. (#663)
+- Large composite literals extract in linear time, so a generated `.pb.go` no longer stalls
+  `analyze`. (#708)
+- `analyze`'s console output is bounded and no longer leaks library warnings. (#700)
+- `certify_provenance`'s in-toto envelope is validated against the Statement v1 shape, with its
+  structural-only scope stated plainly. (#707)
+- A Pi daemon left by an older version recovers, and the vocabulary cache is keyed on its content.
+  (#621, #653)
+
+The new contract-graph, verification, and coordination capabilities ship behind opt-in presets
+(`full`, `verify`, `coordination`, `federation`); the default tool surface is unchanged. The index
+schema version is now 17, so the first run after upgrading rebuilds the graph in the background. The
+only compatibility change is the raised Node.js floor noted above.
+
+
+## [3.5.0] - 2026-10-25
+
+**The index heals itself, and every change comes with a receipt.**
+
+- **An always-on, self-healing index.** A call-graph index that is stale, empty, reset by a
+  version upgrade, truncated, or otherwise unservable now rebuilds itself automatically in the
+  background — on a new or upgraded install, a new or an old repo, and across every surface:
+  the Claude Code hooks, the MCP server, and the Pi `serve` daemon. Agents are served accurate
+  structure instead of silently falling back to grep, with no manual `openlore analyze`. This
+  closes a family of "detected but never repaired" gaps where the problem was disclosed every
+  turn but never fixed. (#616, #614, #609, #600)
+- **`verify_change`** — one actionable receipt for a working-tree diff, composing blast radius,
+  the tests to run, and spec drift into a single verdict. (#605)
+- **`certify_provenance`** — a reproducible, content-addressed, in-toto-attachable record of what
+  a change did *semantically*, not just which bytes moved. (#608)
+- **`certify_merge`** — a semantic merge-conflict certificate: what a merge actually changes,
+  beyond a textual three-way. (#610)
+- **`fleet_status`** — drift-aware verification memory across a fleet of repositories, completing
+  the coordination arc. (#611)
+- **Precision-order soundness calibration** for the call graph — a monotone-refinement checker and
+  builder resolution toggles that keep structural conclusions an honest lower bound. (#604)
+- **Docs:** the README is rewritten shorter and evergreen, and the documentation set curated. (#615)
+- Internal hardening: backlog and roadmap consolidation, end-to-end tests for the new tools on real
+  graphs, a `certify_merge` performance pass, and routine dependency updates.
+
+The new verification and coordination tools (`verify_change`, `certify_provenance`,
+`certify_merge`, `fleet_status`) ship in the opt-in `verify` / `coordination` presets. No breaking
+changes.
+
+## [3.4.0] - 2026-10-18
+
+**Memories now speak up when they matter, and check their own facts.**
+
+- **Memories come to you.** `remember` takes an optional `trigger` (`fileGlob`, `symbolPattern`,
+  `specDomain`, or `withinHops`) and `pinned: true`. Matching notes are pushed into `orient`,
+  `blast_radius`, and `working_set_context`, and into the prompt-hook and Pi injection blocks, each
+  with the predicate that fired. A note like "every handler under `src/routes/` validates input"
+  now reaches the agent working there without anyone asking for it. (#585, #586)
+- **Memories that stay true, or say they are not.** An anchor can name a `span`, exact text inside
+  a function, so an edit elsewhere in a 200-line function no longer drifts a note about one line.
+  A note can rest on `claims` in `verify_claim`'s grammar; `recall` checks them again and moves a
+  note whose claim is now false to `evidenceRefuted`. A lost or ambiguous anchor is a
+  `memory-anchor-lost` finding that `openlore enforce` can gate on. (#589, #591)
+- **Messages are hops, not dead ends.** A tagged send such as `send({ type: "restart" })` is paired
+  with the `switch` case or `if` that handles it, so `find_path`, `analyze_impact`, `blast_radius`,
+  and `orient` follow client/server, IPC, and Redux-style flows. A send with no handler becomes a
+  disclosed boundary. `trace_execution_path`, `orient`, `blast_radius`, and `select_tests` now
+  label every hop that a synthesized edge realizes. (#580, #581)
+- **Catch new calls into deprecated code.** OpenLore reads the standard `@deprecated` and Go
+  `Deprecated:` markers, and `structural_diff` lists the calls a diff adds into them. TS/JS
+  functions also keep their JSDoc text now: 505 of 505 documented handlers, up from 215. (#592, #593)
+- **See which way complexity is going.** `get_health_map` labels each hotspot `rising`, `falling`,
+  `flat`, or `mixed` from its git history, and a rising hotspot is an advisory `declining-health`
+  finding. Shallow history is withheld, not guessed. (#594)
+- **Smoother install and upgrade.** One-shot `orient` (the agent hooks, a new worktree) builds a
+  missing index in the background. `openlore update` handles npm-global installs under Homebrew and
+  checks the version on PATH after an upgrade, Homebrew installs survive `brew upgrade`, and
+  `doctor` gains an install-health check. User-wide defaults in `~/.openlore/config.json` are shared
+  by the CLI, MCP, and Pi, and Pi no longer opens a configuration dialog at startup. (#570, #572–#576)
+
+Also hardened git, MCP, commit gates, and path confinement from a two-round audit, including a code
+execution path through partial-clone fetches and a `trace_execution_path` call that could freeze
+the server (#579). Analysis no longer stalls on binary files named like source (#583), TypeScript
+abstract classes are recognized (#582), `analyze` forwards SIGTERM to its re-exec child (#584), and
+`enforce` no longer renames a torn decision store (#590). Applied routine dependency updates.
+
+**Upgrade:** `npm i -g openlore@3.4.0` — or `openlore update`. The index schema changed, so the
+next `openlore analyze` rebuilds the index once.
+
+**Full Changelog**: https://github.com/clay-good/OpenLore/compare/v3.3.1...v3.4.0
+
 ## [3.3.1] - 2026-10-10
 
 **Kotlin files now show up on the map.**

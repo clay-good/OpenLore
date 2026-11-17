@@ -21,6 +21,8 @@
  *    completeness test names any residual drift.
  */
 
+import { validateFilePolicies } from '../configuration/validation.js';
+
 import type {
   AnalysisConfig,
   BlastRadiusConfig,
@@ -36,6 +38,7 @@ import type {
   LLMConfig,
   OpenLoreConfig,
   PiConfig,
+  HooksConfig,
   RetrievalConfig,
   SpecStoreConfig,
   WorkspaceConfig,
@@ -43,13 +46,20 @@ import type {
 } from '../../types/index.js';
 
 /** The current config-schema version stamped into `.openlore/config.json`. */
-export const CONFIG_SCHEMA_VERSION = '1.2.0';
+export const CONFIG_SCHEMA_VERSION = '1.3.0';
+
+/**
+ * The version stamped into a new default config. It stays at the last version whose fields a
+ * default config uses, so an older OpenLore on the same repository does not warn about a newer
+ * schema until a 1.3.0 field (`filePolicies`, `configurationAssistant`) is in fact in use.
+ */
+export const CONFIG_DEFAULT_STAMP_VERSION = '1.2.0';
 
 /**
  * Top-level value shapes retained as the public compatibility map for callers and tests.
  * The recursive schema below refines object fields without changing this exported shape.
  */
-export type ConfigFieldKind = 'string' | 'string-or-null' | 'boolean' | 'object';
+export type ConfigFieldKind = 'string' | 'string-or-null' | 'boolean' | 'object' | 'array';
 
 type RequiredKeys<T> = {
   [K in keyof T]-?: Record<string, never> extends Pick<T, K> ? never : K
@@ -141,7 +151,7 @@ const embeddingRule: ConfigRule = {
   kind: 'object',
   nullable: true,
   fields: fieldsFor<EmbeddingConfig>({
-    provider: { kind: 'enum', values: ['remote', 'local'] },
+    provider: { kind: 'enum', values: ['remote', 'local', 'none'] },
     baseUrl: stringRule,
     model: stringRule,
     apiKey: stringRule,
@@ -277,16 +287,38 @@ const workspaceRule: ConfigRule = {
 const piRule: ConfigRule = {
   kind: 'object',
   strict: true,
-  fields: fieldsFor<PiConfig>({ spawnDaemon: booleanRule, toolSurface: { kind: 'enum', values: ['lean', 'all'] } }),
+  fields: fieldsFor<PiConfig>({
+    contextMode: { kind: 'enum', values: ['on-demand', 'full'] },
+    spawnDaemon: booleanRule,
+    toolSurface: { kind: 'enum', values: ['lean', 'all'] },
+  }),
   required: requiredFor<PiConfig>({}),
+};
+
+const hooksRule: ConfigRule = {
+  kind: 'object',
+  strict: true,
+  fields: fieldsFor<HooksConfig>({
+    'prompt-submitted': booleanRule,
+    'before-edit': booleanRule,
+    'after-tools': booleanRule,
+    'before-stop': booleanRule,
+    'after-compact': booleanRule,
+    'before-subagent': booleanRule,
+    'subagent-start': booleanRule,
+  }),
+  required: requiredFor<HooksConfig>({}),
 };
 
 const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
   kind: 'object',
   fields: fieldsFor<OpenLoreConfig>({
+    filePolicies: {kind:'object', strict:true, fields:{rules:{kind:'array',element:{kind:'object',strict:true,fields:{id:stringRule,pattern:stringRule,reason:stringRule,evidenceRefs:{kind:'array',element:stringRule},lanes:{kind:'object',strict:true,fields:{index:{kind:'enum',values:['include','exclude']},watch:{kind:'enum',values:['include','exclude']},embed:{kind:'enum',values:['include','exclude']}},required:[]}},required:['id','pattern','reason','lanes']}}},required:['rules']},
+    configurationAssistant: {kind:'object',strict:true,fields:{reviewMode:{kind:'enum',values:['manual','notify']}},required:[]},
     version: stringRule,
     projectType: { kind: 'enum', values: ['nodejs', 'python', 'rust', 'go', 'java', 'ruby', 'php', 'unknown'] },
     openspecPath: stringRule,
+    adrPaths: stringArrayRule,
     analysis: analysisRule,
     generation: generationRule,
     llm: llmRule,
@@ -306,11 +338,11 @@ const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
     bundle: bundleRule,
     workspace: workspaceRule,
     pi: piRule,
+    hooks: hooksRule,
   }),
   required: requiredFor<OpenLoreConfig>({
     version: true,
     projectType: true,
-    openspecPath: true,
     analysis: true,
     generation: true,
     createdAt: true,
@@ -324,9 +356,12 @@ const CONFIG_RULE: Extract<ConfigRule, { kind: 'object' }> = {
  * here fails `tsc` (and CI); {@link config-schema.test.ts} binds it at runtime too.
  */
 export const CONFIG_FIELD_KINDS: Record<keyof OpenLoreConfig, ConfigFieldKind> = {
+  filePolicies: 'object',
+  configurationAssistant: 'object',
   version: 'string',
   projectType: 'string',
   openspecPath: 'string',
+  adrPaths: 'array',
   analysis: 'object',
   generation: 'object',
   llm: 'object',
@@ -346,6 +381,7 @@ export const CONFIG_FIELD_KINDS: Record<keyof OpenLoreConfig, ConfigFieldKind> =
   bundle: 'object',
   workspace: 'object',
   pi: 'object',
+  hooks: 'object',
 };
 
 /** The known top-level config keys, derived from the type-bound field map. */
@@ -787,6 +823,7 @@ export function validateOpenLoreConfig(
   };
   validateRule(parsed, CONFIG_RULE, '', findings, true);
   if (isConfigObject(parsed)) {
+    if (parsed.filePolicies !== undefined) for (const message of validateFilePolicies(parsed.filePolicies)) findings.mismatches.push({kind:'type-mismatch',key:'filePolicies',fatal:true,message});
     const workspace = parsed.workspace;
     const shards = isConfigObject(workspace) && Array.isArray(workspace.shards)
       ? workspace.shards
@@ -829,6 +866,21 @@ export function validateOpenLoreConfig(
         roots.add(root);
       });
     }
+  }
+  if (isConfigObject(parsed) && Array.isArray(parsed.adrPaths)) {
+    // Read-only folders inside the repository: an absolute path or one that climbs out of it is
+    // named, not followed. Not fatal — the rest of the config is still usable.
+    parsed.adrPaths.forEach((value, index) => {
+      if (typeof value !== 'string') return; // the type rule already names it
+      const p = value.trim().replace(/\\/g, '/');
+      const absolute = p.startsWith('/') || /^[A-Za-z]:\//.test(p) || p.startsWith('//');
+      if (!p || absolute || p.split('/').includes('..')) {
+        findings.mismatches.push({
+          kind: 'type-mismatch', key: `adrPaths[${index}]`,
+          message: `config key 'adrPaths[${index}]' must be a non-empty path inside the repository (no absolute path, no '..'); it is ignored`,
+        });
+      }
+    });
   }
   const versionFindings = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
     ? checkConfigVersion((parsed as Record<string, unknown>).version, opts)

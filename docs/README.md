@@ -29,6 +29,10 @@ New here? Start with [install.md](install.md) — one command wires your agent a
 | Find important code no test reaches | [coverage-gaps.md](coverage-gaps.md) |
 | See what changes together / churn | [change-coupling.md](change-coupling.md) |
 | Review a diff structurally | [structural-diff.md](structural-diff.md) |
+| Know which files are generated, and their source | [generated-files.md](generated-files.md) |
+| Catch invented imports, exports, and packages | [phantom-references.md](phantom-references.md) |
+| See when a diff weakens a test, a suppression, or a check config | [check-weakening.md](check-weakening.md) |
+| Learn when code you read changed under you, or an edit loops | [session-ledger.md](session-ledger.md) |
 | Trace impact across code ↔ infrastructure | [cross-domain-impact.md](cross-domain-impact.md) |
 | Map cross-service API topology | [cross-service-topology.md](cross-service-topology.md) |
 
@@ -55,6 +59,7 @@ New here? Start with [install.md](install.md) — one command wires your agent a
 |------------|----------------|
 | Learn the OpenSpec file format | [OPENSPEC-FORMAT.md](OPENSPEC-FORMAT.md) |
 | Integrate OpenSpec into a workflow | [OPENSPEC-INTEGRATION.md](OPENSPEC-INTEGRATION.md) |
+| See which requirements link to code (spec link index) | [spec-link-index.md](spec-link-index.md) |
 
 ## Reference & internals
 
@@ -78,7 +83,6 @@ New here? Start with [install.md](install.md) — one command wires your agent a
 
 Maintainer- or history-facing notes, kept for the record (not part of the user happy path):
 [publishing.md](publishing.md) · [AGENT-BENCHMARKS.md](AGENT-BENCHMARKS.md) ·
-[AGENT-ADOPTION.md](AGENT-ADOPTION.md) · [RIG-IMPROVEMENTS.md](RIG-IMPROVEMENTS.md) ·
-[plan-rag-improvements.md](plan-rag-improvements.md) · [RENAME-TO-OPENLORE.md](RENAME-TO-OPENLORE.md)
+[AGENT-ADOPTION.md](AGENT-ADOPTION.md)
 
 Generation/Repair architecture history: [resume point and companion documents](specs/generation-repair/openlore-resume-point.md).

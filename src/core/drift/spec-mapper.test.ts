@@ -414,6 +414,12 @@ describe('matchFileToDomains', () => {
 // PARSE ADR RELATED TESTS
 // ============================================================================
 
+describe('parseSpecReferences — an empty requirement heading', () => {
+  it('names no requirement, never the next line', () => {
+    expect(parseSpecReferences('### Requirement:\n\nThe system SHALL work.\n\n### Requirement: Real\n').requirements).toEqual(['Real']);
+  });
+});
+
 describe('parseADRRelated', () => {
   it('should extract domains and layers from Related section', () => {
     const content = `# ADR-001: Use JWT
@@ -428,6 +434,12 @@ accepted
     const result = parseADRRelated(content);
     expect(result.domains).toEqual(['auth', 'user']);
     expect(result.layers).toEqual(['services', 'middleware']);
+  });
+
+  it('an empty Domains or Layers line names nothing, never the next line', () => {
+    // ADR-0036 has `**Domains**: ` with nothing after it; `## Context` was read as a domain.
+    const content = '# ADR-0036: X\n\n**Domains**: \n\n## Context\n\n**Layers**:\n- not a layer\n';
+    expect(parseADRRelated(content)).toEqual({ domains: [], layers: [] });
   });
 
   it('should handle single domain and layer', () => {

@@ -1,0 +1,845 @@
+/**
+ * GraphQL SDL reader (change: add-contract-graph-projection, GraphQL phase).
+ *
+ * Reads one schema file (`.graphql`, `.graphqls`, `.gql`) into a normalized element model: object,
+ * interface, input, enum, union and scalar types with their fields, arguments, enum values, union
+ * members and implemented interfaces, plus the `schema { query: … }` roots. `extend` definitions are
+ * kept apart and merged across files by {@link mergeGraphqlSchema}, because a modular schema splits
+ * one type over many files; {@link mergeGraphqlUniverses} does that once per PROJECT, since
+ * GraphQL's namespace is global to a server and not to a repository. Deterministic and offline: a small hand-written tokenizer, no
+ * `graphql-js`, no network.
+ *
+ * A file holding only operations and fragments is a CLIENT document, not a schema, and is reported
+ * as such. Directives other than `@deprecated` are outside the model: each one is named in
+ * `unassessed` and hashed into its element, so a change to one is seen and never read as "no
+ * change". Every name is bounded, so a hostile file stays linear.
+ */
+
+import { createHash } from 'node:crypto';
+import { MAX_SPEC_BYTES } from './openapi.js';
+
+/** Whether a path is a GraphQL file this reader may read. */
+export const isGraphqlPath = (path: string): boolean => /\.(?:graphqls?|gql)$/i.test(path);
+
+/** The scalars GraphQL itself defines: never a reference to a declared type. */
+const BUILT_IN_SCALARS: ReadonlySet<string> = new Set(['Int', 'Float', 'String', 'Boolean', 'ID']);
+export const isBuiltInScalar = (name: string): boolean => BUILT_IN_SCALARS.has(name);
+
+/** The longest name read; past it the file is unread (a name is a single identifier in GraphQL). */
+const MAX_NAME_CHARS = 1_024;
+/** List nesting read at most in a type reference (`[[[T]]]`): deeper is unreadable. */
+const MAX_LIST_DEPTH = 32;
+
+export type GqlKind = 'object' | 'interface' | 'input' | 'enum' | 'union' | 'scalar';
+
+export interface GqlArg {
+  name: string;
+  /** The type as written, whitespace removed: `[ID!]!`. */
+  type: string;
+  /** The default value as written (whitespace collapsed), when there is one. */
+  defaultValue?: string;
+  deprecated: boolean;
+  /** A hash of the directives other than `@deprecated`. */
+  directivesHash: string;
+  line: number;
+}
+
+export interface GqlField {
+  name: string;
+  type: string;
+  /** Arguments (object and interface fields only), in declaration order. */
+  args: GqlArg[];
+  /** The default value (input fields only). */
+  defaultValue?: string;
+  deprecated: boolean;
+  directivesHash: string;
+  line: number;
+  /** Set by {@link mergeGraphqlSchema} on a field an `extend` in another file added. */
+  file?: string;
+}
+
+export interface GqlEnumValue { name: string; deprecated: boolean; directivesHash: string; line: number }
+
+/** A type definition — or, with `extension`, the fields an `extend` adds to one. */
+export interface GqlType {
+  kind: GqlKind;
+  name: string;
+  line: number;
+  extension: boolean;
+  /** Object, interface and input fields. */
+  fields: GqlField[];
+  /** Enum values. */
+  values: GqlEnumValue[];
+  /** Union members. */
+  members: string[];
+  /** Interfaces an object or interface implements. */
+  interfaces: string[];
+  /** A hash of the type's own directives (`@deprecated` is not valid on a type, so all of them). */
+  directivesHash: string;
+  /**
+   * Why THIS type's shape cannot be read (change: scope-graphql-schema-universes).
+   *
+   * A duplicate field, enum value or argument makes the type genuinely ambiguous — which
+   * definition wins is not knowable — but it says nothing about the rest of the document. The type
+   * is kept with the reason and withheld from the merged namespace; every other type is still read.
+   */
+  unassessable?: string;
+  /**
+   * The repeated declarations the parser did not keep (the first one is kept). Carried so a
+   * withheld type's fingerprint still SEES a change to them: dropping them made `x: Int x: String`
+   * → `x: Int x: Boolean` compare as unchanged.
+   */
+  duplicates?: GqlDuplicate[];
+}
+
+/** One repeated declaration: a field (or one of its arguments, keyed by the field) or an enum value. */
+export interface GqlDuplicate {
+  element: 'field' | 'value';
+  name: string;
+  definition: unknown;
+}
+
+/** A directive definition: `directive @auth(role: Role!) repeatable on FIELD_DEFINITION | OBJECT`. */
+export interface GqlDirectiveDef {
+  name: string;
+  args: GqlArg[];
+  repeatable: boolean;
+  locations: string[];
+  line: number;
+}
+
+export interface GqlDocument {
+  file: string;
+  format: 'graphql-sdl';
+  /** Root operation types the file names in `schema { … }` (or `extend schema`). */
+  roots: Partial<Record<'query' | 'mutation' | 'subscription', string>>;
+  /**
+   * Whether the file holds a `schema { … }` DEFINITION (not an `extend schema`). A schema with
+   * one has exactly the roots it names: the default names apply only when no file defines one.
+   */
+  hasSchemaDefinition: boolean;
+  /** A hash of the directives on `schema` / `extend schema` (Federation's `@link`, …). */
+  schemaDirectivesHash: string;
+  directiveDefs: GqlDirectiveDef[];
+  types: GqlType[];
+  /** Constructs outside the model: custom directives used, by name, and operations in a schema file. */
+  unassessed: string[];
+}
+
+/** A GraphQL file that is a client document (operations and fragments only), not a schema. */
+export interface GqlClientDocument { file: string; clientDocument: true }
+
+// ── Tokenizer ──────────────────────────────────────────────────────────────
+
+interface Tok { t: 'name' | 'num' | 'str' | 'punct'; v: string; line: number }
+const STRING_ESCAPES: Record<string, string> = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f' };
+class GqlSyntaxError extends Error {}
+
+function tokenize(text: string): Tok[] {
+  const out: Tok[] = [];
+  let i = 0;
+  let line = 1;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === '\n') { line++; i++; continue; }
+    // A lone carriage return is a line terminator too (CRLF counts once, at its `\n`).
+    if (c === '\r') { if (text[i + 1] !== '\n') line++; i++; continue; }
+    // Commas are insignificant in GraphQL, exactly like whitespace.
+    if (c === ' ' || c === '\t' || c === '\r' || c === ',' || c === '﻿') { i++; continue; }
+    if (c === '#') { while (i < n && text[i] !== '\n') i++; continue; }
+    if (c === '"') {
+      const start = line;
+      if (text.startsWith('"""', i)) {
+        let j = i + 3;
+        let v = '';
+        for (;;) {
+          if (j >= n) throw new GqlSyntaxError(`line ${start}: unterminated block string`);
+          if (text.startsWith('\\"""', j)) { v += '"""'; j += 4; continue; }
+          if (text.startsWith('"""', j)) break;
+          if (text[j] === '\n') line++;
+          v += text[j++];
+        }
+        out.push({ t: 'str', v, line: start });
+        i = j + 3;
+        continue;
+      }
+      let j = i + 1;
+      let v = '';
+      while (j < n && text[j] !== '"') {
+        if (text[j] === '\n') throw new GqlSyntaxError(`line ${start}: unterminated string`);
+        if (text[j] === '\\' && j + 1 < n) {
+          if (text[j + 1] === '\n') throw new GqlSyntaxError(`line ${start}: unterminated string`);
+          // `\u00e9` and `"é"` are one value: decoded, so a default rewritten in either form is no change.
+          const u = text[j + 1] === 'u' ? /^u(?:([0-9a-fA-F]{4})|\{([0-9a-fA-F]{1,6})\})/.exec(text.slice(j + 1, j + 11)) : null;
+          const cp = u ? parseInt(u[1] ?? u[2], 16) : -1;
+          if (u && cp <= 0x10ffff) { v += String.fromCodePoint(cp); j += 1 + u[0].length; continue; }
+          v += STRING_ESCAPES[text[j + 1]] ?? text[j + 1];
+          j += 2;
+          continue;
+        }
+        v += text[j++];
+      }
+      if (j >= n) throw new GqlSyntaxError(`line ${start}: unterminated string`);
+      out.push({ t: 'str', v, line: start });
+      i = j + 1;
+      continue;
+    }
+    if (/[_A-Za-z]/.test(c)) {
+      let j = i + 1;
+      while (j < n && /\w/.test(text[j])) j++;
+      if (j - i > MAX_NAME_CHARS) throw new GqlSyntaxError(`line ${line}: a name longer than ${MAX_NAME_CHARS} characters`);
+      out.push({ t: 'name', v: text.slice(i, j), line });
+      i = j;
+      continue;
+    }
+    if (/[-0-9]/.test(c)) {
+      let j = i + 1;
+      while (j < n && /[\w.+-]/.test(text[j]) && !((text[j] === '+' || text[j] === '-') && !/[eE]/.test(text[j - 1]))) j++;
+      out.push({ t: 'num', v: text.slice(i, j), line });
+      i = j;
+      continue;
+    }
+    if (text.startsWith('...', i)) { out.push({ t: 'punct', v: '...', line }); i += 3; continue; }
+    if ('!$&()=:@[]{}|'.includes(c)) { out.push({ t: 'punct', v: c, line }); i++; continue; }
+    throw new GqlSyntaxError(`line ${line}: unexpected character ${JSON.stringify(c).slice(0, 12)}`);
+  }
+  return out;
+}
+
+const sha = (s: string) => createHash('sha1').update(s).digest('hex').slice(0, 16);
+/** The directive hash of an element with no directive other than `@deprecated`. */
+const NO_DIRECTIVES = sha('');
+
+/** A token as an error message names it: never a string's text, at most 40 characters of anything else. */
+const shown = (t: Tok | undefined): string => (!t ? 'end of file' : t.t === 'str' ? 'a string' : `\`${t.v.length > 40 ? `${t.v.slice(0, 40)}…` : t.v}\``);
+
+// ── Parser ─────────────────────────────────────────────────────────────────
+
+const TYPE_KEYWORDS: Record<string, GqlKind> = { type: 'object', interface: 'interface', input: 'input', enum: 'enum', union: 'union', scalar: 'scalar' };
+const EXECUTABLE = new Set(['query', 'mutation', 'subscription', 'fragment']);
+
+/**
+ * Parse one file. Returns an `error` when it cannot be read, or `{ clientDocument: true }` when it
+ * holds operations and fragments only.
+ */
+export function readGraphql(file: string, text: string): GqlDocument | GqlClientDocument | { file: string; error: string } {
+  if (text.length > MAX_SPEC_BYTES) return { file, error: `larger than ${MAX_SPEC_BYTES / 1024 / 1024} MB` };
+  try {
+    return parse(file, tokenize(text));
+  } catch (e) {
+    return { file, error: e instanceof Error ? e.message.split('\n')[0] : String(e) };
+  }
+}
+
+function parse(file: string, toks: Tok[]): GqlDocument | GqlClientDocument {
+  let p = 0;
+  const peek = (k = 0): Tok | undefined => toks[p + k];
+  const fail = (msg: string, t: Tok | undefined = peek()): never => {
+    throw new GqlSyntaxError(`line ${t?.line ?? toks[toks.length - 1]?.line ?? 1}: ${msg}`);
+  };
+  const next = (): Tok => toks[p++] ?? fail('unexpected end of file');
+  const is = (v: string, k = 0) => peek(k)?.t === 'punct' && peek(k)?.v === v;
+  const isName = (v: string, k = 0) => peek(k)?.t === 'name' && peek(k)?.v === v;
+  const expect = (v: string): Tok => (is(v) ? next() : fail(`expected \`${v}\`, found ${shown(peek())}`));
+  const name = (what: string): Tok => (peek()?.t === 'name' ? next() : fail(`expected ${what}, found ${shown(peek())}`));
+  const skipDescription = () => { if (peek()?.t === 'str') next(); };
+
+  const unassessed = new Set<string>();
+
+  /** Withhold one TYPE (never the document) and say why; the first reason read is the one kept. */
+  const withhold = (t: GqlType, reason: string) => { t.unassessable ??= reason; };
+  const keepDuplicate = (t: GqlType, element: GqlDuplicate['element'], name: string, definition: unknown) => {
+    (t.duplicates ??= []).push({ element, name, definition });
+  };
+
+  /** A balanced `{…}`, `[…]` or `(…)` group, or one token: a value or a selection set, as text. */
+  const skipGroup = (): string => {
+    const open = peek();
+    if (!open) fail('unexpected end of file');
+    const closer: Record<string, string> = { '{': '}', '[': ']', '(': ')' };
+    if (open!.t !== 'punct' || !closer[open!.v]) return next().v;
+    const stack: string[] = [];
+    const parts: string[] = [];
+    do {
+      const t = next();
+      if (t.t === 'punct' && closer[t.v]) stack.push(closer[t.v]);
+      else if (t.t === 'punct' && (t.v === '}' || t.v === ']' || t.v === ')')) {
+        if (stack.pop() !== t.v) fail(`unbalanced ${shown(t)}`, t);
+      }
+      parts.push(t.t === 'str' ? JSON.stringify(t.v) : t.v);
+    } while (stack.length);
+    return parts.join(' ');
+  };
+  /**
+   * A value literal (a default value), in canonical form: object fields sorted, numbers as
+   * numbers. `{a: 1, b: 2}` and `{b: 2, a: 1}` — or `1` and `1.0` — are one default, not a change.
+   */
+  const value = (depth = 0): string => {
+    if (depth > MAX_LIST_DEPTH) fail(`a value nested deeper than ${MAX_LIST_DEPTH}`);
+    const t = peek();
+    if (!t) return fail('unexpected end of file');
+    if (is('$')) { next(); return `$${name('a variable name').v}`; }
+    if (is('[')) {
+      next();
+      const items: string[] = [];
+      while (!is(']')) items.push(value(depth + 1));
+      expect(']');
+      return `[${items.join(',')}]`;
+    }
+    if (is('{')) {
+      next();
+      const fields: Array<[string, string]> = [];
+      while (!is('}')) { const k = name('an input field name').v; expect(':'); fields.push([k, value(depth + 1)]); }
+      expect('}');
+      return `{${fields.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => `${k}:${v}`).join(',')}}`;
+    }
+    next();
+    if (t.t === 'str') return JSON.stringify(t.v);
+    if (t.t === 'num') { const n = Number(t.v); return Number.isFinite(n) ? String(n) : t.v; }
+    if (t.t === 'name') return t.v;
+    return fail(`expected a value, found ${shown(t)}`, t);
+  };
+  /** Directives: whether `@deprecated` is among them, and a hash of the others. */
+  const directives = (): { deprecated: boolean; hash: string } => {
+    let deprecated = false;
+    const others: string[] = [];
+    while (is('@')) {
+      next();
+      const d = name('a directive name').v;
+      const args = is('(') ? skipGroup() : '';
+      if (d === 'deprecated') deprecated = true;
+      else { others.push(`${d}${args}`); unassessed.add(`@${d}`); }
+    }
+    return { deprecated, hash: sha(others.sort().join('\n')) };
+  };
+  /** A type reference, whitespace removed: `[ID!]!`. */
+  const typeRef = (depth = 0): string => {
+    if (depth > MAX_LIST_DEPTH) fail(`list types nested deeper than ${MAX_LIST_DEPTH}`);
+    let t: string;
+    if (is('[')) { next(); t = `[${typeRef(depth + 1)}]`; expect(']'); } else t = name('a type name').v;
+    if (is('!')) { next(); t += '!'; }
+    return t;
+  };
+  const inputValue = (): GqlArg => {
+    skipDescription();
+    const n = name('an argument or input field name');
+    expect(':');
+    const type = typeRef();
+    const defaultValue = is('=') ? (next(), value()) : undefined;
+    const d = directives();
+    return { name: n.v, type, ...(defaultValue !== undefined ? { defaultValue } : {}), deprecated: d.deprecated, directivesHash: d.hash, line: n.line };
+  };
+  const implementsList = (): string[] => {
+    const out: string[] = [];
+    if (!isName('implements')) return out;
+    next();
+    if (is('&')) next();
+    out.push(name('an interface name').v);
+    while (is('&')) { next(); out.push(name('an interface name').v); }
+    return out;
+  };
+
+  const clientDirective = toks.some((t, k) => t.t === 'name' && t.v === 'client' && toks[k - 1]?.t === 'punct' && toks[k - 1].v === '@');
+  const roots: GqlDocument['roots'] = {};
+  const types: GqlType[] = [];
+  const directiveDefs: GqlDirectiveDef[] = [];
+  const schemaDirectives: string[] = [];
+  let hasSchemaDefinition = false;
+  let sawTypeSystem = false;
+  let sawExecutable = false;
+
+  while (p < toks.length) {
+    skipDescription();
+    const extension = isName('extend');
+    if (extension) next();
+    const kw = peek();
+    if (!kw) fail('unexpected end of file');
+    if (kw!.t === 'punct' && kw!.v === '{' && !extension) { sawExecutable = true; skipGroup(); continue; }
+    if (kw!.t !== 'name') fail(`unexpected ${shown(kw)}`, kw);
+    if (EXECUTABLE.has(kw!.v) && !extension) {
+      // An operation or fragment: skip to the end of its selection set.
+      sawExecutable = true;
+      next();
+      while (p < toks.length && !is('{')) {
+        if (is('(')) skipGroup(); else next();
+      }
+      expect('{');
+      p--;
+      skipGroup();
+      continue;
+    }
+    if (kw!.v === 'schema') {
+      sawTypeSystem = true;
+      if (!extension) {
+        // A document defines its schema once; a second definition is refused, as graphql-js does.
+        if (hasSchemaDefinition) fail('a second `schema` definition', kw);
+        hasSchemaDefinition = true;
+      }
+      next();
+      const d = directives();
+      if (d.hash !== NO_DIRECTIVES) schemaDirectives.push(d.hash);
+      if (!is('{')) { if (extension) continue; fail('expected `{` after `schema`'); }
+      next();
+      while (!is('}')) {
+        const op = name('`query`, `mutation` or `subscription`');
+        if (op.v !== 'query' && op.v !== 'mutation' && op.v !== 'subscription') fail(`unexpected ${shown(op)} in \`schema\``, op);
+        const kind = op.v as 'query' | 'mutation' | 'subscription';
+        if (roots[kind]) fail(`the ${kind} root is named twice`, op);
+        expect(':');
+        roots[kind] = name('a type name').v;
+      }
+      expect('}');
+      continue;
+    }
+    if (kw!.v === 'directive' && !extension) {
+      // A directive definition: its arguments, `repeatable` and locations are modeled and diffed.
+      sawTypeSystem = true;
+      next();
+      expect('@');
+      const dn = name('a directive name');
+      const args: GqlArg[] = [];
+      if (is('(')) {
+        next();
+        const seenArgs = new Set<string>();
+        while (!is(')')) {
+          const a = inputValue();
+          if (seenArgs.has(a.name)) fail(`argument \`${a.name}\` declared twice on @${dn.v}`);
+          seenArgs.add(a.name);
+          args.push(a);
+        }
+        expect(')');
+      }
+      const repeatable = isName('repeatable') ? (next(), true) : false;
+      if (!isName('on')) fail('expected `on` in a directive definition');
+      next();
+      if (is('|')) next();
+      const locations = [name('a directive location').v];
+      while (is('|')) { next(); locations.push(name('a directive location').v); }
+      directiveDefs.push({ name: dn.v, args, repeatable, locations: [...new Set(locations)].sort(), line: dn.line });
+      continue;
+    }
+    const kind = TYPE_KEYWORDS[kw!.v];
+    if (!kind) fail(`unexpected ${shown(kw)} at the top level`, kw);
+    sawTypeSystem = true;
+    next();
+    const n = name('a type name');
+    const t: GqlType = { kind, name: n.v, line: n.line, extension, fields: [], values: [], members: [], interfaces: [], directivesHash: '' };
+    if (kind === 'object' || kind === 'interface') t.interfaces = implementsList();
+    t.directivesHash = directives().hash;
+    if (kind === 'union' && is('=')) {
+      next();
+      if (is('|')) next();
+      t.members.push(name('a union member').v);
+      while (is('|')) { next(); t.members.push(name('a union member').v); }
+    } else if ((kind === 'object' || kind === 'interface' || kind === 'input') && is('{')) {
+      next();
+      const seen = new Set<string>();
+      while (!is('}')) {
+        skipDescription();
+        if (kind === 'input') {
+          const v = inputValue();
+          // A duplicate makes THIS type ambiguous, not the document: the rest is still read, and
+          // the type is withheld from the merged namespace rather than guessed between.
+          if (seen.has(v.name)) { withhold(t, `field \`${v.name}\` is declared twice (line ${v.line})`); keepDuplicate(t, 'field', v.name, v); continue; }
+          seen.add(v.name);
+          t.fields.push({ name: v.name, type: v.type, args: [], ...(v.defaultValue !== undefined ? { defaultValue: v.defaultValue } : {}), deprecated: v.deprecated, directivesHash: v.directivesHash, line: v.line });
+          continue;
+        }
+        const f = name('a field name');
+        const duplicate = seen.has(f.v);
+        if (duplicate) withhold(t, `field \`${f.v}\` is declared twice (line ${f.line})`);
+        seen.add(f.v);
+        const args: GqlArg[] = [];
+        if (is('(')) {
+          next();
+          const seenArgs = new Set<string>();
+          while (!is(')')) {
+            const a = inputValue();
+            // A repeated argument name would let the last one silently win every comparison.
+            if (seenArgs.has(a.name)) { withhold(t, `argument \`${a.name}\` is declared twice on \`${f.v}\` (line ${a.line})`); keepDuplicate(t, 'field', f.v, { argument: a }); continue; }
+            seenArgs.add(a.name);
+            args.push(a);
+          }
+          expect(')');
+        }
+        expect(':');
+        const type = typeRef();
+        const d = directives();
+        // The first definition is kept, so what IS read of a withheld type stays deterministic.
+        if (!duplicate) t.fields.push({ name: f.v, type, args, deprecated: d.deprecated, directivesHash: d.hash, line: f.line });
+        else keepDuplicate(t, 'field', f.v, { type, args, deprecated: d.deprecated, directivesHash: d.hash });
+      }
+      expect('}');
+    } else if (kind === 'enum' && is('{')) {
+      next();
+      const seen = new Set<string>();
+      while (!is('}')) {
+        skipDescription();
+        const v = name('an enum value');
+        const duplicate = seen.has(v.v);
+        if (duplicate) withhold(t, `enum value \`${v.v}\` is declared twice (line ${v.line})`);
+        seen.add(v.v);
+        const d = directives();
+        if (!duplicate) t.values.push({ name: v.v, deprecated: d.deprecated, directivesHash: d.hash, line: v.line });
+        else keepDuplicate(t, 'value', v.v, { deprecated: d.deprecated, directivesHash: d.hash });
+      }
+      expect('}');
+    }
+    types.push(t);
+  }
+
+  // Operations using `@client` beside type definitions are Apollo local state: the types extend a
+  // CLIENT cache, not a server's API. The whole file is a client document.
+  if (sawExecutable && !sawTypeSystem) return { file, clientDocument: true };
+  if (sawExecutable && clientDirective) return { file, clientDocument: true };
+  if (sawExecutable) unassessed.add('operations in a schema file');
+  const byName = <T extends { name: string }>(a: T, b: T) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  return {
+    file, format: 'graphql-sdl', roots, hasSchemaDefinition,
+    schemaDirectivesHash: schemaDirectives.length ? sha(schemaDirectives.sort().join('|')) : NO_DIRECTIVES,
+    directiveDefs: directiveDefs.sort(byName),
+    types: types.sort((a, b) => byName(a, b) || Number(a.extension) - Number(b.extension) || a.line - b.line),
+    unassessed: [...unassessed].sort(),
+  };
+}
+
+// ── One schema across files ────────────────────────────────────────────────
+
+/** A merged type, with the files that define and extend it. */
+export interface GqlMergedType extends GqlType {
+  /** The file holding the definition (not an extension), or the first extension's file. */
+  file: string;
+  /** Files that extend it, sorted. */
+  extendedIn: string[];
+  /**
+   * No file read defines it; only `extend`s do. A Federation 1 subgraph writes
+   * `extend type Query { … }` and `extend type User @key(…)` for types the gateway defines, so the
+   * extensions ARE this repository's contract and are compared as such.
+   */
+  extensionOnly?: true;
+  /**
+   * Elements an `extend` declared more than once (`field:<name>` / `value:<name>`). The extension's
+   * readable part is folded in; these alone are compared by fingerprint and, when they differ,
+   * reported `schema-unassessed` — never read as removed, and never hiding the rest of the type.
+   */
+  unassessableElements?: Record<string, { reason: string; fingerprint: string; file: string }>;
+}
+
+export type GqlRootKind = 'query' | 'mutation' | 'subscription';
+
+export interface GqlSchema {
+  /** Types by name, definitions with their extensions folded in. A name defined twice is absent. */
+  types: Map<string, GqlMergedType>;
+  /**
+   * Root operation type names. When a file defines `schema { … }`, exactly the roots it names;
+   * otherwise the default names `Query`, `Mutation`, `Subscription` (as GraphQL itself says).
+   */
+  roots: Partial<Record<GqlRootKind, string>>;
+  /** Root kinds two files name differently: no root of that kind is assessed. */
+  rootConflicts: GqlRootKind[];
+  /** Names defined in more than one file, with a fingerprint of all their definitions. */
+  ambiguous: Array<{ name: string; files: string[]; fingerprint: string }>;
+  /**
+   * Types withheld for THEIR OWN shape — a duplicate field, enum value or argument — each with
+   * why and a fingerprint of its definitions (change: scope-graphql-schema-universes). Absent from
+   * `types`, exactly like an ambiguous name: which definition wins is not knowable. Every other
+   * type in the same document is read and compared normally.
+   */
+  unassessableTypes: Array<{ name: string; files: string[]; reason: string; fingerprint: string }>;
+  /** `extend`s of a type no file read defines (projected as extension-only types). */
+  orphanExtensions: Array<{ name: string; file: string }>;
+  /** Directive definitions by name; one defined in two files is absent (see `ambiguousDirectives`). */
+  directives: Map<string, GqlDirectiveDef & { file: string }>;
+  /** Directives defined in more than one file, with a fingerprint of all their definitions. */
+  ambiguousDirectives: Array<{ name: string; files: string[]; fingerprint: string }>;
+  /** A hash of every directive on `schema` / `extend schema`. */
+  schemaDirectivesHash: string;
+  conflicts: string[];
+}
+
+/**
+ * A definition's content for comparison: everything but its line numbers. `unassessable` is
+ * skipped with them — its text NAMES a line, so keeping it would make a pure reformat read as a
+ * change to a withheld type.
+ */
+const fingerprintOf = (x: unknown): string => sha(JSON.stringify(x, (k, v) => (k === 'line' || k === 'unassessable' ? undefined : v)));
+
+/**
+ * One element's content for comparison across revisions: no line, and no `file` (a merged field
+ * carries the extension file it came from, which moving the extension changes).
+ */
+export const elementFingerprint = (x: unknown): string =>
+  sha(JSON.stringify(x, (k, v) => (k === 'line' || k === 'file' ? undefined : v)));
+
+/**
+ * Merge the documents of ONE project into one schema, as a GraphQL server does: one global namespace
+ * (see {@link mergeGraphqlUniverses} for the partition into projects),
+ * definitions and their `extend`s folded together. A name defined in two files — two services'
+ * schemas in one repository, or a copy beside its source — is ambiguous and dropped from the
+ * merged map, never guessed between; its fingerprint is kept so a change to it is still seen.
+ */
+export function mergeGraphqlSchema(docs: readonly GqlDocument[]): GqlSchema {
+  const defs = new Map<string, Array<{ file: string; t: GqlType }>>();
+  const exts = new Map<string, Array<{ file: string; t: GqlType }>>();
+  const declaredRoots: Partial<Record<GqlRootKind, string>> = {};
+  const rootConflicts = new Set<GqlRootKind>();
+  const conflicts: string[] = [];
+  const directiveAt = new Map<string, Array<GqlDirectiveDef & { file: string }>>();
+  const schemaDirectives: string[] = [];
+  let defined = false;
+  for (const d of [...docs].sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0))) {
+    if (d.hasSchemaDefinition) defined = true;
+    if (d.schemaDirectivesHash !== NO_DIRECTIVES) schemaDirectives.push(d.schemaDirectivesHash);
+    for (const [op, type] of Object.entries(d.roots) as Array<[GqlRootKind, string]>) {
+      if (declaredRoots[op] && declaredRoots[op] !== type) {
+        rootConflicts.add(op);
+        conflicts.push(`the ${op} root is \`${declaredRoots[op]}\` in one file and \`${type}\` in another`);
+      } else declaredRoots[op] = type;
+    }
+    for (const t of d.types) {
+      const into = t.extension ? exts : defs;
+      const at = into.get(t.name);
+      if (at) at.push({ file: d.file, t }); else into.set(t.name, [{ file: d.file, t }]);
+    }
+    for (const dd of d.directiveDefs) {
+      const at = directiveAt.get(dd.name);
+      if (at) at.push({ ...dd, file: d.file }); else directiveAt.set(dd.name, [{ ...dd, file: d.file }]);
+    }
+  }
+  // With a `schema` definition anywhere, exactly the roots named; without one, the defaults.
+  const roots: GqlSchema['roots'] = defined ? { ...declaredRoots } : { query: 'Query', mutation: 'Mutation', subscription: 'Subscription', ...declaredRoots };
+  for (const k of rootConflicts) delete roots[k];
+  const types = new Map<string, GqlMergedType>();
+  const ambiguous: GqlSchema['ambiguous'] = [];
+  const unassessableTypes: GqlSchema['unassessableTypes'] = [];
+  /** Every definition and extension of one name, hashed: what a withheld type is compared by. */
+  const contentOf = (name: string) => fingerprintOf([...(defs.get(name) ?? []).map(x => x.t), ...(exts.get(name) ?? []).map(x => x.t)].map(fingerprintOf).sort());
+  for (const [name, at] of defs) {
+    if (at.length > 1) {
+      ambiguous.push({ name, files: at.map(x => x.file).sort(), fingerprint: contentOf(name) });
+      continue;
+    }
+    // Withheld for its own shape: the document around it is still read (case: one duplicated field
+    // in a 1.2 MB schema used to refuse the whole file, grading nothing).
+    if (at[0].t.unassessable) {
+      unassessableTypes.push({ name, files: [at[0].file], reason: at[0].t.unassessable, fingerprint: contentOf(name) });
+      continue;
+    }
+    const { file, t } = at[0];
+    types.set(name, { ...t, file, extendedIn: [], fields: [...t.fields], values: [...t.values], members: [...t.members], interfaces: [...t.interfaces] });
+  }
+  const orphanExtensions: GqlSchema['orphanExtensions'] = [];
+  for (const [name, every] of exts) {
+    // An `extend` holding a duplicate is folded in for its READABLE part — the first declaration of
+    // each element, as for a definition — and only the duplicated element is set aside, compared by
+    // fingerprint. Dropping the whole extension read its other fields as REMOVED (a false breaking
+    // change); withholding the merged type would downgrade a real removal in a clean definition to
+    // `schema-unassessed`. This loses neither.
+    const at = every;
+    for (const x of every) {
+      if (x.t.unassessable) conflicts.push(`\`extend ${x.t.kind} ${name}\` in ${x.file}: ${x.t.unassessable}, so that element is not assessed (the rest of the extension is)`);
+    }
+    if (!at.length) continue;
+    let base = types.get(name);
+    if (!base) {
+      if (defs.has(name)) continue; // ambiguous or withheld: in its fingerprint
+      for (const x of at) orphanExtensions.push({ name, file: x.file });
+      // Extension-only: the first extension stands for the definition the gateway holds.
+      const first = at[0];
+      base = { ...first.t, extension: false, file: first.file, extendedIn: [], extensionOnly: true, fields: [], values: [], members: [], interfaces: [], directivesHash: NO_DIRECTIVES };
+      types.set(name, base);
+    }
+    const extDirectives: string[] = [];
+    // Built once per type, not once per extension: thousands of `extend type Query` were quadratic.
+    const fieldNames = new Set(base.fields.map(f => f.name));
+    const valueNames = new Set(base.values.map(v => v.name));
+    const memberNames = new Set(base.members);
+    const interfaceNames = new Set(base.interfaces);
+    for (const { file, t } of at) {
+      if (t.kind !== base.kind) { conflicts.push(`\`extend ${t.kind} ${name}\` in ${file} extends a ${base.kind}`); continue; }
+      if (file !== base.file || !base.extensionOnly) base.extendedIn.push(file);
+      for (const f of t.fields) {
+        if (fieldNames.has(f.name)) conflicts.push(`field \`${name}.${f.name}\` is declared twice (an extension in ${file})`);
+        else { fieldNames.add(f.name); base.fields.push(file === base.file ? f : { ...f, file }); }
+      }
+      for (const v of t.values) if (!valueNames.has(v.name)) { valueNames.add(v.name); base.values.push(v); }
+      for (const m of t.members) if (!memberNames.has(m)) { memberNames.add(m); base.members.push(m); }
+      for (const i of t.interfaces) if (!interfaceNames.has(i)) { interfaceNames.add(i); base.interfaces.push(i); }
+      if (t.directivesHash !== NO_DIRECTIVES) extDirectives.push(t.directivesHash);
+      for (const dupl of t.duplicates ?? []) {
+        const key = `${dupl.element}:${dupl.name}`;
+        const kept = dupl.element === 'field' ? t.fields.find(f => f.name === dupl.name) : t.values.find(v => v.name === dupl.name);
+        const all = [kept ?? null, ...(t.duplicates ?? []).filter(o => o.element === dupl.element && o.name === dupl.name).map(o => o.definition)];
+        (base.unassessableElements ??= {})[key] = { reason: t.unassessable ?? `${dupl.element} \`${dupl.name}\` is declared twice`, fingerprint: elementFingerprint(all), file };
+      }
+    }
+    // Folded in independent of file order, and only when an extension carries a directive: moving
+    // fields into a bare `extend`, or an extension to another file, changes no directive.
+    if (extDirectives.length) base.directivesHash = sha([base.directivesHash, ...extDirectives.sort()].join('|'));
+    base.extendedIn = [...new Set(base.extendedIn)].sort();
+  }
+  const directives: GqlSchema['directives'] = new Map();
+  const ambiguousDirectives: GqlSchema['ambiguousDirectives'] = [];
+  for (const [name, at] of directiveAt) {
+    if (at.length > 1) {
+      ambiguousDirectives.push({ name, files: at.map(x => x.file).sort(), fingerprint: fingerprintOf(at.map(({ file: _f, ...d }) => fingerprintOf(d)).sort()) });
+      continue;
+    }
+    directives.set(name, at[0]);
+  }
+  return {
+    types, roots, rootConflicts: [...rootConflicts].sort(), ambiguous: ambiguous.sort((a, b) => (a.name < b.name ? -1 : 1)),
+    unassessableTypes: unassessableTypes.sort((a, b) => (a.name < b.name ? -1 : 1)),
+    orphanExtensions, directives, ambiguousDirectives: ambiguousDirectives.sort((a, b) => (a.name < b.name ? -1 : 1)), schemaDirectivesHash: schemaDirectives.length ? sha(schemaDirectives.sort().join('|')) : NO_DIRECTIVES,
+    conflicts: conflicts.sort(),
+  };
+}
+
+/**
+ * A schema read from NO file: every map empty and NO root names.
+ *
+ * Deliberately not `mergeGraphqlSchema([])`, which supplies GraphQL's default root names. Used as
+ * the absent side of a comparison, those defaults would make a real `type Mutation` in a schema
+ * whose `schema { query: … }` names no mutation root read as a ROOT at the empty side — and a root
+ * is skipped, so its removal would go ungraded.
+ */
+export const emptyGqlSchema = (): GqlSchema => ({
+  types: new Map(), roots: {}, rootConflicts: [], ambiguous: [], unassessableTypes: [],
+  orphanExtensions: [], directives: new Map(), ambiguousDirectives: [],
+  schemaDirectivesHash: NO_DIRECTIVES, conflicts: [],
+});
+
+/** One project's merged schema, with the universe it belongs to and the files it was merged from. */
+export interface GqlUniverseSchema {
+  /** The project-root directory the schemas share; `''` is the repository root. */
+  universe: string;
+  files: string[];
+  schema: GqlSchema;
+}
+
+/**
+ * Merge the documents into ONE schema PER UNIVERSE (change: scope-graphql-schema-universes).
+ *
+ * GraphQL's namespace is global to a server, not to a repository. Merging every file of a monorepo
+ * into one namespace made each project's `type Query` "defined in more than one file", which
+ * withheld every operation of every project — so a genuine breaking change inside one of them was
+ * never graded. Two schemas in DIFFERENT universes never collide; two in the SAME universe still
+ * do, and stay unassessed, because there the ambiguity is real.
+ */
+export function mergeGraphqlUniverses(
+  docs: readonly GqlDocument[],
+  universeOf: (file: string) => string,
+): GqlUniverseSchema[] {
+  const byUniverse = new Map<string, GqlDocument[]>();
+  for (const d of docs) {
+    const key = universeOf(d.file);
+    const at = byUniverse.get(key);
+    if (at) at.push(d); else byUniverse.set(key, [d]);
+  }
+  return [...byUniverse.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([universe, group]) => ({
+      universe,
+      files: group.map(d => d.file).sort(),
+      schema: mergeGraphqlSchema(group),
+    }));
+}
+
+/**
+ * A client-toolchain config file that can name the schema its tool reads, with the human name of
+ * that tool. Relay is read for DROPPING on the analyze side (a Relay copy is the compiler's copy
+ * of a server's schema); the rest are read for DISCLOSURE only — certify never drops a schema on
+ * a config's say-so (change: disclose-schema-provenance).
+ */
+const CLIENT_SCHEMA_CONFIGS: ReadonlyArray<{ test: RegExp; tool: string; bare: boolean }> = [
+  { test: /(?:^|\/)package\.json$/, tool: 'a Relay compiler config', bare: false },
+  { test: /(?:^|\/)relay\.config\.(?:[cm]?js|json|ts)$/, tool: 'a Relay compiler config', bare: false },
+  { test: /(?:^|\/)apollo\.config\.(?:[cm]?js|ts|json)$/, tool: 'an Apollo client config', bare: true },
+  { test: /(?:^|\/)graphql\.config\.(?:[cm]?js|ts|json|ya?ml)$/, tool: 'a graphql-config file', bare: true },
+  { test: /(?:^|\/)\.graphqlrc(?:\.(?:json|ya?ml|[cm]?js|ts))?$/, tool: 'a graphql-config file', bare: true },
+  { test: /(?:^|\/)codegen\.(?:ya?ml|json|ts|[cm]?js)$/, tool: 'a GraphQL Code Generator config', bare: true },
+];
+
+/** Every config file name {@link clientSchemaReferences} reads: what a caller collects. */
+export const CLIENT_SCHEMA_CONFIG_FILE = /(?:^|\/)(?:package\.json|relay\.config\.(?:[cm]?js|json|ts)|apollo\.config\.(?:[cm]?js|ts|json)|graphql\.config\.(?:[cm]?js|ts|json|ya?ml)|\.graphqlrc(?:\.(?:json|ya?ml|[cm]?js|ts))?|codegen\.(?:ya?ml|json|ts|[cm]?js))$/;
+
+/**
+ * A `schema:` value, read ONE LINE AT A TIME.
+ *
+ * Per line, and never across one: a `\s*` that crossed newlines read `documents:` as the value of
+ * an empty `schema:`, and an unanchored key matched `my_schema:` and a `#`-commented-out line.
+ * `(?:^|[^\w$])` is the left boundary — `$schema` (a JSON Schema key, usually a URL) is not it.
+ */
+const SCHEMA_KEY_QUOTED = /(?:^|[^\w$])["']?schema["']?[ \t]*:[ \t]*["']([^"'\n]{1,500})["']/;
+/** A quoted or bare value (YAML configs, Apollo). A bare value must END on its own line. */
+const SCHEMA_KEY_ANY = /(?:^|[^\w$])["']?(?:schema|localSchemaFile)["']?[ \t]*:[ \t]*(?:["']([^"'\n]{1,500})["']|([^\s"'\n#,}\]]{1,500})(?=[ \t]*(?:#|$)))/;
+/** Lines read from one config: a schema path a tool reads sits near the top, never at line 10,000. */
+const MAX_CONFIG_LINES = 2_000;
+
+/** The first `schema:` value in `body`, skipping comment lines. */
+function firstSchemaValue(body: string, bare: boolean): string | undefined {
+  let n = 0;
+  for (const raw of body.split('\n')) {
+    if (++n > MAX_CONFIG_LINES) return undefined;
+    const line = raw.trimStart();
+    // A commented-out `schema:` is not the config's value.
+    if (line.startsWith('#') || line.startsWith('//') || line.startsWith('*')) continue;
+    const m = (bare ? SCHEMA_KEY_ANY : SCHEMA_KEY_QUOTED).exec(raw);
+    const lit = m?.[1] ?? m?.[2];
+    if (lit !== undefined) return lit;
+  }
+  return undefined;
+}
+
+/** A value that is not a literal local path: a URL, an interpolation, a glob. */
+const notALiteralPath = (lit: string) => lit.includes('://') || /[$*{}]|^\.+$/.test(lit);
+
+/** The schema one config names, resolved inside the config's own directory. */
+export interface ClientSchemaReference {
+  /** The schema path, relative to the repository root. */
+  schema: string;
+  /** The config file that named it. */
+  config: string;
+  /** The human name of the toolchain, for a disclosure line. */
+  tool: string;
+}
+
+/**
+ * The single literal schema path each client-toolchain config names, resolved from the config's
+ * own directory: `"relay": { "schema": "./schema/schema.graphql" }` in a `package.json`,
+ * `schema: '…'` in `relay.config.*`, `localSchemaFile` in `apollo.config.*`, `schema:` in
+ * `graphql.config.*` / `.graphqlrc*` / `codegen.*`.
+ */
+export function clientSchemaReferences(configs: ReadonlyArray<{ path: string; content: string }>): ClientSchemaReference[] {
+  const out: ClientSchemaReference[] = [];
+  for (const c of configs) {
+    const kind = CLIENT_SCHEMA_CONFIGS.find(k => k.test.test(c.path));
+    if (!kind) continue;
+    const dir = c.path.includes('/') ? c.path.slice(0, c.path.lastIndexOf('/')) : '';
+    const body = /package\.json$/.test(c.path) ? /"relay"\s*:\s*\{([^}]{0,4000})\}/.exec(c.content)?.[1] : c.content;
+    if (!body) continue;
+    const lit = firstSchemaValue(body, kind.bare);
+    if (!lit || notALiteralPath(lit)) continue;
+    // Only a schema INSIDE the config's own directory is the client project's copy. A path that climbs
+    // out of it — `../api/schema.graphql`, or past the repository root — names someone else's
+    // schema (often this repository's own server), which must never be dropped on its say-so.
+    const parts: string[] = [];
+    let escaped = false;
+    for (const seg of lit.split('/')) {
+      if (!seg || seg === '.') continue;
+      if (seg === '..') { if (!parts.length) { escaped = true; break; } parts.pop(); } else parts.push(seg);
+    }
+    if (escaped || !parts.length) continue;
+    out.push({ schema: [...(dir ? [dir] : []), ...parts].join('/'), config: c.path, tool: kind.tool });
+  }
+  return out;
+}
+
+/** The subset of {@link clientSchemaReferences} a Relay compiler config names. */
+export function relaySchemaPaths(configs: ReadonlyArray<{ path: string; content: string }>): Set<string> {
+  return new Set(clientSchemaReferences(configs).filter(r => /(?:^|\/)(?:package\.json|relay\.config\.(?:[cm]?js|json|ts))$/.test(r.config)).map(r => r.schema));
+}
+
+/** The named type inside a type reference: `[Order!]!` → `Order`. */
+export const namedType = (type: string): string => type.replace(/[[\]!]/g, '');

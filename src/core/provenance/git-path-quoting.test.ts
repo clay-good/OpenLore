@@ -62,7 +62,7 @@ describe('git path quoting — non-ASCII filenames are not silently dropped', ()
     }
   });
 
-  afterAll(() => rmSync(repo, { recursive: true, force: true }));
+  afterAll(() => rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   it('sanity: git DOES octal-escape the non-ASCII path by default (guard is meaningful)', () => {
     const raw = execFileSync('git', ['log', '--name-only', '--format=', '-1'], {

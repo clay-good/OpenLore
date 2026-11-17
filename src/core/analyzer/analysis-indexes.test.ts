@@ -1,11 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-const { vectorBuild, textBuild, specBuild, readSourceCapped, resolveEmbedder, indexCapabilityAgreement, TestLockContendedError } = vi.hoisted(() => ({
+const {
+  vectorBuild, textBuild, specBuild, readSourceCapped, resolveEmbedder, indexCapabilityAgreement, TestLockContendedError,
+  backgroundSemanticAllowed, indexCarriesLocalVectors, localEmbed, readCurrentGeneration,
+} = vi.hoisted(() => ({
   vectorBuild: vi.fn(), textBuild: vi.fn(), specBuild: vi.fn(), readSourceCapped: vi.fn(), resolveEmbedder: vi.fn(),
   indexCapabilityAgreement: vi.fn(),
+  backgroundSemanticAllowed: vi.fn(), indexCarriesLocalVectors: vi.fn(), localEmbed: vi.fn(), readCurrentGeneration: vi.fn(),
   // Declared here, not at module scope: `vi.mock` factories are hoisted above every
   // top-level binding, so a class defined outside is still uninitialized when they run.
   TestLockContendedError: class TestLockContendedError extends Error {
@@ -22,7 +26,19 @@ vi.mock('./vector-index.js', () => ({
 }));
 vi.mock('./text-line-index.js', () => ({ TextLineIndex: { build: textBuild, exists: vi.fn(() => true) } }));
 vi.mock('./spec-vector-index.js', () => ({ SpecVectorIndex: { build: specBuild, exists: vi.fn(() => true) } }));
-vi.mock('./embedder.js', () => ({ resolveEmbedder, indexCapabilityAgreement, embedderMode: () => 'keyword' }));
+vi.mock('./embedder.js', () => ({
+  resolveEmbedder, indexCapabilityAgreement, embedderMode: () => 'keyword',
+  backgroundSemanticAllowed, indexCarriesLocalVectors, localEmbedderInstalled: () => true,
+}));
+vi.mock('./local-embedding-service.js', () => ({
+  LocalEmbeddingService: Object.assign(vi.fn(function () { return { modelName: 'local:test-model', embed: localEmbed }; }), {
+    shared: vi.fn(() => ({ modelName: 'local:test-model', embed: localEmbed })),
+  }),
+}));
+vi.mock('../runtime/analysis-generation.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  readCurrentGeneration,
+}));
 vi.mock('./file-walker.js', () => ({ FileWalker: vi.fn(function () { return { walk: vi.fn(async () => ({ files: [] })) }; }) }));
 vi.mock('../../utils/command-helpers.js', () => ({ fileExists: vi.fn(async () => true) }));
 vi.mock('./bounded-file-scan.js', () => ({
@@ -30,7 +46,7 @@ vi.mock('./bounded-file-scan.js', () => ({
   readSourceCapped,
 }));
 
-import { buildAnalysisIndexes } from './analysis-indexes.js';
+import { buildAnalysisIndexes, buildBackgroundLocalVectors } from './analysis-indexes.js';
 import { FileWalker } from './file-walker.js';
 
 // A root literal has to be resolved for the HOST platform, then composed with `join`.
@@ -296,5 +312,93 @@ describe('shared analysis index builder', () => {
         await rm(root, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe('background local vectors (change: enable-local-semantic-search-in-background)', () => {
+  const graphContext = {
+    phase1_survey: { purpose: '', files: [] }, phase2_deep: { purpose: '', files: [] }, phase3_validation: { purpose: '', files: [] },
+    callGraph: { nodes: [{ id: 'f', name: 'f', filePath: 'src/f.ts' }], edges: [], stats: { totalNodes: 1, totalEdges: 0 }, hubFunctions: [], entryPoints: [] },
+  };
+  let root: string;
+  let outputPath: string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    root = await mkdtemp(join(tmpdir(), 'openlore-background-vectors-'));
+    outputPath = join(root, '.openlore', 'analysis');
+    await mkdir(outputPath, { recursive: true });
+    await writeFile(join(outputPath, 'llm-context.json'), JSON.stringify(graphContext));
+    readSourceCapped.mockResolvedValue('export function f() {}');
+    backgroundSemanticAllowed.mockReturnValue(true);
+    indexCarriesLocalVectors.mockReturnValue(false);
+    localEmbed.mockImplementation(async (texts: string[]) => texts.map(() => [0.5, 0.5]));
+    readCurrentGeneration.mockResolvedValue({ generationId: 'generation-1' });
+    // Each build embeds its records, as the real one does.
+    vectorBuild.mockImplementation(async (_dir: string, _n: unknown, _s: unknown, _h: unknown, _e: unknown, embedder: { embed(t: string[]): Promise<number[][]> }) => {
+      await embedder.embed(['record f']);
+      return { hasEmbeddings: true };
+    });
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('embeds into a scratch index, then writes the real one from the recorded vectors', async () => {
+    expect(await buildBackgroundLocalVectors(root, outputPath, null)).toBe('built');
+
+    expect(vectorBuild).toHaveBeenCalledTimes(2);
+    expect(vectorBuild.mock.calls[0][0]).not.toBe(outputPath);
+    expect(vectorBuild.mock.calls[1][0]).toBe(outputPath);
+    // The probe and the scratch build embed; the real write replays and embeds nothing.
+    expect(localEmbed).toHaveBeenCalledTimes(2);
+  });
+
+  it('writes nothing when the repository opted out', async () => {
+    backgroundSemanticAllowed.mockReturnValue(false);
+    expect(await buildBackgroundLocalVectors(root, outputPath, null)).toBe('skipped');
+    expect(vectorBuild).not.toHaveBeenCalled();
+  });
+
+  it('stays silent and writes nothing when the model cannot load', async () => {
+    localEmbed.mockRejectedValue(new Error('no network'));
+    expect(await buildBackgroundLocalVectors(root, outputPath, null)).toBe('skipped');
+    expect(vectorBuild).not.toHaveBeenCalled();
+  });
+
+  it('stands down while another live pass holds the repository claim', async () => {
+    const runtime = join(root, '.openlore', 'runtime');
+    await mkdir(runtime, { recursive: true });
+    await writeFile(join(runtime, 'background-vectors.lock'), `${process.pid} ${new Date().toISOString()}`);
+    expect(await buildBackgroundLocalVectors(root, outputPath, null)).toBe('skipped');
+    expect(vectorBuild).not.toHaveBeenCalled();
+  });
+
+  it('reclaims the claim of a pass that died', async () => {
+    const runtime = join(root, '.openlore', 'runtime');
+    await mkdir(runtime, { recursive: true });
+    await writeFile(join(runtime, 'background-vectors.lock'), `999999999 ${new Date().toISOString()}`);
+    expect(await buildBackgroundLocalVectors(root, outputPath, null)).toBe('built');
+  });
+
+  it('does not write while a full analysis owns the repository', async () => {
+    const { acquireAnalysisOwnership } = await vi.importActual<typeof import('../runtime/analysis-ownership.js')>('../runtime/analysis-ownership.js');
+    const held = await acquireAnalysisOwnership(root, outputPath);
+    expect(held.state).toBe('owned');
+    try {
+      // This process owns it, but the pass asks as a separate owner and must be refused.
+      expect(await buildBackgroundLocalVectors(root, outputPath, null)).toBe('skipped');
+      expect(vectorBuild).toHaveBeenCalledTimes(1); // the scratch build only; the real index untouched
+    } finally {
+      if (held.state === 'owned') await held.release();
+    }
+  });
+
+  it('leaves the real index alone when a newer generation was published meanwhile', async () => {
+    readCurrentGeneration.mockResolvedValueOnce({ generationId: 'generation-1' }).mockResolvedValueOnce({ generationId: 'generation-2' });
+    expect(await buildBackgroundLocalVectors(root, outputPath, null)).toBe('skipped');
+    expect(vectorBuild).toHaveBeenCalledOnce();
+    expect(vectorBuild.mock.calls[0][0]).not.toBe(outputPath);
   });
 });

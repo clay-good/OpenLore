@@ -16,11 +16,13 @@ import {
   readCurrentGeneration,
 } from '../../runtime/analysis-generation.js';
 import { isAnalysisLockHeld } from '../../runtime/advisory-lock.js';
+import { runtimeDirOf } from '../../runtime/analysis-ownership.js';
+import { atomicWriteFile } from '../../decisions/atomic-store.js';
 import { readAttestation, reconcile, type IndexIntegrity } from '../../analyzer/index-attestation.js';
 import { recordGraphDigest } from './traversal.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import { ANALYSIS_AGE_WARNING_HOURS, ANALYSIS_STALE_THRESHOLD_MS, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, ARTIFACT_INDEX_ATTESTATION, ARTIFACT_LLM_CONTEXT, DEFAULT_MAX_FILES, FINGERPRINT_BUDGET_OFFENDER_MIN_SHARE, FINGERPRINT_BUDGET_TOP_OFFENDERS, MAX_QUERY_LENGTH, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR, STALE_REGION_REPAIR_THRESHOLD } from '../../../constants.js';
-import { repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
+import { canRepairInBackground, repairInBackground, type RepairReason } from '../cold-start-bootstrap.js';
 import { isConfinedPath } from '../../../utils/path-confinement.js';
 import { sanitizeForTerminal } from '../../../utils/misc.js';
 import { readPartialArtifact, readPartialIndexStamp } from '../../runtime/partial-index.js';
@@ -157,6 +159,12 @@ export function computeRepairReason(
   now: number = Date.now(),
 ): RepairReason | undefined {
   if (integrityVerdict === 'mismatched') return 'integrity-mismatched';
+  // A `degraded` store is materially smaller than the build committed — a partial or
+  // truncated persist, needing a rebuild just as much as a mismatch. (It is NOT a
+  // transient WAL-lag artifact: computeIndexIntegrity checkpoints the WAL and recounts
+  // before the verdict is set, so a surviving `degraded` is a genuine shortfall, and it
+  // otherwise re-discloses "re-run analyze --force" on every call while never self-healing.)
+  if (integrityVerdict === 'degraded') return 'integrity-degraded';
   // A read-path schema mismatch or a quarantined (corrupt) store both need a rebuild.
   if (schemaFault) return 'schema-reset';
   if (staleCount >= STALE_REGION_REPAIR_THRESHOLD) return 'stale-region';
@@ -165,21 +173,81 @@ export function computeRepairReason(
 }
 
 /**
+ * Records the result of checking an aged analysis against its source, so the check runs once
+ * per analysis (when the source changed) or once per age window (when it did not), not on every
+ * read. It names the artifact mtime it is about: the next analyze rewrites the artifact, and the
+ * record then no longer applies.
+ */
+const FRESHNESS_VERIFIED_FILE = 'freshness-verified.json';
+
+interface SourceVerification { current: boolean; verifiedAtMs: number }
+
+/** The recorded check for the analysis whose artifact has this mtime, if any. */
+async function readSourceVerification(analysisDir: string, artifactMtimeMs: number): Promise<SourceVerification | undefined> {
+  try {
+    const read = await readArtifactBytesBounded(join(runtimeDirOf(analysisDir), FRESHNESS_VERIFIED_FILE));
+    if (read.state !== 'ok') return undefined;
+    const marker = JSON.parse(read.bytes.toString('utf8')) as { artifactMtimeMs?: unknown; verifiedAtMs?: unknown; current?: unknown };
+    if (marker.artifactMtimeMs !== artifactMtimeMs || typeof marker.verifiedAtMs !== 'number' || typeof marker.current !== 'boolean') return undefined;
+    // A record dated in the future is not evidence; it would silence the age check for good.
+    return marker.verifiedAtMs <= Date.now() ? { current: marker.current, verifiedAtMs: marker.verifiedAtMs } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Record whether the analysis whose artifact has this mtime matched its source just now. */
+async function recordVerifiedCurrent(analysisDir: string, artifactMtimeMs: number, current: boolean): Promise<void> {
+  const marker = JSON.stringify({ artifactMtimeMs, verifiedAtMs: Date.now(), current });
+  await atomicWriteFile(join(runtimeDirOf(analysisDir), FRESHNESS_VERIFIED_FILE), marker).catch(() => {});
+}
+
+/** One content check per analysis at a time: concurrent cold reads share it. */
+const sourceChecks = new Map<string, Promise<boolean>>();
+
+function checkSourceUnchanged(directory: string, artifactMtimeMs: number): Promise<boolean> {
+  const key = JSON.stringify([directory, artifactMtimeMs]);
+  let check = sourceChecks.get(key);
+  if (!check) {
+    check = isCacheFresh(directory).catch(() => false).finally(() => sourceChecks.delete(key));
+    sourceChecks.set(key, check);
+  }
+  return check;
+}
+
+/**
  * Fire the shared at-most-once background repair for the strongest read-path
  * staleness signal, if any. Fires only when a repair builder is registered (the
  * MCP server); a no-op otherwise, so CLI/tests keep today's detection-only
- * behavior. Never throws, never blocks the read.
+ * behavior. Never throws, never blocks on the rebuild.
+ *
+ * Age alone does not make an index stale; a change to the source it describes does. So an
+ * aged analysis is first compared with the source by its content fingerprint (what
+ * `analyze` itself uses to skip an unchanged tree). When the source is unchanged, the index
+ * is current: nothing is rebuilt and no answer is disclosed as served from a stale index.
+ * Before this check, every index older than 24 hours was reported stale and force-rebuilt,
+ * however long the code had been unchanged, and agents that read "Served from a stale index"
+ * fell back to grep. The check runs only where a repair could follow it.
  */
-function maybeTriggerBackgroundRepair(
+async function maybeTriggerBackgroundRepair(
   directory: string,
+  analysisDir: string,
   integrityVerdict: string | undefined,
   schemaFault: boolean,
   staleCount: number,
   artifactMtimeMs: number,
-): void {
-  const reason = computeRepairReason(integrityVerdict, schemaFault, staleCount, artifactMtimeMs);
-  if (!reason) return;
+): Promise<void> {
   try {
+    const verification = await readSourceVerification(analysisDir, artifactMtimeMs);
+    const ageBase = verification?.current ? Math.max(artifactMtimeMs, verification.verifiedAtMs) : artifactMtimeMs;
+    const reason = computeRepairReason(integrityVerdict, schemaFault, staleCount, ageBase);
+    if (!reason) return;
+    // A recorded "source changed" for this analysis goes straight to repair, without re-hashing.
+    if (reason === 'analysis-age' && verification?.current !== false && canRepairInBackground()) {
+      const current = await checkSourceUnchanged(directory, artifactMtimeMs);
+      await recordVerifiedCurrent(analysisDir, artifactMtimeMs, current);
+      if (current) return;
+    }
     repairInBackground(directory, reason);
   } catch {
     // repairInBackground is fail-soft by contract; this guard is belt-and-braces
@@ -466,6 +534,21 @@ export async function diagnoseIndexUnservable(directory: string): Promise<NotRea
   const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
   const contextPath = join(analysisDir, ARTIFACT_LLM_CONTEXT);
 
+  // Detection-without-repair closure (change: self-heal-unservable-artifact). An artifact
+  // that is PRESENT but unservable — a corrupt llm-context, or a lost/refused generation
+  // publish (e.g. a version upgrade bumped the generation manifest version) — is disclosed
+  // on every call but never reached the read-path self-heal, because that trigger lives at
+  // the TAIL of readCachedContext's success path and every early `return null` bypasses it.
+  // Kick the shared at-most-once background rebuild for the PERSISTENT verdicts here; the
+  // transient ones (a publish in progress) self-resolve and must NOT be rebuilt over.
+  const PERSISTENT_UNSERVABLE = new Set(['index-unreadable', 'index-generation-unavailable', 'index-generation-mismatch']);
+  const heal = (r: NotReadyResult): NotReadyResult => {
+    if (r.reason && PERSISTENT_UNSERVABLE.has(r.reason)) {
+      try { repairInBackground(directory, 'artifact-unservable'); } catch { /* fail-soft: never perturb the diagnosis */ }
+    }
+    return r;
+  };
+
   try {
     // `lstat`, not `stat`. The production reader opens `O_NOFOLLOW` and verifies the
     // descriptor against the path entry, so it refuses a SYMLINK outright
@@ -477,11 +560,11 @@ export async function diagnoseIndexUnservable(directory: string): Promise<NotRea
     // the reader's `O_NONBLOCK` does not arise here.)
     const entry = await lstat(contextPath);
     if (!entry.isFile()) {
-      return notReadyResult(
+      return heal(notReadyResult(
         `The analysis artifact at ${ARTIFACT_LLM_CONTEXT} is not a regular file `
         + `(it is a ${describeEntryKind(entry)}) and was refused. Run analyze to rebuild it.`,
         'index-unreadable',
-      );
+      ));
     }
   } catch {
     return notReadyResult('No analysis found. Run analyze_codebase first.', 'index-absent');
@@ -505,7 +588,7 @@ export async function diagnoseIndexUnservable(directory: string): Promise<NotRea
 
   const manifest = await readCurrentGeneration(analysisDir, [...REQUIRED_ANALYSIS_ARTIFACTS]);
   if (!manifest) {
-    return notReadyResult(
+    return heal(notReadyResult(
       // Deliberately NOT "missing": an absent manifest is a legitimate legacy analysis and is
       // synthesized, so it never reaches here. Nor "in progress": the sentinel is answered
       // above. Reaching here means the manifest is PRESENT, is not the sentinel, and was
@@ -516,7 +599,7 @@ export async function diagnoseIndexUnservable(directory: string): Promise<NotRea
       + 'separately), so the artifacts cannot be vouched for and are not served. Re-run '
       + 'analyze to republish.',
       'index-generation-unavailable',
-    );
+    ));
   }
 
   if (!await artifactMatchesGeneration(analysisDir, manifest, ARTIFACT_LLM_CONTEXT)) {
@@ -535,21 +618,57 @@ export async function diagnoseIndexUnservable(directory: string): Promise<NotRea
         'retry shortly',
       );
     }
-    return notReadyResult(
+    return heal(notReadyResult(
       'An analysis exists but does NOT match its published generation '
       + `(${manifest.generationId}): the artifacts were rewritten and the manifest was not `
       + 'republished, so serving them would serve unverified bytes. No writer holds the '
       + 'analysis lock, so this is not an ordinary mid-write window — a publish was lost. '
       + 'Re-run analyze to republish, and a recurrence without a crash is worth reporting.',
       'index-generation-mismatch',
-    );
+    ));
   }
 
-  return notReadyResult(
+  return heal(notReadyResult(
     'An analysis exists and matches its generation, but could not be read into a usable '
     + 'context. Re-run analyze; if it recurs, the artifact is likely malformed.',
     'index-unreadable',
-  );
+  ));
+}
+
+/**
+ * The not-ready reasons that mean an index EXISTS and its bytes cannot be vouched for.
+ *
+ * `index-absent` and `graph-unavailable` are deliberately absent: a repository with no analysis
+ * yet, or one whose graph index a version upgrade reset, is a legitimate state that the
+ * first-run partial-serving lane answers. So is `index-unreadable`: that context MATCHES its
+ * published generation — its bytes are attested — and merely could not be read into a graph
+ * context. Retrieval does not need that context (it ranks from the vector index), and refusing on
+ * it pre-empted the staleness disclosure and the background repair that answer exactly that
+ * state. These three name bytes that are unverified or mid-rewrite.
+ */
+const UNATTESTED_INDEX_REASONS: ReadonlySet<NotReadyReason> = new Set<NotReadyReason>([
+  'index-publish-in-progress',
+  'index-generation-unavailable',
+  'index-generation-mismatch',
+]);
+
+/**
+ * Refuse to serve from an index that cannot be vouched for — the SAME refusal `get_subgraph`,
+ * `blast_radius`, `select_tests` and `find_dead_code` already emit, shared rather than
+ * reinvented (change: fix-retrieval-coverage-over-unread-content).
+ *
+ * `search_code` and `orient` read the vector index, which survives a corrupt or unattested
+ * `llm-context.json`, so they went on answering `verdict: "covered"` with
+ * `provenance: "source-derived"` over artifacts four other tools were refusing one module away.
+ * Two tools' worth of honesty existed already; this is that honesty, not a second mechanism.
+ *
+ * Returns `null` — carry on — for an absent index or an unavailable graph, so first-run partial
+ * serving is untouched. Called ONLY when the context read already returned null, so the ordinary
+ * path pays nothing for it.
+ */
+export async function refuseUnattestedIndex(directory: string): Promise<NotReadyResult | null> {
+  const verdict = await diagnoseIndexUnservable(directory);
+  return UNATTESTED_INDEX_REASONS.has(verdict.reason) ? verdict : null;
 }
 
 /** Name the entry kind a refused artifact actually is, without guessing beyond what stat saw. */
@@ -786,6 +905,16 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
             ? ctx.callGraph.nodes.filter(n => !n.isExternal && !n.isTest).length
             : 0;
           if (es.countNodes() === 0 && jsonProdNodes > 0) {
+            // A store that opens cleanly but holds zero nodes while the JSON graph still
+            // has production nodes is the signature of a version-upgrade schema RESET:
+            // EdgeStore empties itself on a schema change (see the SCHEMA_VERSION reset
+            // above), so the two end up out of sync. This is just as repair-worthy as the
+            // `notReady` schema MISMATCH branch — flag it so maybeTriggerBackgroundRepair
+            // below heals it in the background. Without this, the empty graph was detected
+            // and disclosed ("run analyze_codebase") but NEVER self-healed, so `orient`
+            // degraded to search-only on every turn until a manual analyze — and agents
+            // fell back to grepping (change: self-heal-empty-graph-index).
+            schemaFault = true;
             es.close();
           } else {
             ctx.edgeStore = es;
@@ -810,7 +939,7 @@ export async function readCachedContext(directory: string, timeout?: number): Pr
       // finally closes the loop into repair (change: make-index-self-healing). The
       // rebuild never blocks this read; the answer is served now and disclosed as
       // stale-with-refresh-started (see repairStatusFor callers).
-      maybeTriggerBackgroundRepair(directory, ctx.integrity?.verdict, schemaFault, staleCount, mtime);
+      await maybeTriggerBackgroundRepair(directory, analysisDir, ctx.integrity?.verdict, schemaFault, staleCount, mtime);
       // Evict + close the previous entry's EdgeStore — otherwise each cache miss
       // (every `analyze` rewrites llm-context.json's mtime) leaks an open SQLite
       // connection + its WAL fd for the life of a long-lived daemon. The close is
@@ -1007,9 +1136,10 @@ export async function walkFingerprintCorpus(
   canonicalRoot: string,
   limits: FingerprintLimits = {},
 ): Promise<Awaited<ReturnType<FileWalker['walk']>>> {
-  const configured = limits.configuration as { includePatterns?: string[]; excludePatterns?: string[]; protectedExcludePatterns?: string[]; maxFiles?: number } | undefined;
+  const configured = limits.configuration as { includePatterns?: string[]; excludePatterns?: string[]; protectedExcludePatterns?: string[]; maxFiles?: number; indexPolicies?:import('../../configuration/types.js').FilePolicies } | undefined;
   const maxFiles = limits.maxFiles ?? configured?.maxFiles ?? DEFAULT_FINGERPRINT_MAX_FILES;
   return new FileWalker(canonicalRoot, {
+    filePolicies: configured?.indexPolicies,
     maxFiles,
     includePatterns: limits.includePatterns ?? configured?.includePatterns ?? [],
     excludePatterns: limits.excludePatterns ?? configured?.excludePatterns ?? [],
@@ -1110,12 +1240,19 @@ export async function isAnalysisCacheFresh(directory: string, analysisDir: strin
  */
 export async function isCacheFresh(directory: string): Promise<boolean> {
   const config = await import('../config-manager.js').then(module => module.readOpenLoreConfig(directory));
-  const configuration = {
-    includePatterns: [...new Set(config?.analysis?.includePatterns ?? [])],
-    excludePatterns: [...new Set(config?.analysis?.excludePatterns ?? [])],
-    maxFiles: DEFAULT_MAX_FILES,
-  };
-  return isAnalysisCacheFresh(directory, join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), configuration);
+  // The same fingerprint input `analyze` records (src/api/analyze.ts): anything else hashes a
+  // different configuration and can never match, so an unchanged tree would read as changed.
+  const { analysisConfigFingerprintInput, analysisGeneratedExcludes } = await import('../../analyzer/analysis-core.js');
+  const analysisDir = join(directory, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  const configuration = analysisConfigFingerprintInput(
+    config?.analysis,
+    [],
+    [],
+    DEFAULT_MAX_FILES,
+    analysisGeneratedExcludes(directory, analysisDir, config?.openspecPath),
+    config?.filePolicies,
+  );
+  return isAnalysisCacheFresh(directory, analysisDir, configuration);
 }
 
 // ============================================================================
@@ -1140,19 +1277,37 @@ export interface MappingIndex {
 
 /**
  * Build the bidirectional index for one parsed `mapping.json`, or null when the
- * artifact is not the shape this reads.
+ * artifact is not a shape this reads.
  *
- * Untrusted artifact: the top-level shape is validated before use. A malformed
- * mapping (non-object, or no `mappings` array) fails closed.
+ * Two shapes: the current spec link index (`links`, written by `openlore mapping refresh` and
+ * `generate`) and the legacy `mappings`. In the current shape only `functions` — uniquely
+ * resolved anchors — are function coverage; a file-only anchor (`footprintFiles`) says the file
+ * belongs to the requirement, so it maps file → requirement for domain lookups but adds no
+ * function. Untrusted artifact: rows that are not that shape are skipped, and a file with neither
+ * array fails closed.
  */
 function buildMappingIndex(parsed: unknown): MappingIndex | null {
-  if (parsed === null || typeof parsed !== 'object' || !Array.isArray((parsed as { mappings?: unknown }).mappings)) {
+  if (parsed === null || typeof parsed !== 'object') return null;
+  const raw = parsed as { links?: unknown; mappings?: unknown };
+  let entries: MappingEntry[];
+  let footprint: Array<{ entry: MappingEntry; files: string[] }> = [];
+  if (Array.isArray(raw.links)) {
+    ({ entries, footprint } = entriesFromLinks(raw.links));
+  } else if (Array.isArray(raw.mappings)) {
+    entries = raw.mappings as MappingEntry[];
+  } else {
     return null;
   }
-  const entries = (parsed as { mappings: MappingEntry[] }).mappings ?? [];
 
   const byFile = new Map<string, MappingEntry[]>();
   const byDomain = new Map<string, MappingEntry[]>();
+  const addFile = (file: string, entry: MappingEntry) => {
+    if (!file || file === '*') return;
+    const fileList = byFile.get(file) ?? [];
+    // avoid duplicates (same requirement may appear multiple times per file)
+    if (!fileList.includes(entry)) fileList.push(entry);
+    byFile.set(file, fileList);
+  };
 
   for (const entry of entries) {
     // index by domain
@@ -1161,16 +1316,38 @@ function buildMappingIndex(parsed: unknown): MappingIndex | null {
     byDomain.set(entry.domain, domainList);
 
     // index by each referenced file
-    for (const fn of entry.functions) {
-      if (!fn.file || fn.file === '*') continue;
-      const fileList = byFile.get(fn.file) ?? [];
-      // avoid duplicates (same requirement may appear multiple times per file)
-      if (!fileList.includes(entry)) fileList.push(entry);
-      byFile.set(fn.file, fileList);
-    }
+    for (const fn of entry.functions) addFile(fn.file, entry);
   }
+  for (const { entry, files } of footprint) for (const file of files) addFile(file, entry);
 
   return { byFile, byDomain, entries };
+}
+
+/** Rows of the current spec link index as mapping entries, plus each row's file-only anchors. */
+function entriesFromLinks(links: unknown[]): { entries: MappingEntry[]; footprint: Array<{ entry: MappingEntry; files: string[] }> } {
+  const entries: MappingEntry[] = [];
+  const footprint: Array<{ entry: MappingEntry; files: string[] }> = [];
+  const text = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+  for (const row of links) {
+    if (row === null || typeof row !== 'object') continue;
+    const r = row as Record<string, unknown>;
+    if (!text(r.domain) || !text(r.requirement)) continue;
+    const functions = (Array.isArray(r.functions) ? r.functions : [])
+      .filter((f): f is Record<string, unknown> => f !== null && typeof f === 'object' && text((f as Record<string, unknown>).name) && text((f as Record<string, unknown>).file))
+      .map(f => ({
+        name: f.name as string,
+        file: f.file as string,
+        line: typeof f.line === 'number' ? f.line : 0,
+        kind: typeof f.kind === 'string' ? f.kind : 'function',
+        // Every linked function is an exactly, uniquely resolved anchor.
+        confidence: 'exact',
+      }));
+    const entry: MappingEntry = { requirement: r.requirement, service: '', domain: r.domain, specFile: text(r.specFile) ? r.specFile : '', functions };
+    entries.push(entry);
+    const files = (Array.isArray(r.footprintFiles) ? r.footprintFiles : []).filter(text);
+    if (files.length) footprint.push({ entry, files });
+  }
+  return { entries, footprint };
 }
 
 /**

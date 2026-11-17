@@ -94,8 +94,9 @@ export interface CitedSourceFiles {
 
 /**
  * Resolve one file's dual-baseline verdict. A recorded content hash is
- * authoritative. Full analysis does not populate file_hashes on every path, so
- * an absent hash falls back to source-vs-artifact mtime. Unknown inputs fail safe.
+ * authoritative. An index with no recorded hash for a file (built before full
+ * analysis recorded them, or imported) falls back to source-vs-artifact mtime.
+ * Unknown inputs fail safe.
  */
 export function resolveFileFreshness(params: {
   baselineFileHash: string | null;

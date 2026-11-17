@@ -33,12 +33,14 @@ vi.mock('../../utils/logger.js', () => ({
 }));
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Command, Option } from 'commander';
 import { decisionsCommand } from './decisions.js';
 import { loadDecisionStore, saveDecisionStore } from '../../core/decisions/store.js';
+import { readLedger } from '../../core/decisions/ledger.js';
 import { logger } from '../../utils/logger.js';
 
 // Commander keeps option values between parseAsync() calls on one instance.
@@ -157,6 +159,77 @@ describe('openlore decisions record', () => {
 
     expect(jsonOut()).toMatchObject({ alreadyDecided: true, status: 'rejected' });
     expect((await loadDecisionStore(dir)).decisions).toHaveLength(1);
+  });
+
+  // change: default-decision-autopilot-with-visible-trace
+  describe('under decision autopilot (initialized repository, no gate, no API key)', () => {
+    // Auto-init writes `governance.autopilot: true` into the config it creates.
+    const writeConfig = async (governance: { autopilot?: boolean } = { autopilot: true }) => {
+      await mkdir(join(dir, '.openlore'), { recursive: true });
+      await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({
+        version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+        analysis: { maxFiles: 1000, includePatterns: [], excludePatterns: [] },
+        generation: { model: 'claude-sonnet-4-6', domains: 'auto' },
+        createdAt: '2026-10-31T00:00:00Z', lastRun: null,
+        ...(governance ? { governance } : {}),
+      }));
+    };
+    const spawnedJobs = () => vi.mocked(spawn).mock.calls.map(([, args]) => (args as string[]).at(-1));
+
+    beforeEach(() => {
+      vi.mocked(spawn).mockClear();
+    });
+
+    it('accepts a recorded decision at once, trails actor agent, and syncs in background', async () => {
+      await writeConfig();
+      await writeFile(join(dir, 'cache.ts'), 'export const cache = 1;\n');
+      await run('--title', 'Cache specs in memory', '--rationale', 'Avoid rereading spec files', '--files', 'cache.ts', '--json');
+
+      const result = jsonOut();
+      expect(result).toMatchObject({ status: 'auto-approved', reason: 'auto-accepted-on-record', reviewWith: 'openlore decisions review' });
+      const [decision] = (await loadDecisionStore(dir)).decisions;
+      expect(decision).toMatchObject({ id: result.id, status: 'auto-approved', approvedBy: 'autopilot' });
+      expect(decision.humanReviewedAt).toBeUndefined();
+      const ledger = await readLedger(dir);
+      expect(ledger).toEqual([expect.objectContaining({ id: result.id, from: null, to: 'auto-approved', actor: 'agent' })]);
+      expect(spawnedJobs()).toEqual(['--background-sync']);
+    });
+
+    it('holds a decision whose anchored file does not exist as a draft, with the reason', async () => {
+      await writeConfig();
+      await run('--title', 'Cache specs in memory', '--rationale', 'Why', '--files', 'missing.ts', '--json');
+      const result = jsonOut();
+      expect(result).toMatchObject({ status: 'draft', autopilot: { heldBack: 'anchored file not found: missing.ts' } });
+      expect((await loadDecisionStore(dir)).decisions[0].status).toBe('draft');
+    });
+
+    it('holds a decision that supersedes a decision which is not live', async () => {
+      await writeConfig();
+      await run('--title', 'Cache specs in memory', '--rationale', 'Why', '--supersedes', 'a1b2c3d4', '--json');
+      expect(jsonOut()).toMatchObject({ status: 'draft', autopilot: { heldBack: expect.stringContaining('a1b2c3d4 is not live') } });
+    });
+
+    it('never re-accepts a decision a human rejected', async () => {
+      await writeConfig();
+      await run('--title', 'Use UUIDs', '--rationale', 'Collision-free ids', '--json');
+      const store = await loadDecisionStore(dir);
+      await saveDecisionStore(dir, {
+        ...store,
+        decisions: store.decisions.map((d) => ({ ...d, status: 'rejected' as const, humanReviewedAt: '2026-10-31T00:00:00Z' })),
+      });
+      stdout = [];
+      resetCommanderState(decisionsCommand);
+      await run('--title', 'Use UUIDs', '--rationale', 'Collision-free ids', '--json');
+      expect((await loadDecisionStore(dir)).decisions.map((d) => d.status)).toEqual(['rejected']);
+      expect(jsonOut().status).toBe('rejected');
+    });
+
+    it('records a plain draft when governance.autopilot is false', async () => {
+      await writeConfig({ autopilot: false });
+      await run('--title', 'Use UUIDs', '--rationale', 'Collision-free ids', '--json');
+      expect(jsonOut()).toMatchObject({ status: 'draft', reason: 'awaiting-consolidation' });
+      expect(spawnedJobs()).toEqual(['--consolidate']);
+    });
   });
 
   it('never points users at the non-existent `decisions --record` option', async () => {

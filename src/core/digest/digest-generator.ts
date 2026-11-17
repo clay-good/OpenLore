@@ -3,7 +3,8 @@
  * summary for human review.  Source spec files are never modified.
  */
 
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
+import { readSpecFolderNames } from '../spec-sources/openspec.js';
 import { join, resolve } from 'node:path';
 import { OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR } from '../../constants.js';
 import { isConfinedPath } from '../../utils/path-confinement.js';
@@ -168,7 +169,7 @@ export async function generateDigest(opts: {
 
   let entries: string[];
   try {
-    entries = await readdir(specsDir);
+    entries = await readSpecFolderNames(specsDir);
   } catch {
     throw new Error(`No specs directory found at ${specsDir}. Run "openlore generate" first.`);
   }

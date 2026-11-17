@@ -1,7 +1,8 @@
 /**
  * `openlore check-edit` reads the latest watcher-produced per-edit verdict.
- * Hook mode is deliberately read-only: it may wait briefly for the watcher's
- * debounced atomic write, but it never parses code or invokes a fallback analysis.
+ * Hook mode reads the verdict: it may wait briefly for the watcher's debounced atomic write, but
+ * it never parses code or invokes a fallback analysis. Its one write is the edited file's path and
+ * time in the session ledger's agent-edit log.
  */
 
 import { Command } from 'commander';
@@ -18,6 +19,7 @@ import {
   type EditVerdictRead,
   type EditVerdictStoreBoundary,
 } from '../../core/services/edit-verdict.js';
+import { recordAgentEdit } from '../../core/services/session-ledger.js';
 
 const HOOK_POLL_MS = 1_200;
 const HOOK_POLL_INTERVAL_MS = 50;
@@ -141,6 +143,9 @@ export async function runCheckEditCli(opts: CheckEditCliOptions): Promise<number
         return 0;
       }
     }
+    // The one write hook mode makes: the agent's own edit, by path and time, so the session ledger
+    // tells it apart from another process's edit (change: add-session-structural-ledger).
+    if (opts.hook && requestedFile) recordAgentEdit(cwd, requestedFile);
     const files = requestedFile ? [requestedFile] : undefined;
     const result = opts.hook
       ? await readWithBoundedPoll(

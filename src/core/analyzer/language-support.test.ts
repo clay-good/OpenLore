@@ -19,6 +19,8 @@ import {
 } from './language-support.js';
 import { cfgSupportsLanguage, CFG_LANGUAGES } from './cfg.js';
 import { isIacLanguage, IAC_LANGUAGES } from './iac/types.js';
+import { isContractLanguage, CONTRACT_LANGUAGES } from './contract/types.js';
+import { IAC_CODE_BINDING_LANGUAGES } from './iac/deploy-binding.js';
 import { CALLGRAPH_LANGUAGES, CallGraphBuilder, serializeCallGraph, extractFileStyle } from './call-graph.js';
 import { TYPE_INFERENCE_LANGUAGES as TI, inferTypesFromSource } from './type-inference-engine.js';
 import { SIGNATURE_LANGUAGES as SIG, extractSignatures, detectLanguage as detectLanguageReexport } from './signature-extractor.js';
@@ -460,6 +462,70 @@ describe('completeness + fail-soft + determinism', () => {
     }
   });
 
+  it('iacCodeBinding cell === IAC_CODE_BINDING_LANGUAGES.has(lang) for EVERY language (exact, drift-proof)', () => {
+    for (const lang of ALL_LANGUAGES) {
+      const claims = languageSupport(lang).capabilities.includes('iacCodeBinding');
+      expect(claims, `iacCodeBinding mismatch for ${lang}`).toBe(IAC_CODE_BINDING_LANGUAGES.has(lang));
+    }
+  });
+
+  // Behavioral, not tautological: every claimed ecosystem must produce a resource that actually
+  // CARRIES a `deploys` binding from its own fixture. Adding a name to the set without an
+  // extractor that populates `deploys` fails here, which is the whole point of the claim.
+  it('every iacCodeBinding ecosystem emits a resource carrying a deploys binding', async () => {
+    const fixtures: Record<string, Array<{ path: string; content: string; language: string }>> = {
+      Terraform: [{
+        path: 'main.tf', language: 'Terraform',
+        content: 'resource "aws_lambda_function" "orders" {\n  handler = "src/orders.handler"\n  runtime = "nodejs20.x"\n}\n',
+      }],
+      CloudFormation: [{
+        path: 'template.yaml', language: 'CloudFormation',
+        content: 'Resources:\n  Fn:\n    Type: AWS::Serverless::Function\n    Properties:\n      Handler: src/orders.handler\n      CodeUri: .\n      Runtime: nodejs20.x\n',
+      }],
+      Serverless: [{
+        path: 'serverless.yml', language: 'Serverless',
+        content: 'service: orders\nprovider:\n  name: aws\n  runtime: nodejs20.x\nfunctions:\n  createOrder:\n    handler: src/orders.create\n',
+      }],
+    };
+    for (const lang of IAC_CODE_BINDING_LANGUAGES) {
+      expect(fixtures[lang], `no fixture wired for IAC_CODE_BINDING_LANGUAGES member ${lang}`).toBeDefined();
+    }
+    const { buildIacGraph } = await import('./iac/index.js');
+    for (const lang of IAC_CODE_BINDING_LANGUAGES) {
+      const graph = buildIacGraph(fixtures[lang]);
+      const bound = graph.resources.filter(r => r.language === lang && r.deploys?.handler);
+      expect(bound.length, `${lang} claims iacCodeBinding but no resource carried a deploys handler`).toBeGreaterThan(0);
+    }
+  });
+
+  it('contractSchemas cell === isContractLanguage(lang) for EVERY language (exact, drift-proof)', () => {
+    for (const lang of ALL_LANGUAGES) {
+      const claims = languageSupport(lang).capabilities.includes('contractSchemas');
+      expect(claims, `contractSchemas mismatch for ${lang}`).toBe(isContractLanguage(lang));
+    }
+  });
+
+  // Behavioral, not tautological: run the REAL builder over a specification per contract format
+  // and require every CONTRACT_LANGUAGES member to be emitted as a node language. A format tag
+  // with no reader behind it can therefore not silently claim contractSchemas.
+  it('the real builder emits a node for every CONTRACT_LANGUAGES tag', async () => {
+    const specs: Record<string, string> = {
+      OpenAPI: `openapi: 3.0.0\ninfo: { title: t, version: '1' }\npaths:\n  /ping:\n    get:\n      responses: { '200': { description: ok } }\n`,
+      Protobuf: `syntax = "proto3";\npackage p;\nmessage Ping {}\nservice S { rpc Do(Ping) returns (Ping); }\n`,
+      GraphQL: `type Ping { ok: Boolean }\ntype Query { ping: Ping }\n`,
+    };
+    const ext: Record<string, string> = { OpenAPI: 'yaml', Protobuf: 'proto', GraphQL: 'graphql' };
+    for (const lang of CONTRACT_LANGUAGES) {
+      expect(specs[lang], `no specification fixture wired for CONTRACT_LANGUAGES member ${lang}`).toBeDefined();
+    }
+    const contractFiles = Object.entries(specs).map(([lang, content]) => ({ path: `${lang.toLowerCase()}.${ext[lang]}`, content }));
+    const graph = serializeCallGraph(await new CallGraphBuilder({ contractFiles }).build([]));
+    const emitted = new Set(graph.nodes.filter(n => !n.isExternal && n.language).map(n => n.language));
+    for (const lang of CONTRACT_LANGUAGES) {
+      expect(emitted.has(lang), `${lang} claims contractSchemas but no reader emitted a node for it`).toBe(true);
+    }
+  }, 30_000);
+
   it('every IaC ecosystem tag backs iacProjection (and nothing it does not)', () => {
     for (const lang of IAC_LANGUAGES) {
       expect(languageSupport(lang).capabilities, `${lang} should back iacProjection`).toContain('iacProjection');
@@ -496,6 +562,7 @@ describe('completeness + fail-soft + determinism', () => {
       'Docker Compose': [{ path: 'docker-compose.yml', content: compose, language: 'Docker Compose' }],
       'GitHub Actions': [{ path: '.github/workflows/ci.yml', content: workflow, language: 'GitHub Actions' }],
       Bicep: [fx('bicep/main.bicep', 'Bicep')],
+      Serverless: [fx('serverless/serverless.yml', 'Serverless')],
     };
 
     it('every IAC_LANGUAGES member has a fixture contributor wired (guard cannot rot)', () => {

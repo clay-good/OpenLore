@@ -2,6 +2,6 @@
   "name": "openlore-benchmark-container",
   "private": true,
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.250"
+    "@anthropic-ai/claude-code": "2.1.251"
   }
 }

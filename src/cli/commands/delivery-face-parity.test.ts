@@ -8,6 +8,7 @@ import { COMMAND_GROUPS } from '../help-groups.js';
 
 type Pair = {
   tool: string;
+  sharedApi?:string;
   command: string;
   commandExport: string;
   cliFile: string;
@@ -17,6 +18,7 @@ type Pair = {
 };
 
 const PAIRS: readonly Pair[] = [
+  {tool:'configure_openlore',command:'configure',commandExport:'configureCommand',cliFile:'configure.ts',sharedApi:'configureOpenLore',commonInputs:['directory','action'],mcpOnlyInputs:['scope','candidate','plan'],cliOnlyInputs:['candidateFile','planFile','apply','replaceChoices']},
   { tool: 'orient', command: 'orient', commandExport: 'orientCommand', cliFile: 'orient.ts', commonInputs: ['directory', 'task', 'limit', 'tokenBudget', 'lean'], mcpOnlyInputs: ['rankBy'] },
   { tool: 'search_code', command: 'search', commandExport: 'searchCommand', cliFile: 'search.ts', commonInputs: ['directory', 'query', 'limit', 'language', 'minFanIn', 'tokenBudget'], mcpOnlyInputs: ['mode', 'questionKind'] },
   { tool: 'search_specs', command: 'search', commandExport: 'searchCommand', cliFile: 'search.ts', commonInputs: ['directory', 'query', 'limit', 'domain', 'section'] },
@@ -26,6 +28,8 @@ const PAIRS: readonly Pair[] = [
   { tool: 'report_coverage_gaps', command: 'coverage-gaps', commandExport: 'coverageGapsCommand', cliFile: 'coverage-gaps.ts', commonInputs: ['directory', 'maxResults', 'filePattern', 'changedSymbols', 'diffRef'], mcpOnlyInputs: ['directResolvedOnly'] },
   { tool: 'certify_public_surface', command: 'certify-public-surface', commandExport: 'certifyPublicSurfaceCommand', cliFile: 'certify-public-surface.ts', commonInputs: ['directory', 'baseRef', 'maxResults', 'federation', 'federationRepos'], cliOnlyInputs: ['allowBaseFallback', 'accept', 'justification', 'decision'] },
   { tool: 'get_style_fingerprint', command: 'style-fingerprint', commandExport: 'styleFingerprintCommand', cliFile: 'style-fingerprint.ts', commonInputs: ['directory', 'communityId', 'filePath', 'language'] },
+  { tool: 'certify_service_contract', command: 'certify-service-contract', commandExport: 'certifyServiceContractCommand', cliFile: 'certify-service-contract.ts', commonInputs: ['directory', 'baseRef', 'maxResults', 'allowBaseFallback', 'federation', 'federationRepos'] },
+  { tool: 'get_handoff_briefing', command: 'handoff', commandExport: 'handoffCommand', cliFile: 'handoff.ts', commonInputs: ['directory', 'tokenBudget'] },
   { tool: 'briefing_since', command: 'briefing-since', commandExport: 'briefingSinceCommand', cliFile: 'briefing-since.ts', commonInputs: ['directory', 'baseRef', 'filePattern', 'maxResults'] },
   { tool: 'find_clones', command: 'find-clones', commandExport: 'findClonesCommand', cliFile: 'find-clones.ts', commonInputs: ['directory', 'symbol', 'snippet', 'minSimilarity', 'maxResults'] },
   { tool: 'analyze_error_propagation', command: 'error-propagation', commandExport: 'errorPropagationCommand', cliFile: 'error-propagation.ts', commonInputs: ['directory', 'symbol', 'maxDepth'] },
@@ -52,19 +56,19 @@ const MCP_ONLY_REASON_GROUPS: ReadonlyArray<{ reason: string; tools: readonly st
       'audit_spec_coverage', 'generate_tests', 'get_test_coverage',
       'get_minimal_context', 'get_cluster', 'get_landmarks', 'get_map', 'find_path',
       'detect_changes', 'get_health_map', 'get_surprising_connections',
-      'get_language_support',
+      'get_language_support', 'verify_change', 'certify_provenance',
     ],
   },
   {
     reason: 'The CLI exposes a broader lifecycle workflow rather than this MCP operation as a one-to-one conclusion.',
     tools: [
       'record_decision', 'list_decisions', 'approve_decision', 'reject_decision',
-      'sync_decisions', 'remember', 'recall', 'verify_claim',
+      'sync_decisions', 'remember', 'recall', 'verify_claim', 'declare_footprint',
     ],
   },
   {
     reason: 'This interactive coordination or federation conclusion has no CLI command with the same request and response contract.',
-    tools: ['federation_status', 'plan_parallel_work', 'map_in_flight_conflicts'],
+    tools: ['federation_status', 'plan_parallel_work', 'map_in_flight_conflicts', 'certify_merge', 'fleet_status'],
   },
 ];
 
@@ -87,11 +91,11 @@ const read = (relative: string): string => readFileSync(join(import.meta.dirname
 
 function paritySourceErrors(pair: Pair, cliSource: string): string[] {
   const errors: string[] = [];
-  if (!cliSource.includes(`dispatchTool('${pair.tool}'`) && !cliSource.includes(`dispatchTool("${pair.tool}"`)) {
+  if (!(pair.sharedApi ? cliSource.includes(`await ${pair.sharedApi}(`) : cliSource.includes(`dispatchTool('${pair.tool}'`) || cliSource.includes(`dispatchTool("${pair.tool}"`))) {
     errors.push('CLI does not dispatch the paired MCP tool');
   }
   if (!cliSource.includes(".option('--json")) errors.push('CLI has no JSON conclusion path');
-  if (!/JSON\.stringify\((?:result|report)/.test(cliSource)) {
+  if (!/(?:JSON\.stringify|jsonOutput)\((?:result|report)/.test(cliSource)) {
     errors.push('CLI JSON path does not serialize the dispatched conclusion directly');
   }
   return errors;
@@ -129,7 +133,7 @@ describe('CLI/MCP conclusion delivery parity', () => {
   });
 
   it('rejects wrong dispatch and rewritten output', () => {
-    const pair = PAIRS[0];
+    const pair = PAIRS.find(p => p.tool === 'orient')!;
     expect(paritySourceErrors(pair, "command.option('--json'); const result = await dispatchTool('search_code', {}); console.log(JSON.stringify(result))"))
       .toContain('CLI does not dispatch the paired MCP tool');
     expect(paritySourceErrors(pair, "command.option('--json'); const result = await dispatchTool('orient', {}); console.log(JSON.stringify({ data: result }))"))

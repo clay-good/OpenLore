@@ -48,9 +48,26 @@ export interface CoupledFile {
 export interface ChangeCouplingResult {
   /** file → number of (non-bulk) commits that touched it. */
   churn: Map<string, number>;
-  /** file → its most-coupled files (above thresholds, capped, sorted). */
+  /**
+   * file → its most-coupled files (above thresholds, capped, sorted). EMPTY when the
+   * caller opted out of the co-occurrence pass (`includeCoupling: false`); the empty map
+   * then means "not computed", which `stats.couplingComputed` states explicitly so an
+   * opt-out can never be read as "this repository has no coupling".
+   */
   coupling: Map<string, CoupledFile[]>;
-  stats: { commitsScanned: number; bulkCommitsFiltered: number; filesTracked: number };
+  stats: {
+    commitsScanned: number;
+    bulkCommitsFiltered: number;
+    filesTracked: number;
+    /** Whether the co-occurrence pass ran. False → `coupling` is empty by request, not by evidence. */
+    couplingComputed: boolean;
+    /**
+     * Co-occurrence pair increments performed — an OPERATION COUNT, not a timing. 0 whenever
+     * the pass was skipped, so a consumer (or a test) can assert the cheap path deterministically
+     * on a loaded machine.
+     */
+    coPairsCounted: number;
+  };
 }
 
 /** Per-file change-coupling record as persisted/queried (spec-22). */
@@ -73,6 +90,16 @@ export interface ChangeCouplingOptions {
    * from HEAD, byte-identical to the pre-change behavior.
    */
   startRef?: string;
+  /**
+   * Compute the O(files²)-per-commit co-occurrence map (and the per-file coupling lists
+   * derived from it). Default `true` — byte-identical to the pre-change result.
+   *
+   * A consumer that reads only `churn` passes `false`: the quadratic accumulation and the
+   * pair build are skipped entirely, `coupling` comes back empty, and
+   * `stats.couplingComputed: false` discloses that the emptiness is an opt-out rather than
+   * an absence of co-change. `briefing_since` reads churn alone, so it opts out.
+   */
+  includeCoupling?: boolean;
 }
 
 /** Map a churn count to a volatility level (absolute thresholds over the window). */
@@ -98,7 +125,10 @@ export async function analyzeChangeCoupling(
 ): Promise<ChangeCouplingResult> {
   const empty: ChangeCouplingResult = {
     churn: new Map(), coupling: new Map(),
-    stats: { commitsScanned: 0, bulkCommitsFiltered: 0, filesTracked: 0 },
+    stats: {
+      commitsScanned: 0, bulkCommitsFiltered: 0, filesTracked: 0,
+      couplingComputed: opts.includeCoupling ?? true, coPairsCounted: 0,
+    },
   };
   if (!(await isGitRepository(rootPath))) return empty;
 
@@ -107,6 +137,8 @@ export async function analyzeChangeCoupling(
   const minSupport = opts.minSupport ?? COUPLING_MIN_SUPPORT;
   const minConfidence = opts.minConfidence ?? COUPLING_MIN_CONFIDENCE;
   const topPairs = opts.topPairs ?? COUPLING_TOP_PAIRS;
+  // Opt-out of the quadratic co-occurrence pass (see ChangeCouplingOptions.includeCoupling).
+  const includeCoupling = opts.includeCoupling ?? true;
 
   // Optional start ref: log from `<startRef>` (that commit and its ancestors) instead
   // of HEAD, so a caller can measure churn strictly BEFORE a range. Validated as an
@@ -152,6 +184,7 @@ export async function analyzeChangeCoupling(
   const coOccur = new Map<string, number>();
   let bulkFiltered = 0;
   let scanned = 0;
+  let coPairsCounted = 0;
 
   for (const rawFiles of commitFileSets) {
     // Bulk filter uses the RAW repo-wide commit size: a mass sweep manufactures false
@@ -165,10 +198,15 @@ export async function analyzeChangeCoupling(
     scanned++;
     const uniq = [...new Set(files)].sort();
     for (const f of uniq) churn.set(f, (churn.get(f) ?? 0) + 1);
+    // The quadratic half. Churn above is linear and is what a churn-only consumer wants;
+    // this pass is the only reason the scan is O(files²) per commit, so it is skipped
+    // wholesale when no caller will read `coupling`.
+    if (!includeCoupling) continue;
     for (let i = 0; i < uniq.length; i++) {
       for (let j = i + 1; j < uniq.length; j++) {
         const key = `${uniq[i]}\x00${uniq[j]}`;
         coOccur.set(key, (coOccur.get(key) ?? 0) + 1);
+        coPairsCounted++;
       }
     }
   }
@@ -200,6 +238,12 @@ export async function analyzeChangeCoupling(
   return {
     churn,
     coupling,
-    stats: { commitsScanned: scanned, bulkCommitsFiltered: bulkFiltered, filesTracked: churn.size },
+    stats: {
+      commitsScanned: scanned,
+      bulkCommitsFiltered: bulkFiltered,
+      filesTracked: churn.size,
+      couplingComputed: includeCoupling,
+      coPairsCounted,
+    },
   };
 }

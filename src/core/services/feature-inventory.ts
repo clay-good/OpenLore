@@ -25,6 +25,7 @@ import { readFile } from 'node:fs/promises';
 import { readOpenLoreConfig } from './config-manager.js';
 import { fileExists } from '../../utils/command-helpers.js';
 import { LEAN_DEFAULT_PRESET } from '../../constants.js';
+import { resolveAutopilotMode } from '../decisions/autopilot.js';
 
 /** Whether an opt-in feature is on, off, or on-by-default-but-disableable. */
 export type FeatureState = 'active' | 'inactive' | 'default-on';
@@ -295,8 +296,10 @@ export async function collectFeatureInventory(rootPath: string): Promise<Feature
     docs: 'docs/ci-cd.md',
   });
 
-  // Decision autopilot (change: add-decision-autopilot).
-  const autopilotOn = config?.governance?.autopilot === true;
+  // Decision autopilot (change: add-decision-autopilot). The mode comes from the one
+  // resolver every surface uses (change: default-decision-autopilot-with-visible-trace).
+  const autopilot = await resolveAutopilotMode(rootPath, config);
+  const autopilotOn = autopilot.autopilot;
   features.push({
     id: 'decision-autopilot',
     title: 'Decision autopilot (auto-accept + audit trail)',
@@ -304,12 +307,8 @@ export async function collectFeatureInventory(rootPath: string): Promise<Feature
     state: autopilotOn ? 'active' : 'inactive',
     optIn: true,
     detail: autopilotOn
-      ? 'verified decisions auto-accept and sync; commits never block; trail via `openlore decisions log`'
-      : 'off — the commit gate blocks for human review of verified decisions',
-    // `openlore install` turns this on when it wires a commit gate for the FIRST
-    // time in a repository, and never changes the mode of a gate that already
-    // exists (change: unify-onboarding-entrypoint). So it reads as opt-in here for
-    // exactly the repositories where it is: ones already gated in review mode.
+      ? `recorded and verified decisions auto-accept and sync; commits never block; trail via \`openlore decisions log\` (${autopilot.reason})`
+      : `off — ${autopilot.reason}`,
     activate: autopilotOn ? '' : 'set { "governance": { "autopilot": true } } in .openlore/config.json',
     docs: 'docs/cli-reference.md',
   });

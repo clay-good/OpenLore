@@ -69,6 +69,22 @@ describe('handleSelectTests', () => {
     vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph(NODES, EDGES) } as never);
   });
 
+  it('a tested_by link takes its confidence from its depth, like a reaching test', async () => {
+    // a → b → c → d (changed). Each of a, c and d is tested_by its own test file.
+    const nodes = ['a', 'b', 'c', 'd'].map(n => node({ id: `src/m.ts::${n}` }));
+    const edges = [
+      edge('src/m.ts::a', 'src/m.ts::b'), edge('src/m.ts::b', 'src/m.ts::c'), edge('src/m.ts::c', 'src/m.ts::d'),
+      edge('src/m.ts::a', 'src/a.test.ts::*', 'tested_by', 'a.test'),
+      edge('src/m.ts::c', 'src/c.test.ts::*', 'tested_by', 'c.test'),
+      edge('src/m.ts::d', 'src/d.test.ts::*', 'tested_by', 'd.test'),
+    ];
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ callGraph: graph(nodes, edges) } as never);
+    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['d'] }) as { selectedTests: Array<{ file: string; confidence: string }> };
+    expect(Object.fromEntries(r.selectedTests.map(t => [t.file, t.confidence]))).toEqual({
+      'src/d.test.ts': 'high', 'src/c.test.ts': 'medium', 'src/a.test.ts': 'low',
+    });
+  });
+
   it('selects tests that transitively reach the changed symbol, with paths', async () => {
     const r = await handleSelectTests({ directory: '/p', changedSymbols: ['bar'] }) as {
       selectedTests: Array<{ test: string; file: string; viaPath: string[]; confidence: string }>;
@@ -534,6 +550,49 @@ describe('select_tests safeguard tiers', () => {
     const r = await handleSelectTests({ directory: dir, diffRef: 'HEAD' }) as Result;
     expect(r.message).toBeUndefined();
     expect(find(r, 'testOther')).toMatchObject({ file: 'src/other.test.ts', reason: SELECTION_REASON.changedTest, confidence: 'high' });
+  });
+
+  it('a function added to an indexed file selects the tests of that file, at low confidence', async () => {
+    // `src/foo.ts::added` is new: the index predates it, so nothing can seed it.
+    changed([{ path: 'src/foo.ts', status: 'modified', isTest: false }]);
+    const set = {
+      baseRef: 'HEAD',
+      carried: [],
+      byFile: new Map([['src/foo.ts', { granularity: 'symbol', changed: [], appeared: ['src/foo.ts::added'], disappeared: [], referencing: [], dynamicDispatch: [] }]]),
+    };
+    const r = await handleSelectTests({ directory: dir, diffRef: 'HEAD' }, { changedSet: set as never }) as Result;
+    expect(r.selectedTests.map(t => [t.file, t.test, t.confidence, t.reason])).toEqual([
+      ['src/bar.test.ts', 'testBar', 'low', SELECTION_REASON.sameFile],
+      ['src/foo.test.ts', 'testFoo', 'low', SELECTION_REASON.sameFile],
+    ]);
+    expect(r.soundness.caveats.join(' ')).toMatch(/sibling-file tests were included at low confidence/);
+  });
+
+  it('selects a test that names a changed file by its path, and none that does not', async () => {
+    // A source guard reads the file as text (line anchors, a forbidden-call scan): no call edge.
+    await mkdir(join(dir, 'src'), { recursive: true });
+    await writeFile(join(dir, 'src/other.test.ts'), "const EXEMPT = [{ file: 'src/pi/extension.ts', line: 776 }];\n");
+    changed([{ path: 'src/pi/extension.ts', status: 'modified', isTest: false }]);
+    const r = await handleSelectTests({ directory: dir, diffRef: 'HEAD' }) as Result;
+    expect(r.selectedTests.map(t => [t.file, t.test, t.confidence, t.reason])).toEqual([
+      ['src/other.test.ts', '*', 'medium', SELECTION_REASON.namesPath('src/pi/extension.ts')],
+    ]);
+
+    changed([{ path: 'src/pi/other.ts', status: 'modified', isTest: false }]);
+    const none = await handleSelectTests({ directory: dir, diffRef: 'HEAD' }) as Result;
+    expect(none.selectedTests).toEqual([]);
+  });
+
+  it('a guard that names the file relative to its source root is selected; a bare file name is not', async () => {
+    // user-config-write-guard and output-hygiene list `cli/commands/orient.ts`, not `src/cli/...`.
+    await mkdir(join(dir, 'src'), { recursive: true });
+    await writeFile(join(dir, 'src/other.test.ts'), "const ENTRY = ['cli/commands/orient.ts'];\nconst NAME = 'hook.ts';\n");
+    changed([{ path: 'src/cli/commands/orient.ts', status: 'modified', isTest: false }]);
+    const r = await handleSelectTests({ directory: dir, diffRef: 'HEAD' }) as Result;
+    expect(r.selectedTests.map(t => [t.file, t.reason])).toEqual([['src/other.test.ts', SELECTION_REASON.namesPath('src/cli/commands/orient.ts')]]);
+
+    changed([{ path: 'src/cli/commands/hook.ts', status: 'modified', isTest: false }]);
+    expect((await handleSelectTests({ directory: dir, diffRef: 'HEAD' }) as Result).selectedTests).toEqual([]);
   });
 
   it('selects a new test file whole when the analysis has not indexed it yet', async () => {

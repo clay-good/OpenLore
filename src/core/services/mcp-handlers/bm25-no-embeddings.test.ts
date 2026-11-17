@@ -109,24 +109,22 @@ describe('spec-06: handlers serve a BM25-only index with no embedder', () => {
     const res = await handleSearchCode(projectDir, 'payment', 10) as {
       searchMode: string;
       retrievalMode: string;
-      note: string;
       results: Array<{ name: string; expansionTerms?: string[] }>;
     };
     expect(res.searchMode).toBe('bm25_fallback');
     expect(res.retrievalMode).toBe('keyword+vocabulary');
-    expect(res.note).toContain('openlore embed --local');
+    expect(JSON.stringify(res)).not.toContain('openlore embed');
     expect(res.results.find(result => result.name === 'PmtSvc')?.expansionTerms).toContain('pmt');
 
     const { handleOrient } = await import('./orient.js');
     const oriented = await handleOrient(projectDir, 'payment', 10) as {
       searchMode: string;
       retrievalMode: string;
-      note: string;
       relevantFunctions: Array<{ name: string; expansionTerms?: string[] }>;
     };
     expect(oriented.searchMode).toBe('bm25_fallback');
     expect(oriented.retrievalMode).toBe('keyword+vocabulary');
-    expect(oriented.note).toContain('openlore embed --local');
+    expect(JSON.stringify(oriented)).not.toContain('openlore embed');
     expect(oriented.relevantFunctions.find(result => result.name === 'PmtSvc')?.expansionTerms).toContain('pmt');
   });
 

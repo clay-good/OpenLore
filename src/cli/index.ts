@@ -11,21 +11,27 @@
 // Guard the Node version BEFORE anything heavy loads. This bootstrap import runs
 // the guard as a side effect; because ESM evaluates dependencies in source order
 // (each fully before the next), keeping it the FIRST import makes it run ahead of
-// commander and the command modules. A host on an unsupported Node (e.g.
-// `openspec lore generate` under Node 20) gets one legible stderr line and a
+// commander and the command modules. A caller on an unsupported Node (e.g. a
+// tool spawning `openlore` under Node 20) gets one legible stderr line and a
 // stable exit code, never a stack trace. Keep this the first import.
 import './node-version-bootstrap.js';
+// Node 22 prints an ExperimentalWarning when `node:sqlite` loads; a hook must write nothing.
+import './sqlite-warning-filter.js';
 // Size the V8 heap to the machine BEFORE commander and the command modules load, so a large
 // repository analyzes with no `--max-old-space-size` flag (change: make-analyze-scale-to-any-repo).
 // Placed right after the Node-version guard: both are early import side effects, and a re-exec here
 // does essentially no wasted work before handing off to the larger-heap child. Fail-open and
 // at-most-once — see heap-sizing.ts.
 import './heap-bootstrap.js';
+// Render an unexpected failure as one legible stderr line instead of a V8 stack trace. Bound
+// here, before the command modules load, so a throw while they evaluate is covered too.
+import './crash-reporter.js';
 import { allowInsecureTls } from '../core/services/tls-scope.js';
 
 import { Command } from 'commander';
 import { createRequire } from 'node:module';
 import { initCommand } from './commands/init.js';
+import { configureCommand } from './commands/configure.js';
 import { analyzeCommand } from './commands/analyze.js';
 import { embedCommand } from './commands/embed.js';
 import { orientCommand } from './commands/orient.js';
@@ -57,8 +63,12 @@ import { specStoreCommand } from './commands/spec-store.js';
 import { workingSetCommand } from './commands/working-set.js';
 import { impactCertificateCommand } from './commands/impact-certificate.js';
 import { checkEditCommand } from './commands/check-edit.js';
+import { hookCommand } from './commands/hook.js';
+import { handoffCommand } from './commands/handoff.js';
+import { footprintCommand } from './commands/footprint.js';
 import { coverageGapsCommand } from './commands/coverage-gaps.js';
 import { certifyPublicSurfaceCommand } from './commands/certify-public-surface.js';
+import { certifyServiceContractCommand } from './commands/certify-service-contract.js';
 import { styleFingerprintCommand } from './commands/style-fingerprint.js';
 import { briefingSinceCommand } from './commands/briefing-since.js';
 import { findClonesCommand } from './commands/find-clones.js';
@@ -68,7 +78,6 @@ import { enforceCommand } from './commands/enforce.js';
 import { exportCommand } from './export/index.js';
 import { importCommand } from './commands/import.js';
 import { manifestCommand } from './manifest/index.js';
-import { pluginManifestCommand } from './plugin-manifest/index.js';
 import { serveCommand } from './commands/serve.js';
 import { panicCheckCommand } from './commands/panic-check.js';
 import { panicLevelCommand } from './commands/panic-level.js';
@@ -80,6 +89,7 @@ import { gryphWatchCommand } from './commands/gryph-watch.js';
 import { updateCommand } from './commands/update.js';
 import { featuresCommand } from './commands/features.js';
 import { statusCommand } from './commands/status.js';
+import { statuslineCommand } from './commands/statusline.js';
 import { changeStatusCommand } from './commands/change-status.js';
 import { searchCommand } from './commands/search.js';
 import { applyJobGroupedHelp } from './help-groups.js';
@@ -120,7 +130,7 @@ program.hook('preAction', (thisCommand, actionCommand) => {
   // value came from the CLI, not the built-in default (OutputContractsAreUniform).
   const configSource = thisCommand.getOptionValueSource('config') as OptionValueSource;
   const configGuard = checkExplicitConfig(configSource, opts.config as string | undefined);
-  if (!configGuard.ok) {
+  if (!configGuard.ok && actionCommand.name() !== 'configure') {
     logger.error(configGuard.message!);
     process.exit(1);
   }
@@ -216,6 +226,7 @@ Learn more: https://github.com/clay-good/OpenLore
   );
 
 // Register subcommands
+program.addCommand(configureCommand);
 program.addCommand(initCommand);
 program.addCommand(analyzeCommand);
 program.addCommand(embedCommand);
@@ -230,6 +241,7 @@ program.addCommand(viewCommand);
 program.addCommand(doctorCommand);
 program.addCommand(featuresCommand);
 program.addCommand(statusCommand);
+program.addCommand(statuslineCommand);
 program.addCommand(setupCommand);
 program.addCommand(refreshStoriesCommand);
 program.addCommand(auditCommand);
@@ -249,8 +261,12 @@ program.addCommand(specStoreCommand);
 program.addCommand(workingSetCommand);
 program.addCommand(impactCertificateCommand);
 program.addCommand(checkEditCommand);
+program.addCommand(hookCommand);
+program.addCommand(handoffCommand);
+program.addCommand(footprintCommand);
 program.addCommand(coverageGapsCommand);
 program.addCommand(certifyPublicSurfaceCommand);
+program.addCommand(certifyServiceContractCommand);
 program.addCommand(styleFingerprintCommand);
 program.addCommand(briefingSinceCommand);
 program.addCommand(findClonesCommand);
@@ -260,7 +276,6 @@ program.addCommand(enforceCommand);
 program.addCommand(exportCommand);
 program.addCommand(importCommand);
 program.addCommand(manifestCommand);
-program.addCommand(pluginManifestCommand);
 program.addCommand(serveCommand);
 program.addCommand(panicCheckCommand);
 program.addCommand(panicLevelCommand);

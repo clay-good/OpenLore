@@ -40,8 +40,14 @@ describe('computeRepairReason — worst-first read-path trigger selection', () =
 
   it('a current, healthy index triggers nothing', () => {
     expect(computeRepairReason('healthy', false, 0, fresh, NOW)).toBeUndefined();
-    // `degraded` is deliberately NOT a trigger (WAL-lag / already retried).
-    expect(computeRepairReason('degraded', false, 0, fresh, NOW)).toBeUndefined();
+  });
+
+  it('a degraded (materially-smaller) index triggers a rebuild', () => {
+    // Change: self-heal-degraded-index. `degraded` was previously NOT a trigger on the
+    // stale WAL-lag rationale — but the verdict is set only AFTER computeIndexIntegrity
+    // checkpoints the WAL and recounts, so a surviving `degraded` is a genuine truncated
+    // store that otherwise re-disclosed "re-run analyze --force" forever without healing.
+    expect(computeRepairReason('degraded', false, 0, fresh, NOW)).toBe('integrity-degraded');
   });
 });
 

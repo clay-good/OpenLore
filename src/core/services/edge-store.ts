@@ -2,7 +2,10 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { CallEdge, FunctionNode, ClassNode, InheritanceEdge } from '../analyzer/call-graph.js';
-import { EDGE_CONFIDENCE_VALUES } from '../analyzer/call-graph-types.js';
+import { EDGE_CONFIDENCE_VALUES, EDGE_KIND_VALUES } from '../analyzer/call-graph-types.js';
+import { CONTRACT_EDGE_KINDS } from '../analyzer/contract/project.js';
+import { PROJECTED_LANGUAGE_SQL } from '../analyzer/projected-language.js';
+import { MAX_DEPRECATION_HINT } from '../analyzer/call-graph-extract.js';
 import { recordPerfWork } from '../analyzer/perf-counters.js';
 import type { FunctionCfg } from '../analyzer/cfg.js';
 import type { DecisionNode, DecisionAffectsEdge } from '../decisions/project.js';
@@ -194,8 +197,37 @@ async function runTransactionAsync<T>(db: DatabaseSync, fn: () => Promise<T>): P
  * `.olbundle` import would recompute its digest through the same dropping reader and reject a
  * perfectly valid bundle as TAMPERED. A version bump turns both into the honest
  * `schema-mismatch` + rebuild path this store already documents.
+ *
+ * v13 adds `nodes.deprecation` (change: add-deprecation-propagation): a v12 store has no marker
+ * column, so serving it would report no deprecated symbols rather than "not extracted".
+ *
+ * v14 adds no column either — it marks three new `edges.kind` values (`deploys_symbol`,
+ * `implements_endpoint`, `consumes_endpoint`) and the projected node languages that carry them
+ * (`OpenAPI`, and the `Serverless` IaC tag). This is the v12 case exactly: `rawToCallEdge` DROPS a
+ * row whose `kind` it does not know, so a v13 reader opening a v14 store passes the version gate
+ * and then discards every infrastructure- and contract-binding edge — leaving the operation nodes
+ * behind as if they were code, and recomputing an `.olbundle` digest through that same dropping
+ * reader so a valid bundle is rejected as TAMPERED. Both were reproduced against the published
+ * v3.5.0 build before this bump (changes: add-iac-deploy-binding, add-contract-node-projection,
+ * add-serverless-and-build-output-binding).
+ *
+ * v15 adds no column either — it marks one more `edges.kind` value, `references_schema` (an
+ * operation or a named schema → the schema it references). Same reason as v14: a v14 reader
+ * would pass the version gate and then DROP every schema edge, leaving the named-schema nodes
+ * in the graph with nothing bound to them, and recompute a bundle digest through that dropping
+ * reader (change: add-contract-schema-elements).
+ *
+ * v16 adds no column and no edge kind — it marks one more projected node language, `Protobuf`
+ * (RPCs, messages and enums read from `.proto` files). A v15 reader's projected-language filter
+ * does not name it, so it would serve every protobuf declaration as CODE: ranked among the hubs and
+ * entry points, counted in fan-in and fan-out, and offered as dead code (change:
+ * add-contract-graph-projection, protobuf phase).
+ *
+ * v17 is the same case once more: the projected node language `GraphQL` (root fields and named
+ * types read from a schema-first SDL), which a v16 reader would rank as code (change:
+ * add-contract-graph-projection, GraphQL phase).
  */
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 17;
 
 /**
  * Bound on the number of bound parameters in one generated `IN (…)` list.
@@ -374,7 +406,10 @@ export class EdgeStore {
         -- Content-addressed location-independent identity (add-content-addressed-stable-symbol-ids).
         -- Nullable: anonymous/synthetic symbols and pre-bump stores carry none. Additive: id stays PK.
         stable_id     TEXT,
-        call_arity    TEXT
+        call_arity    TEXT,
+        -- Deprecation marker's replacement hint ('' = marked, no hint); NULL = not marked
+        -- (add-deprecation-propagation).
+        deprecation   TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_node_file ON nodes(file_path);
       CREATE INDEX IF NOT EXISTS idx_node_name ON nodes(name);
@@ -664,13 +699,36 @@ export class EdgeStore {
   // ── Edge mutations ────────────────────────────────────────────────────────────
 
   /** Remove all edges where this file is caller or callee. */
+  /**
+   * Remove this file's edges before its subset rebuild re-inserts them.
+   *
+   * A contract edge is KEPT: it is derived from the specification corpus, which only a full
+   * `analyze` projects, so a subset rebuild cannot re-create it (change:
+   * add-contract-node-projection). Deleting it on every save of a route-handler or client file —
+   * the files edited most often — would silently drop the binding, and with it the handler's
+   * liveness-root status. It is refreshed, like an infrastructure projection, by `openlore
+   * analyze`.
+   */
   deleteEdgesForFile(file: string): void {
-    this.db.prepare('DELETE FROM edges WHERE caller_file = ? OR callee_file = ?').run(file, file);
+    this.db.prepare(
+      `DELETE FROM edges WHERE (caller_file = ? OR callee_file = ?)
+         AND NOT ${TOUCHES_PROJECTED_NODE}`,
+    ).run(file, file);
   }
 
-  /** Remove only outgoing edges from this file (incoming edges remain). */
+  /**
+   * Remove only outgoing edges from this file (incoming edges remain).
+   *
+   * Carries the same projection guard. This is the path a watcher save takes for every
+   * RECOMPUTED CALLER file, not just the edited one, so it ran far more often than
+   * `deleteEdgesForFile` and had no guard at all: touching one shared utility wiped the
+   * `implements_endpoint` edges of every route file in the closure, leaving orphaned operation
+   * nodes with no edges and the index reporting itself current. A `deploys_symbol` binding also
+   * makes a manifest a caller-file of the handler source, so editing a deployed handler dropped
+   * the deploy edges too.
+   */
   deleteOutgoingEdgesForFile(file: string): void {
-    this.db.prepare('DELETE FROM edges WHERE caller_file = ?').run(file);
+    this.db.prepare(`DELETE FROM edges WHERE caller_file = ? AND NOT ${TOUCHES_PROJECTED_NODE}`).run(file);
   }
 
   /** Bulk-insert edges in a single transaction. */
@@ -915,24 +973,32 @@ export class EdgeStore {
 
   /** Recompute graph-derived node/class degrees and classifications after a partial edge swap. */
   recomputeStructuralMetrics(): void {
+    // The in-memory build computes these metrics over CALL-shaped edges only and classifies
+    // projected declarations out of the rankings (call-graph.ts Pass 3/Pass 4). This recompute is
+    // the serving copy of the same measurement, so it applies the same two exclusions: a contract
+    // edge is not a call, so it changes no function's degree, and a contract node is a
+    // declaration, so it is never a hub or an entry point of the code
+    // (change: add-contract-node-projection).
+    const notContract = `kind IS NULL OR kind NOT IN (${DECLARATION_EDGE_KIND_SQL})`;
+    const notProjected = `language IS NULL OR language NOT IN (${PROJECTED_LANGUAGE_SQL})`;
     this.db.exec(`
       UPDATE nodes SET
         fan_in = (
           SELECT COUNT(*) FROM (
             SELECT DISTINCT caller_id FROM edges
-            WHERE callee_id = nodes.id AND confidence <> 'synthesized'
+            WHERE callee_id = nodes.id AND confidence <> 'synthesized' AND (${notContract})
           )
         ),
         fan_out = (
           SELECT COUNT(*) FROM (
             SELECT DISTINCT callee_id FROM edges
-            WHERE caller_id = nodes.id AND confidence <> 'synthesized'
+            WHERE caller_id = nodes.id AND confidence <> 'synthesized' AND (${notContract})
           )
         );
       UPDATE nodes SET
-        is_hub = CASE WHEN is_external = 0 AND fan_in >= ${HUB_THRESHOLD} THEN 1 ELSE 0 END,
-        is_entry_point = CASE WHEN is_external = 0 AND NOT EXISTS (
-          SELECT 1 FROM edges WHERE callee_id = nodes.id
+        is_hub = CASE WHEN is_external = 0 AND (${notProjected}) AND fan_in >= ${HUB_THRESHOLD} THEN 1 ELSE 0 END,
+        is_entry_point = CASE WHEN is_external = 0 AND (${notProjected}) AND NOT EXISTS (
+          SELECT 1 FROM edges WHERE callee_id = nodes.id AND (${notContract})
         ) THEN 1 ELSE 0 END;
       UPDATE classes SET
         fan_in = COALESCE((
@@ -954,10 +1020,10 @@ export class EdgeStore {
     const stmt: StatementSync = this.db.prepare(`
       INSERT OR REPLACE INTO nodes
         (id, name, file_path, class_name, is_async, language, start_index, end_index,
-         fan_in, fan_out, docstring, signature, is_external, external_kind, is_hub, is_entry_point, stable_id, call_arity)
+         fan_in, fan_out, docstring, signature, is_external, external_kind, is_hub, is_entry_point, stable_id, call_arity, deprecation)
       VALUES
         (@id, @name, @filePath, @className, @isAsync, @language, @startIndex, @endIndex,
-         @fanIn, @fanOut, @docstring, @signature, @isExternal, @externalKind, @isHub, @isEntryPoint, @stableId, @callArity)
+         @fanIn, @fanOut, @docstring, @signature, @isExternal, @externalKind, @isHub, @isEntryPoint, @stableId, @callArity, @deprecation)
     `);
     const ftsStmt: StatementSync = this.db.prepare('INSERT OR REPLACE INTO nodes_fts (node_id, name) VALUES (?, ?)');
     runTransaction(this.db, () => {
@@ -981,6 +1047,7 @@ export class EdgeStore {
           '@isEntryPoint': entryIds ? (entryIds.has(n.id) ? 1 : 0) : 0,
           '@stableId':     n.stableId ?? null,
           '@callArity':    n.callArity ? JSON.stringify(n.callArity) : null,
+          '@deprecation':  typeof n.deprecation === 'string' ? n.deprecation.slice(0, MAX_DEPRECATION_HINT) : null,
         });
         if (!n.isExternal) ftsStmt.run(n.id, n.name);
       }
@@ -1320,6 +1387,15 @@ export class EdgeStore {
       .run(filePath, hash, Date.now());
   }
 
+  /** {@link setFileHash} for a whole build: one prepared statement, run per file. */
+  setFileHashes(hashes: Iterable<[filePath: string, hash: string]>): void {
+    const insert = this.db.prepare(
+      'INSERT OR REPLACE INTO file_hashes (file_path, content_hash, updated_at) VALUES (?, ?, ?)'
+    );
+    const now = Date.now();
+    for (const [filePath, hash] of hashes) insert.run(filePath, hash, now);
+  }
+
 
   deleteFileHash(filePath: string): void {
     this.db.prepare('DELETE FROM file_hashes WHERE file_path = ?').run(filePath);
@@ -1343,6 +1419,19 @@ export class EdgeStore {
       .prepare('SELECT facts FROM pass1_facts WHERE file_path = ? AND content_hash = ? AND extractor_stamp = ?')
       .get(filePath, contentHash, stamp) as { facts: string } | undefined;
     return row?.facts;
+  }
+
+  /**
+   * The content key the last full analyze extracted this file at, or undefined when no
+   * memo row exists (add-memory-anchor-verdicts). Readers compare it with the current
+   * file to tell whether the stored node offsets still describe that file.
+   */
+  getPass1FactHash(filePath: string): string | undefined {
+    if (!this.hasPass1Facts()) return undefined;
+    const row = this.db
+      .prepare('SELECT content_hash FROM pass1_facts WHERE file_path = ?')
+      .get(filePath) as { content_hash: string } | undefined;
+    return row?.content_hash;
   }
 
   /**
@@ -1702,6 +1791,7 @@ interface RawNode {
   is_entry_point: number;
   stable_id:      string | null;
   call_arity:     unknown;
+  deprecation?:   unknown;
 }
 
 interface RawClass {
@@ -1875,11 +1965,25 @@ function rawToDecisionNode(r: RawDecision): DecisionNode {
   };
 }
 
+/** The contract projection's edge kinds / node languages, as SQL literal lists. */
+/**
+ * Every edge kind that binds a DECLARATION to code: the contract bindings plus `deploys_symbol`.
+ * None of them is a call, so none may contribute to a function's fan-in or fan-out. A
+ * `deploys_symbol` edge used to be counted, which gave a deployed handler a fan-in of 1 and so
+ * removed it from the entry points — leaving a YAML stanza as the only entry point of the repo.
+ */
+const DECLARATION_EDGE_KIND_SQL = [...CONTRACT_EDGE_KINDS, 'deploys_symbol'].map(k => `'${k}'`).join(', ');
+/** An edge whose caller or callee is a projected declaration: not produced by a subset rebuild. */
+const TOUCHES_PROJECTED_NODE = `EXISTS (
+  SELECT 1 FROM nodes n
+   WHERE (n.id = edges.caller_id OR n.id = edges.callee_id)
+     AND n.language IN (${PROJECTED_LANGUAGE_SQL})
+)`;
+
 const EDGE_CONFIDENCES = EDGE_CONFIDENCE_VALUES;
-const EDGE_KINDS = new Set<NonNullable<CallEdge['kind']>>([
-  'calls', 'overrides', 'tested_by', 'references', 'depends_on',
-  'affects', 'authored_by', 'changed_in_pr',
-]);
+// Built from the type's own runtime list, so a new kind cannot reach the type without reaching
+// the validator — the drift that made an older reader drop rows it had no name for.
+const EDGE_KINDS = new Set<NonNullable<CallEdge['kind']>>(EDGE_KIND_VALUES);
 const CALL_TYPES = new Set<NonNullable<CallEdge['callType']>>([
   'direct', 'method', 'awaited', 'constructor',
 ]);
@@ -1959,6 +2063,8 @@ function rawToFunctionNode(r: RawNode): FunctionNode {
     ...(r.external_kind && { externalKind: r.external_kind as FunctionNode['externalKind'] }),
     ...(r.stable_id    && { stableId:     r.stable_id }),
     ...(callArity && { callArity }),
+    // The store is repository-controlled (bundles, a committed .openlore): only a bounded string is a marker.
+    ...(typeof r.deprecation === 'string' && r.deprecation.length <= MAX_DEPRECATION_HINT && { deprecation: r.deprecation }),
   };
 }
 

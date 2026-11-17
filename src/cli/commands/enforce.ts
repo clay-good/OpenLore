@@ -13,6 +13,8 @@
  * Sources:
  *   - stale-decision-reference — always (cheap: a pure walk of the decision graph
  *     + anchored references).
+ *   - memory-anchor-lost — always (a freshness pass over recorded notes; a note
+ *     with a lost or ambiguous anchor is one finding).
  *   - blast-radius orphan patterns — collected only when the repo configured the
  *     blast-radius guard (`blastRadius.block`) or named an orphan code in the policy,
  *     because the briefing is diff-heavy.
@@ -42,12 +44,16 @@ import {
   unknownPolicyCodes,
   classifyFindings,
   resolveEnforcementClass,
+  type EnforcementPolicy,
   type GovernanceFinding,
   CORPUS_INTENT_FINDING_CODES,
   ARCHITECTURE_FINDING_CODES,
 } from '../../core/services/mcp-handlers/enforcement-policy.js';
 import { applyEnforcementBaseline } from '../../core/services/mcp-handlers/enforcement-baseline.js';
 import { detectStaleDecisionReferences } from '../../core/services/mcp-handlers/stale-decision-reference.js';
+import { detectMemoryAnchorLoss } from '../../core/services/mcp-handlers/memory.js';
+import { loadMemoryStore } from '../../core/decisions/memory-store.js';
+import { loadDecisionStore } from '../../core/decisions/store.js';
 import {
   CORPUS_FINDING_CODES,
   detectCorpusIntegrity,
@@ -83,6 +89,7 @@ import {
   resolveTrustedHookLauncher,
   renderTrustedHookCommand,
   updateHookFile,
+  insertHookBlock,
 } from '../git-hooks.js';
 
 const HOOK_MARKER = '# openlore-enforcement-hook';
@@ -126,10 +133,7 @@ export async function installEnforcementHook(rootPath: string): Promise<void> {
       const refreshed = existing.replace(/# openlore-enforcement-hook[\s\S]*?# end-openlore-enforcement-hook/, hookContent.trimEnd());
       return refreshed === existing ? null : refreshed;
     }
-    const stripped = existing?.trimEnd().replace(/\n*\nexit 0\s*$/, '');
-    return stripped
-      ? stripped + '\n\n' + hookContent
-      : '#!/bin/sh\n\n' + hookContent;
+    return insertHookBlock(existing, hookContent);
   });
   if (result.status === 'unavailable') {
     logger.warning(`Cannot install the enforcement hook at ${displayHookPath(hookPath)}: ${result.reason}`);
@@ -336,6 +340,14 @@ function impactCertificateAssessmentComplete(cert: ImpactCertificate): boolean {
 }
 
 /**
+ * Load the memory and decision stores read-only, throwing when either is torn. Sources
+ * that load them for writing (and so would quarantine a torn store) run after this.
+ */
+async function assertStoresReadable(cwd: string): Promise<void> {
+  await Promise.all([loadMemoryStore(cwd, { readOnly: true }), loadDecisionStore(cwd, { readOnly: true })]);
+}
+
+/**
  * Collect governance findings from every in-scope source, mapping each native
  * finding onto the unified {@link GovernanceFinding} shape. Source failures are
  * recorded per code: advisory policies keep their historical fail-soft behavior,
@@ -359,9 +371,43 @@ export async function collectGovernanceFindings(
   const failedCodes = new Set<string>();
   let decisionConstraints: Pick<DecisionConstraintState, 'ledger' | 'retiredRules'> | undefined;
 
+  // memory-anchor-lost — always (a freshness pass over recorded notes, no diff).
+  // Read-only, like the stale-decision-reference memory load below: a torn memory
+  // store stays in place and keeps the check incomplete on every run until repaired.
+  // An anchored file that changed since analysis can hide or fake a lost anchor,
+  // so it marks the assessment incomplete; a content-identical commit does not.
+  // Like scenario checkability, an incomplete assessment fails the gate only when
+  // the policy makes this code blocking or frozen: the advisory default must not
+  // turn every other blocking code's gate into "unavailable".
+  {
+    const gatedClass = resolveEnforcementClass('memory-anchor-lost', policy as EnforcementPolicy);
+    const gated = gatedClass === 'blocking' || gatedClass === 'frozen';
+    const incomplete = (reason: string) => {
+      caveats.push(`memory-anchor-lost check incomplete: ${reason}`);
+      if (gated) failedCodes.add('memory-anchor-lost');
+    };
+    try {
+      const loss = await detectMemoryAnchorLoss(cwd);
+      findings.push(...loss.findings);
+      if (loss.unassessedReason) incomplete(loss.unassessedReason);
+      else if (loss.staleFiles.length > 0) {
+        incomplete(`${loss.staleFiles.length} anchored file(s) changed since analysis; run openlore analyze`);
+      } else {
+        // No content key (an imported bundle) proves nothing either way: disclose it,
+        // but do not call it a change or fail the gate on it.
+        if (loss.unverifiedFiles?.length) {
+          caveats.push(`memory-anchor-lost: ${loss.unverifiedFiles.length} anchored file(s) have no recorded content key in the index (for example an imported bundle); run openlore analyze --reanalyze to verify them`);
+        }
+        assessedCodes.add('memory-anchor-lost');
+      }
+    } catch (err) {
+      incomplete(`check unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // stale-decision-reference — always (cheap).
   try {
-    for (const f of await detectStaleDecisionReferences(cwd)) {
+    for (const f of await detectStaleDecisionReferences(cwd, { readOnly: true })) {
       findings.push({
         code: f.code,
         severity: f.severity,
@@ -374,14 +420,20 @@ export async function collectGovernanceFindings(
     assessedCodes.add('stale-decision-reference');
   } catch (err) {
     caveats.push(`stale-decision-reference check unavailable: ${err instanceof Error ? err.message : String(err)}`);
-    failedCodes.add('stale-decision-reference');
+    // Its store load is read-only now, so a torn notes.json throws here instead of
+    // being renamed away. Advisory keeps its fail-soft behavior: only a blocking or
+    // frozen policy fails the gate on an incomplete check (add-memory-anchor-verdicts).
+    const staleClass = resolveEnforcementClass('stale-decision-reference', policy as EnforcementPolicy);
+    if (staleClass === 'blocking' || staleClass === 'frozen') {
+      failedCodes.add('stale-decision-reference');
+    }
   }
 
   // Decision-bound constraints — always load the declared eligibility corpus.
   // An active rule requires the whole stored dependency graph; malformed blocks
   // remain visible even when no graph is available.
   try {
-    const state = await loadDecisionConstraintState(cwd, config?.openspecPath);
+    const state = await loadDecisionConstraintState(cwd, config?.openspecPath, { readOnly: true });
     decisionConstraints = { ledger: state.ledger, retiredRules: state.retiredRules };
     findings.push(...state.malformedFindings);
     assessedCodes.add('decision-constraint-malformed');
@@ -416,8 +468,13 @@ export async function collectGovernanceFindings(
     }
   } catch (err) {
     caveats.push(`decision-constraint check unavailable: ${err instanceof Error ? err.message : String(err)}`);
-    failedCodes.add('decision-constraint-malformed');
-    failedCodes.add('decision-constraint-violation');
+    // Its decision-store load is read-only, so a torn pending.json throws here instead
+    // of being renamed away. Advisory keeps its fail-soft behavior: only a blocking or
+    // frozen policy fails the gate on an incomplete check.
+    for (const code of ['decision-constraint-malformed', 'decision-constraint-violation']) {
+      const cls = resolveEnforcementClass(code, policy as EnforcementPolicy);
+      if (cls === 'blocking' || cls === 'frozen') failedCodes.add(code);
+    }
   }
 
   // Author-declared architecture rules — deterministic and opt-in. Decision-carried
@@ -526,6 +583,10 @@ export async function collectGovernanceFindings(
   // blast-radius orphan patterns — only when configured (diff-heavy).
   if (blastRadiusInUse(config, policy)) {
     try {
+      // The briefing loads the memory and decision stores for writing, which renames a
+      // torn store: check both read-only first, so a torn store stays in place and keeps
+      // every dependent check incomplete on every run.
+      await assertStoresReadable(cwd);
       const b = await computeBlastRadius({ directory: cwd, baseRef });
       if (!('error' in b)) {
         findings.push(...blastRadiusFindings(b));
@@ -553,6 +614,8 @@ export async function collectGovernanceFindings(
   // impact-certificate surfaces — only when surfaces are declared (diff-heavy).
   if (impactCertificateInUse(config)) {
     try {
+      // Same as blast-radius above: its graph and anchor reads must not rename a torn store.
+      await assertStoresReadable(cwd);
       const cert = await computeImpactCertificate({ directory: cwd, baseRef });
       if (!('error' in cert)) {
         findings.push(...impactCertificateFindings(cert));
@@ -740,9 +803,9 @@ export async function runEnforceCli(opts: EnforceCliOptions): Promise<number> {
     .some(([code, enforcementClass]) => enforcementClass === 'frozen' && collected.assessedCodes.has(code));
   const activeGatePolicy = Object.values(policy)
     .some((enforcementClass) => enforcementClass === 'blocking' || enforcementClass === 'frozen');
-  // Source-declared defaults are policy too. A default-blocking source must
-  // compare the working tree with the index even when the operator has not
-  // repeated that default in .openlore/config.json.
+  // Every source default is advisory today, so in practice only an operator policy can make a
+  // code blocking. The check still resolves each assessed code through the same precedence, so a
+  // blocking class from either source compares the working tree with the index.
   const activeGateAssessment = [...collected.assessedCodes]
     .some((code) => {
       const enforcementClass = resolveEnforcementClass(code, policy);
@@ -914,8 +977,8 @@ function renderHuman(
       const label = f.enforcementClass === 'frozen'
         ? f.baselineState === 'new' ? 'frozen:new' : f.baselineState === 'frozen' ? 'frozen' : 'frozen:invalid'
         : f.enforcementClass;
-      if (f.remediation) lines.push(`      Action: ${f.remediation}`);
       lines.push(`   ${ICON[f.enforcementClass]} [${label}] ${f.code} (${f.source}): ${f.message}`);
+      if (f.remediation) lines.push(`      Action: ${f.remediation}`);
     }
   }
   if (baseline.initialized.length > 0) {

@@ -31,16 +31,29 @@ export type EdgeConfidence =
   | 'synthesized'    // dynamic-dispatch edge recovered by AST pattern synthesis (not direct name resolution)
   | 'external';      // unresolved external/stdlib call (synthetic leaf node)
 
-/** Broad relationship kind */
-export type EdgeKind =
-  | 'calls'
-  | 'overrides'      // base method → overriding method (CHA; spec: add-type-hierarchy-resolved-dispatch)
-  | 'tested_by'
-  | 'references'
-  | 'depends_on'
-  | 'affects'        // decision → governed file (spec-16)
-  | 'authored_by'    // file → person, from local git history (spec-18)
-  | 'changed_in_pr'; // file → pull request, from local git/gh (spec-18)
+/**
+ * Broad relationship kind.
+ *
+ * The runtime list is the single source: `edge-store.ts` builds its row validator from it, so the
+ * type and the set of kinds a store will accept cannot drift apart. They did, and an older reader
+ * then silently dropped the rows it had no name for (see `SCHEMA_VERSION`).
+ */
+export const EDGE_KIND_VALUES = [
+  'calls',
+  'overrides',           // base method → overriding method (CHA; spec: add-type-hierarchy-resolved-dispatch)
+  'tested_by',
+  'references',
+  'depends_on',
+  'affects',             // decision → governed file (spec-16)
+  'authored_by',         // file → person, from local git history (spec-18)
+  'changed_in_pr',       // file → pull request, from local git/gh (spec-18)
+  'deploys_symbol',      // function resource → the code function it runs (add-iac-deploy-binding)
+  'implements_endpoint', // route handler → the declared operation it serves (add-contract-node-projection)
+  'consumes_endpoint',   // the function enclosing a client call → the operation it calls
+  'references_schema',   // an operation or schema → the named schema it references (add-contract-graph-projection)
+] as const;
+
+export type EdgeKind = (typeof EDGE_KIND_VALUES)[number];
 
 /** Semantic nature of the call at the call site */
 export type CallType =
@@ -74,6 +87,11 @@ export interface RawEdge {
   argCount?: number;
   /** True when a spread/splat makes argCount a lower bound rather than an exact count. */
   argCountLowerBound?: true;
+  /**
+   * A TS/JS `new C(...)` site: `calleeName` is the CLASS name, and the edge binds only to that
+   * class's own `constructor` node — never to an unrelated same-named function or an external leaf.
+   */
+  newExpression?: true;
 }
 
 /** Plain-data class relationship extracted while the Pass-1 syntax tree is alive. */
@@ -153,6 +171,11 @@ export interface FunctionNode {
   fanOut: number;
   /** First meaningful line of the doc comment / docstring, extracted from AST positions */
   docstring?: string;
+  /**
+   * Set when the declaration carries its language's standard deprecation marker (change:
+   * add-deprecation-propagation): the marker's replacement hint, `''` when it gives none.
+   */
+  deprecation?: string;
   /** Declaration line(s) up to opening brace/colon, whitespace-normalized */
   signature?: string;
   /** True for synthetic nodes representing unresolved external/stdlib calls (e.g. fetch, https.request) */
@@ -197,7 +220,22 @@ export type ExternalKind = 'http' | 'database' | 'filesystem' | 'stdlib' | 'unkn
 export const AMBIGUOUS_CANDIDATE_CAP = 8;
 
 /** Which resolution strategy refused to bind because the candidate set was ambiguous. */
-export type AmbiguousStrategy = 'name_only' | 'self_cls' | 'type_name' | 'type_inference' | 'receiver_inferred' | 'overload';
+export type AmbiguousStrategy =
+  | 'name_only'
+  | 'self_cls'
+  | 'type_name'
+  | 'type_inference'
+  | 'receiver_inferred'
+  | 'overload'
+  /**
+   * CHA refused a `recv.m()` site's name-only fan-out because the receiver is statically known
+   * NOT to be an in-repo value — it is a package/module qualifier, or its declared type is
+   * qualified by one, that the source says lives outside this repository
+   * (change: suppress-false-cha-name-only). The in-repo methods named `m` are recorded as
+   * candidates the resolver declined to bind, so removing the former false edges cannot promote
+   * any of them to confidently dead.
+   */
+  | 'cha_receiver_outside_repo';
 
 /**
  * A call site the resolution ladder refused to bind because more than one candidate
@@ -555,6 +593,12 @@ export interface CallGraphResult {
    * (undefined) when the graph has no ambiguous sites.
    */
   ambiguousSites?: AmbiguousCallSite[];
+  /** Function resources whose handler names no indexed function (change: add-iac-deploy-binding). Omitted when empty. */
+  unresolvedDeployBindings?: import('./iac/deploy-binding.js').UnresolvedDeployBinding[];
+  /** Ecosystems whose IaC extraction threw: their resources were not assessed, not absent. */
+  iacNotAssessed?: string[];
+  /** What the contract projection could not bind (change: add-contract-node-projection). Omitted when nothing. */
+  contracts?: import('./contract/project.js').ContractDisclosure;
   /**
    * Which lane Pass-1 extraction actually ran on — the worker pool or the serial
    * reference path — and whether anything degraded (change:
@@ -593,4 +637,10 @@ export interface SerializedCallGraph {
   stats: CallGraphResult['stats'];
   /** Unresolved-ambiguous call sites (change: harden-call-resolution-ambiguity). Omitted when empty. */
   ambiguousSites?: AmbiguousCallSite[];
+  /** Function resources whose handler names no indexed function (change: add-iac-deploy-binding). Omitted when empty. */
+  unresolvedDeployBindings?: import('./iac/deploy-binding.js').UnresolvedDeployBinding[];
+  /** Ecosystems whose IaC extraction threw: their resources were not assessed, not absent. */
+  iacNotAssessed?: string[];
+  /** What the contract projection could not bind (change: add-contract-node-projection). Omitted when nothing. */
+  contracts?: import('./contract/project.js').ContractDisclosure;
 }

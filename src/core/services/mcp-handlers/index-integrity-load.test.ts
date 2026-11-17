@@ -9,11 +9,12 @@
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EdgeStore, SCHEMA_VERSION } from '../edge-store.js';
 import { computeAttestation, writeAttestation } from '../../analyzer/index-attestation.js';
 import { readCachedContext, _resetContextCacheForTesting } from './utils.js';
+import { registerRepairBuilder, _resetRepairServiceForTesting } from '../cold-start-bootstrap.js';
 import { handleFindDeadCode } from './reachability.js';
 import { handleGetHealthMap } from './health-map.js';
 import { handleAnalyzeImpact } from './graph.js';
@@ -124,6 +125,49 @@ describe('index integrity — load-path reconciliation', () => {
     const ctx = await readCachedContext(dir);
     expect(ctx?.integrity).toBeUndefined(); // computeIndexIntegrity only runs when the store exists
     ctx?.edgeStore?.close();
+  });
+
+  it('empty graph store + committed production nodes triggers the background self-heal', async () => {
+    // Regression: the version-upgrade signature. EdgeStore empties itself on a schema
+    // reset, so the store opens cleanly with ZERO nodes while the JSON graph still lists
+    // production nodes. This was detected (store closed → graph unavailable → "run
+    // analyze_codebase") but NEVER routed to the self-heal, so `orient` degraded to
+    // search-only every turn and agents fell back to grepping. No attestation is written,
+    // so the ONLY possible repair signal is the empty-graph one this guards.
+    _resetRepairServiceForTesting();
+    const repaired: string[] = [];
+    registerRepairBuilder(async (dir) => { repaired.push(resolve(dir)); });
+    try {
+      const dir = await track(layIndex({ committed: TOTAL, storedNodeCount: 0, withAttestation: false }));
+      const ctx = await readCachedContext(dir);
+      // The empty store is never served as a graph…
+      expect(ctx?.edgeStore).toBeUndefined();
+      // …and a background repair was triggered for this repo (fixed; previously nothing fired).
+      await new Promise((r) => setImmediate(r)); // let the non-blocking repair microtask run
+      expect(repaired).toContain(resolve(dir));
+    } finally {
+      _resetRepairServiceForTesting();
+    }
+  });
+
+  it('a degraded (materially-smaller) store triggers the background self-heal', async () => {
+    // Regression (change: self-heal-degraded-index): a partial/truncated persist reconciles
+    // as `degraded` and re-disclosed "re-run analyze --force" on every call but never
+    // rebuilt — computeRepairReason mapped only `mismatched`. It now maps `degraded` too.
+    _resetRepairServiceForTesting();
+    const repaired: string[] = [];
+    registerRepairBuilder(async (dir) => { repaired.push(resolve(dir)); });
+    try {
+      // Only 5 of 40 committed nodes landed → verdict `degraded` (store ready, countNodes>0).
+      const dir = await track(layIndex({ committed: TOTAL, storedNodeCount: 5 }));
+      const ctx = await readCachedContext(dir);
+      expect(ctx?.integrity?.verdict).toBe('degraded');
+      await new Promise((r) => setImmediate(r));
+      expect(repaired).toContain(resolve(dir));
+      ctx?.edgeStore?.close();
+    } finally {
+      _resetRepairServiceForTesting();
+    }
   });
 });
 

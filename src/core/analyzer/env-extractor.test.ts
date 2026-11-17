@@ -59,6 +59,28 @@ describe('extractEnvVars', () => {
     expect(secret?.hasDefault).toBe(false);
   });
 
+  it('associates a helper call site with the variable its literal names (one hop)', async () => {
+    // The microservices-demo idiom: the inventory must list the CALL SITE's file, or
+    // analyze_env_impact has nothing to re-scan (change: follow-env-name-through-helper).
+    mockReadFile.mockResolvedValue([
+      'package main',
+      'func main() {',
+      '\tmustMapEnv(&svc.catalog, "PRODUCT_CATALOG_SERVICE_ADDR")',
+      '}',
+      'func mustMapEnv(target *string, envKey string) {',
+      '\t_ = os.Getenv(envKey)',
+      '}',
+    ].join('\n') + '\n');
+    const result = await extractEnvVars(['/root/src/frontend/main.go'], '/root');
+    const entry = result.find(v => v.name === 'PRODUCT_CATALOG_SERVICE_ADDR');
+    expect(entry).toBeDefined();
+    // `relative()` yields the platform separator — normalize so the claim is about
+    // provenance, not about which OS the test runs on.
+    expect(entry?.files.map(f => f.replace(/\\/g, '/'))).toEqual(['src/frontend/main.go']);
+    // The helper's own os.Getenv(envKey) names nothing — no phantom variable appears.
+    expect(result.map(v => v.name)).toEqual(['PRODUCT_CATALOG_SERVICE_ADDR']);
+  });
+
   it('should capture inline comments from .env.example as description', async () => {
     mockReadFile.mockResolvedValue('STRIPE_KEY= # Stripe secret key from dashboard\n');
     const result = await extractEnvVars(['/root/.env.example'], '/root');

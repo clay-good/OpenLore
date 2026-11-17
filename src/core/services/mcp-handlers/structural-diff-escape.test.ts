@@ -92,7 +92,7 @@ describe('structural_diff footprint escape detection', () => {
     write(repo, 'src/core.ts', BASE);
     git(repo, ['add', '.']); git(repo, ['commit', '-q', '-m', 'base', '--no-gpg-sign']);
   });
-  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  afterEach(() => rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   it('a diff within its declared write-set reports an empty escape set', async () => {
     write(repo, 'src/core.ts', HEAD_APPEND);
@@ -220,7 +220,7 @@ describe('structural_diff escape detection — adversarial regressions', () => {
   };
   const commit = (msg: string) => { git(repo, ['add', '.']); git(repo, ['commit', '-q', '-m', msg, '--no-gpg-sign']); };
   beforeEach(init);
-  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  afterEach(() => rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   // CRITICAL regression: multibyte source. A `☕`/`é` before the function shifts byte
   // offsets but not code-unit offsets; a byte-sliced body would corrupt the compare

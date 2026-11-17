@@ -110,7 +110,7 @@ describe('openlore install — auto index build', () => {
     expect(out).not.toContain("Run 'openlore generate'");
   }, 30_000);
 
-  it('keeps fresh empty-spec messaging informational on the cached-analysis path', async () => {
+  it('keeps no-spec messaging informational on the cached-analysis path', async () => {
     await runInstall({ cwd: dir, agent: 'claude-code' });
     await rm(join(dir, '.openlore/config.json'));
     await rm(join(dir, 'openspec'), { recursive: true, force: true });
@@ -126,8 +126,9 @@ describe('openlore install — auto index build', () => {
     }
     const out = chunks.join('\n');
     expect(out).toContain('Analysis is up to date');
-    expect(out).toContain('ℹ No specs yet');
-    expect(out).toContain('requires an LLM provider');
+    // First run creates no spec folder (change: spec-framework-neutrality, task 1.1), so the
+    // absence is stated as information, never as a warning.
+    expect(out).toContain('ℹ Spec index skipped: no spec source found (looked for: openspec)');
     expect(out).not.toContain('⚠ Spec index skipped');
   }, 30_000);
 });

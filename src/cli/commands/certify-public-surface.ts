@@ -21,6 +21,8 @@ import {
 } from '../../core/services/mcp-handlers/public-surface-baseline.js';
 import { verifyDecisionCurrent } from '../../core/services/mcp-handlers/claim-verification.js';
 import type { GovernanceFinding } from '../../core/services/mcp-handlers/enforcement-policy.js';
+import { positiveIntegerOption } from '../numeric-options.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 
 interface SurfaceChangeOut {
   changeKind: string;
@@ -201,7 +203,7 @@ export async function runCertifyPublicSurfaceCli(opts: CertifyPublicSurfaceCliOp
   }
 
   if (result && typeof result === 'object' && 'error' in result) {
-    const error = (result as { error: string }).error;
+    const error = toCliVocabulary((result as { error: string }).error);
     if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error }, null, 2) + '\n');
     else logger.warning(`certify-public-surface: ${error}`);
     return 1;
@@ -263,7 +265,7 @@ async function acceptFindings(cwd: string, opts: CertifyPublicSurfaceCliOptions,
 export const certifyPublicSurfaceCommand = new Command('certify-public-surface')
   .description('Certify the public API surface (no --base) or the breaking-change verdict for the working-tree diff (--base <ref>): removed/renamed exports, incompatible signatures, each breaking change with its consumers. --accept records intended breakages with a justification. Deterministic, never blocks.')
   .option('--base <ref>', 'Diff the working tree\'s public surface against this git ref (e.g. HEAD, main) for a breaking-change verdict')
-  .option('--max <n>', 'Limit the surface listing in surface mode (default 200, capped 500)', (v) => parseInt(v, 10))
+  .option('--max <n>', 'Limit the surface listing in surface mode (default 200, capped 500)', positiveIntegerOption('--max'))
   .option('--allow-base-fallback', 'Accept the disclosed main → master → HEAD~1 fallback when --base does not resolve, instead of erroring', false)
   .option('--federation', 'Also count consumers in indexed sibling repos (.openlore/federation.json)', false)
   .option('--federation-repos <names>', 'Limit --federation to these comma-separated registry repo names', (v: string) => v.split(',').map((s) => s.trim()).filter(Boolean))

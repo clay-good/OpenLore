@@ -208,7 +208,7 @@ async function explainRetrievalMiss(
     const ids = targetIds(eligible);
     const limit = Math.max(1, Math.min(input.limit ?? 10, 100));
     const cfg = await readOpenLoreConfig(absDir);
-    const embedSvc = await resolveEmbedder(cfg);
+    const embedSvc = await resolveEmbedder(cfg, outputDir);
     const vocabularyExpansion = cfg?.retrieval?.vocabularyExpansion !== false;
     const expandedQuery = expandVocabularyQuery(outputDir, tokenize(input.query), vocabularyExpansion);
     const diagnosticTerms = [...expandedQuery.originalTokens, ...expandedQuery.expansionTokens];
@@ -284,7 +284,7 @@ async function explainRetrievalMiss(
   const ids = targetIds(resolved);
   const limit = Math.max(1, Math.min(input.limit ?? 10, 50));
   const cfg = await readOpenLoreConfig(absDir);
-  const embedSvc = await resolveEmbedder(cfg);
+  const embedSvc = await resolveEmbedder(cfg, outputDir);
   const vocabularyExpansion = cfg?.retrieval?.vocabularyExpansion !== false;
   const expandedQuery = expandVocabularyQuery(outputDir, tokenize(input.query), vocabularyExpansion);
   const diagnosticTerms = [...expandedQuery.originalTokens, ...expandedQuery.expansionTokens];

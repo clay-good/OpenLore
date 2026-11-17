@@ -17,6 +17,7 @@
  */
 
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
+import { TEST_DETECTION_CAVEATS } from '../../analyzer/test-file.js';
 import { resolveFederationScope, findCrossRepoTests } from '../../federation/resolver.js';
 import { loadTraversalIndex } from './traversal.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
@@ -90,13 +91,21 @@ export const SELECTION_REASON = {
     return `included: reaches changed symbol at depth ${depth}${rules.length ? ` via ${rules.join(', ')}` : ''}`;
   },
   sameFile: 'included: tests a function in the same file as a changed symbol',
+  /** A test that reads a changed file's text by its path (a source guard); no call edge shows it. */
+  namesPath: (path: string) => `included: names the changed file ${path} by its path`,
 } as const;
+
+/** Test files read when looking for tests that name a changed file by its path. */
+const MAX_PATH_SCAN_TEST_FILES = 5000;
+/** Bytes read per test file for that scan. */
+const MAX_PATH_SCAN_BYTES = 2 * 1024 * 1024;
 
 /** Reason strength: a lower number is the stronger, tier-first receipt. */
 function reasonRank(reason: string): number {
   if (reason === SELECTION_REASON.newTest) return 0;
   if (reason === SELECTION_REASON.changedTest) return 1;
-  if (reason === SELECTION_REASON.sameFile) return 3;
+  if (reason.startsWith('included: names the changed file ')) return 3;
+  if (reason === SELECTION_REASON.sameFile) return 4;
   return 2;
 }
 
@@ -275,6 +284,10 @@ export async function handleSelectTests(
   let fileSeedCount = 0;
   /** Seeds kept for a reason other than their own change (naming one, or a dynamic-dispatch site). */
   let seededUnchanged = 0;
+  /** Changed production files, repository-relative: a test that names one by its path reads it. */
+  const changedSourcePaths: string[] = [];
+  /** Files where the diff adds a symbol the index does not hold yet: nothing can seed it. */
+  const newSymbolFiles = new Set<string>();
   if (hasSymbols) {
     const resolution = resolveSymbolSeeds(cg, input.changedSymbols!);
     seeds = resolution.seeds;
@@ -290,6 +303,14 @@ export async function handleSelectTests(
       seeds = narrowed.seeds;
       changeGranularity = narrowed.receipt;
       seededUnchanged = narrowed.seededUnchanged ?? 0;
+      // Only a file the index already holds functions in: a moved or brand-new file has no sibling
+      // whose tests could stand in, and keeps the "not in the index" answer.
+      const indexedIds = new Set(cg.nodes.map(n => n.id));
+      const indexedFiles = new Set(cg.nodes.filter(n => !n.isTest && !n.isExternal).map(n => normalizeRelative(n.filePath)));
+      for (const [file, change] of narrowed.set?.byFile ?? []) {
+        if (change.granularity === 'symbol' && indexedFiles.has(normalizeRelative(file))
+            && change.appeared.some(id => !indexedIds.has(id))) newSymbolFiles.add(normalizeRelative(file));
+      }
       // A test file the diff touched, or a new untracked one, is selected on its own standing — not
       // only if reachability happens to reach it. Only a file the analyzer's own rule calls a test, inside
       // the analyzed directory, and still on disk: a fixture under `test/`, another package's test, or a
@@ -304,6 +325,10 @@ export async function handleSelectTests(
         if (!local || !isTestFile(local) || tierFileSet.has(local) || !existsSync(join(absDir, local))) continue;
         tierFileSet.add(local);
         tierFiles.push({ file: local, reason: f.status === 'added' ? SELECTION_REASON.newTest : SELECTION_REASON.changedTest });
+      }
+      for (const f of diff.files) {
+        const path = normalizeRelative(f.path);
+        if (f.status !== 'deleted' && !isTestFile(path) && !hasControlCharacter(path)) changedSourcePaths.push(path);
       }
       const untracked = await untrackedTestFiles(absDir);
       if (untracked === null) untrackedAssessed = false;
@@ -322,7 +347,10 @@ export async function handleSelectTests(
     }
   }
 
-  if (seeds.length === 0 && tierFiles.length === 0) {
+  // Tests that read a changed file by its path (source-text guards): no call edge reaches them.
+  const pathReaders = await testsNamingPaths(absDir, cg, changedSourcePaths);
+
+  if (seeds.length === 0 && tierFiles.length === 0 && pathReaders.files.length === 0 && newSymbolFiles.size === 0) {
     // Honesty: if federation was opted into, say why no cross-repo selection ran
     // rather than silently omitting the federation block an active scope implies.
     const federationRequested = input.federation === true || (input.federationRepos?.length ?? 0) > 0;
@@ -352,7 +380,6 @@ export async function handleSelectTests(
   // chains below are reconstructed from, so the payload is unchanged.
   const nodeMap = new Map(cg.nodes.map(n => [n.id, n]));
   const traversal = await loadTraversalIndex(absDir, cg);
-  const seedIds = new Set(seeds.map(s => s.id));
   const { depth: depthOf, parent } = traversal.bfsWithParents(
     seeds.map(s => s.id),
     'backward',
@@ -460,6 +487,8 @@ export async function handleSelectTests(
     for (const t of tests) add(t.filePath, t.name, [t.name], 'high', reason);
   }
 
+  for (const { file, path } of pathReaders.files) add(file, WHOLE_FILE_TEST, [], 'medium', SELECTION_REASON.namesPath(path));
+
   // Source 1 — test nodes reached by the backward call-walk.
   for (const [id, depth] of depthOf) {
     if (depth === 0) continue;
@@ -483,12 +512,14 @@ export async function handleSelectTests(
     // this very test; selecting the test again via that node would serve a cyclic path.
     if (idPath.includes(e.calleeId) || crossesTestedBy(idPath)) continue;
     const testFile = e.calleeId.includes('::') ? e.calleeId.split('::')[0] : e.calleeId;
-    const onSeed = seedIds.has(e.callerId);
-    const confidence: Confidence = onSeed ? 'high' : 'medium';
+    // The same depth rule as a reaching test node: one hop from the change is high, up to three is
+    // medium, deeper is low. A tested_by link twelve calls away is not medium evidence.
+    const depth = (depthOf.get(e.callerId) ?? 0) + 1;
+    const confidence: Confidence = depth === 1 ? 'high' : depth <= 3 ? 'medium' : 'low';
     const basis = withEdgeBasis(basisOfPath(idPath), e);
     add(
       testFile, e.calleeName, [e.calleeName, ...pathToSeed(e.callerId)], confidence,
-      SELECTION_REASON.reaches((depthOf.get(e.callerId) ?? 0) + 1, basis?.synthesizedBy),
+      SELECTION_REASON.reaches(depth, basis?.synthesizedBy),
       basis,
     );
   }
@@ -517,6 +548,25 @@ export async function handleSelectTests(
       if (!depthOf.has(neighbor) || coveredByTest.has(neighbor)) continue;
       coveredByTest.set(neighbor, depth + 1);
       coverageQueue.push(neighbor);
+    }
+  }
+  // A new function has no test edge yet; the tests of its file's other functions are the nearest
+  // evidence of what exercises that file.
+  for (const file of newSymbolFiles) {
+    const inFile = (id: string) => { const n = nodeMap.get(id); return !!n && !n.isTest && normalizeRelative(n.filePath) === file; };
+    for (const e of cg.edges) {
+      if (input.directResolvedOnly && e.confidence === 'synthesized') continue;
+      const via = `(same file as a new symbol in ${file})`;
+      if (e.kind === 'tested_by' && inFile(e.callerId)) {
+        // tested_by points production → test, the test being a node or a whole file (`file::*`).
+        const testFile = e.calleeId.includes('::') ? e.calleeId.split('::')[0] : e.calleeId;
+        add(testFile, e.calleeName, [e.calleeName, via], 'low', SELECTION_REASON.sameFile);
+        usedFileFallback = true;
+      } else if ((!e.kind || e.kind === 'calls') && inFile(e.calleeId) && nodeMap.get(e.callerId)?.isTest) {
+        const test = nodeMap.get(e.callerId)!;
+        add(test.filePath, test.name, [test.name, via], 'low', SELECTION_REASON.sameFile);
+        usedFileFallback = true;
+      }
     }
   }
   for (const s of seeds) {
@@ -566,10 +616,20 @@ export async function handleSelectTests(
   } else if (testDetection === 'partial') {
     caveats.push(`Test detection is incomplete for some changed languages (${seedLangs.join(', ')}); tests in undetected languages are missing.`);
   }
+  // A language WITH detected tests can still have a convention this analysis cannot see, which
+  // the full/partial/none verdict does not show. Same disclosure `report_coverage_gaps` makes,
+  // so the two tools do not disagree about the same language (change: fix-rust-test-detection).
+  for (const lang of seedLangs) {
+    const caveat = TEST_DETECTION_CAVEATS.get(lang);
+    if (caveat) caveats.push(`${lang}: ${caveat}.`);
+  }
   if (usedFileFallback) {
     caveats.push('Some seeds had no reaching test; sibling-file tests were included at low confidence (likely newly-added or untested functions).');
   }
   if (!untrackedAssessed) caveats.push(UNTRACKED_NOT_ASSESSED);
+  if (pathReaders.omitted > 0) {
+    caveats.push(`${pathReaders.omitted} test file(s) past the first ${MAX_PATH_SCAN_TEST_FILES} were not searched for a changed file's path.`);
+  }
   const granularityNote = changeGranularity && granularityCaveat(changeGranularity);
   if (granularityNote) caveats.push(granularityNote);
   const importsNote = changeGranularity && importsAddedCaveat(changeGranularity);
@@ -789,6 +849,39 @@ function localPath(repoPath: string, prefix: string | undefined): string | undef
   const path = normalizeRelative(repoPath);
   if (!prefix) return path;
   return path.startsWith(prefix) ? path.slice(prefix.length) : undefined;
+}
+
+/**
+ * Test files that name one of `paths` as a quoted string: a guard that reads source text (line
+ * anchors, a forbidden-call scan) breaks when that file changes, yet no call edge reaches it. The
+ * test files are the ones the index knows; each is read once, bounded.
+ */
+async function testsNamingPaths(
+  absDir: string,
+  cg: SerializedCallGraph,
+  paths: readonly string[],
+): Promise<{ files: Array<{ file: string; path: string }>; omitted: number }> {
+  if (paths.length === 0) return { files: [], omitted: 0 };
+  const testFiles = new Set<string>();
+  for (const n of cg.nodes) if (n.isTest && !n.isExternal) testFiles.add(normalizeRelative(n.filePath));
+  for (const e of cg.edges) if (e.kind === 'tested_by' && e.calleeId.includes('::')) testFiles.add(normalizeRelative(e.calleeId.split('::')[0]));
+  const sorted = [...testFiles].sort();
+  // A guard often names files relative to its source root (`'cli/commands/orient.ts'` for
+  // `src/cli/commands/orient.ts`): every trailing part of at least two segments counts too.
+  const spellings: Array<[spelling: string, path: string]> = [];
+  for (const p of paths) {
+    const parts = p.split('/');
+    for (let i = 0; i <= parts.length - 2; i++) spellings.push([parts.slice(i).join('/'), p]);
+  }
+  const { readFileConfined } = await import('../../../utils/path-confinement.js');
+  const files: Array<{ file: string; path: string }> = [];
+  for (const file of sorted.slice(0, MAX_PATH_SCAN_TEST_FILES)) {
+    let text: string;
+    try { text = await readFileConfined(absDir, file, MAX_PATH_SCAN_BYTES); } catch { continue; }
+    const named = spellings.find(([spelling]) => text.includes(`'${spelling}'`) || text.includes(`"${spelling}"`) || text.includes(`\`${spelling}\``));
+    if (named) files.push({ file, path: named[1] });
+  }
+  return { files, omitted: Math.max(0, sorted.length - MAX_PATH_SCAN_TEST_FILES) };
 }
 
 function normalizeRelative(path: string): string {

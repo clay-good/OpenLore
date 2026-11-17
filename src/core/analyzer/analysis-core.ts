@@ -1,5 +1,8 @@
+import { FilePolicyResolver, repositoryPath } from '../configuration/policy.js';
+import type { FilePolicies } from '../configuration/types.js';
 import { join, relative, resolve } from 'node:path';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bounded-artifact-read.js';
+import { joinCapped, INVENTORY_ITEMS_SHOWN } from '../../utils/capped-list.js';
 
 /** One retained repo-wide artifact, read under the untrusted-artifact rules. Throws on refusal. */
 async function readRetainedArtifact(path: string): Promise<string> {
@@ -35,6 +38,7 @@ import { computeProjectFingerprint, fingerprintHashOfConfiguration } from '../se
 import { writeAnalysisContentProvenance } from '../services/served-content.js';
 import { AnalysisArtifactGenerator, type AnalysisArtifacts, type EnrichmentData } from './artifact-generator.js';
 import { isScannedByEnrichment, type OversizedFileObserver } from './bounded-file-scan.js';
+import { detectLanguage } from './language-detection.js';
 import { DependencyGraphBuilder, type DependencyGraphResult } from './dependency-graph.js';
 import { extractEnvVars } from './env-extractor.js';
 import { buildRouteInventory } from './http-route-parser.js';
@@ -124,8 +128,9 @@ export function analysisConfigFingerprintInput(
   exclude: string[],
   maxFiles: number,
   protectedExcludePatterns: string[] = [],
-): { includePatterns: string[]; excludePatterns: string[]; maxFiles: number; protectedExcludePatterns: string[] } {
-  return { ...mergeAnalysisPatterns(configured, include, exclude), maxFiles, protectedExcludePatterns };
+  filePolicies?: FilePolicies,
+): { includePatterns: string[]; excludePatterns: string[]; maxFiles: number; protectedExcludePatterns: string[]; indexPolicyRevision?: string; indexPolicies?:FilePolicies } {
+  return { ...mergeAnalysisPatterns(configured, include, exclude), maxFiles, protectedExcludePatterns, ...(filePolicies?.rules.some(r => r.lanes.index) ? {indexPolicyRevision:new FilePolicyResolver(filePolicies).revisionFor('index'),indexPolicies:{rules:filePolicies.rules.filter(r => r.lanes.index).map((r,index) => ({id:'index-'+index,pattern:repositoryPath(r.pattern),reason:'Index selection policy',lanes:{index:r.lanes.index}}))}} : {}) };
 }
 
 export function analysisGeneratedExcludes(rootPath: string, outputPath: string, openspecPath?: string): string[] {
@@ -168,7 +173,7 @@ export async function runAnalysisCore(
     options.exclude ?? [],
   );
   const protectedExcludePatterns = analysisGeneratedExcludes(rootPath, outputPath, config?.openspecPath);
-  const fingerprintConfig = analysisConfigFingerprintInput(config?.analysis, options.include ?? [], options.exclude ?? [], options.maxFiles, protectedExcludePatterns);
+  const fingerprintConfig = analysisConfigFingerprintInput(config?.analysis, options.include ?? [], options.exclude ?? [], options.maxFiles, protectedExcludePatterns, config?.filePolicies);
 
   // Partial first-run serving (change: refine-first-run-partial-serving). The lane is armed
   // only when the caller asked for it AND this repository has no published generation to
@@ -186,6 +191,7 @@ export async function runAnalysisCore(
 
   await stage('mapping', 0, 'Scanning directory structure');
   const mapper = new RepositoryMapper(rootPath, {
+    filePolicies: config?.filePolicies,
     maxFiles: options.maxFiles,
     includePatterns: patterns.includePatterns.length > 0 ? patterns.includePatterns : undefined,
     restrictedIncludePatterns: config?.analysis.includePatterns?.filter(
@@ -205,7 +211,10 @@ export async function runAnalysisCore(
   emit({
     stage: 'mapping',
     status: 'info',
-    detail: `Workspace shards (${workspaceShards.source}): ${workspaceShards.shards.map(shard => `${shard.name} ${shard.files.length}`).join(', ')}`,
+    // Rendering cap only: a monorepo can declare hundreds of shards, and this
+    // detail is a one-line console message. The full shard set stays in the
+    // analysis artifacts.
+    detail: `Workspace shards (${workspaceShards.source}): ${joinCapped(workspaceShards.shards.map(shard => `${shard.name} ${shard.files.length}`), INVENTORY_ITEMS_SHOWN, ', ', 'shard')}`,
   });
   for (const ignored of workspaceShards.ignoredMembers) {
     emit({ stage: 'mapping', status: 'warning', detail: `Ignored workspace member '${ignored.member}' from ${ignored.manifest}: ${ignored.reason}.` });
@@ -378,6 +387,18 @@ export async function runAnalysisCore(
       status: 'warning',
       detail: `${oversizedByPath.size} file(s) exceeded the ${Math.round(SOURCE_SCAN_MAX_FILE_BYTES / 1024 / 1024)} MB enrichment scan cap; inventory counts are a lower bound.`,
     });
+    // PERSIST the exclusion, don't just emit it. `SOURCE_SCAN_MAX_FILE_BYTES`'s contract comment
+    // says a file excluded here "is disclosed by analyze, never silently dropped" — and the only
+    // disclosure was this transient progress line, so `doctor`, `orient` and `search_code` all
+    // read the repository as fully read (change: fix-retrieval-coverage-over-unread-content).
+    generator.recordEnrichmentSizeCaps(
+      [...oversizedByPath.keys()]
+        .sort()
+        .map(absolutePath => [
+          relative(rootPath, absolutePath) || absolutePath,
+          detectLanguage(absolutePath),
+        ] as [string, string]),
+    );
   }
   emit({ stage: 'extractors', status: 'complete' });
 
@@ -431,6 +452,7 @@ export async function runAnalysisCore(
       // fingerprint a different corpus and report a mismatch on an unchanged tree. Recording them
       // is what makes `openloreIndexState` able to answer at all.
       fingerprintConfig,
+      ...(config?.filePolicies ? {indexPolicyRevision:new FilePolicyResolver(config.filePolicies).revisionFor('index')} : {}),
     }));
     await writeAnalysisContentProvenance(outputPath, 'source-derived');
     if (await computeProjectFingerprint(rootPath, { configuration: fingerprintConfig, protectedExcludePatterns }) !== fingerprintHash) {

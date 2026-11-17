@@ -20,11 +20,14 @@ Each language backs a fixed, closed set of capabilities. A capability is either 
 | `receiverResolution` | Chained intra-object receiver resolution — `this.<field>.m()` / `self.<field>.m()` — through a per-file registry of declared field types (annotation, `new T()`, constructor parameter property, Python `__init__` annotation, class-body annotation, or `self.x = T()` construction — where a capitalized name the file declares as a `def` is a factory, not a class, and is refused) and locally-declared return types. A resolved call becomes a `receiver_inferred` edge; a receiver the registry cannot bind emits NO edge and is disclosed as a boundary by `analyze_error_propagation`, never guessed. Backed for TypeScript/JavaScript/Python. A language without it does not bind the shape; what it records instead is its own call query's business, and the three outcomes differ: Java/C# capture the chained receiver and fall through to ordinary member-call handling; **Go captures no chained receiver at all**, so it records nothing (a known open gap); and **Ruby is worse than either** — its call query matches only the receiverless alternative, so `self.repo.save` / `@repo.save` emit a raw edge carrying NO receiver, which then binds by `name_only` to any same-named method in the repository. All three are pre-existing and untouched here. | `RECEIVER_REGISTRY_LANGUAGES` (`receiver-registry.ts`) |
 | `styleFingerprint` | Descriptive per-language idiom-frequency profile (function form, binding, conditional, async, string, naming case) with an evidence floor + enforcement-awareness. Backed for TypeScript/JavaScript/Python/Go. | `STYLE_FINGERPRINT_LANGUAGES` (`style-fingerprint.ts`) |
 | `iacProjection` | Infrastructure-as-code projection (resources/edges) onto the unified graph. | `isIacLanguage()` / `IAC_LANGUAGES` (`iac/types.ts`) |
+| `iacCodeBinding` | Infrastructure-to-code binding: a resource that names the code it runs (a Lambda handler, a Serverless `functions.*.handler`) is linked to the indexed function by a `deploys_symbol` edge, resolved literally — through the project's own `outDir`/`rootDir` or `main`/`source` mapping when the handler names built output. Backed for Terraform, CloudFormation/SAM and Serverless. An ecosystem WITHOUT it names no code, so no binding is looked for; an unresolvable handler is disclosed, never dropped. See [iac.md](iac.md). | `IAC_CODE_BINDING_LANGUAGES` (`iac/deploy-binding.ts`) |
+| `contractSchemas` | Interface-schema reading and projection: each declared operation becomes a graph node bound to the route handler that serves it (`implements_endpoint`) and to the function enclosing the call that consumes it (`consumes_endpoint`), matched literally by method and normalized path. Backed for OpenAPI 3.x and Swagger 2.0 (tagged `OpenAPI`), protobuf v3 (`Protobuf`: RPCs bound through gRPC server registrations) and GraphQL SDL (`GraphQL`: root fields bound through literal resolver maps). A format WITHOUT it is not read, so it declares no operation — never "this repository declares none". See [contracts.md](contracts.md). | `isContractLanguage()` / `CONTRACT_LANGUAGES` (`contract/types.ts`) |
 | `crossServiceHttp` | Cross-service API topology: outbound HTTP client call sites and/or server route registrations are matched into `http_endpoint` edges across the process (and, under federation, the repo) boundary. Clients: TS/JS (`fetch`/`axios`/`ky`/`got`), Python (`requests`/`httpx`), and Go (`net/http`); routes: TS/JS (Express/NestJS/Next), Python (FastAPI/Flask/Django), Java (Spring/JAX-RS). | `CROSS_SERVICE_HTTP_LANGUAGES` (`http-capability.ts`) |
 | `dynamicBoundary` | Dispatch the resolver cannot follow — reflective invocation, computed-member dispatch, `eval`, dynamic import, metaprogrammed definition, DI-container resolution, and (TS/JS) a tagged message send with no indexed consumer — recorded as a disclosed **boundary site** — unless `literalReflection` binds it to an edge. Backed for TypeScript/JavaScript/Python/Ruby/Go/Java/PHP/C#. A language WITHOUT it records no site because none is looked for, never because it contains no dynamic dispatch. | `DYNAMIC_BOUNDARY_LANG_SPECS` (`dynamic-boundary.ts`) |
 | `literalReflection` | The structurally provable part of reflective dispatch becomes an edge: a **literal dispatch table** — `HANDLERS[k]()` / `HANDLERS["create"]()` over a module-private `const` object whose name is used nowhere in the file except its declaration, a type query, and as the receiver of an immediately invoked subscript, in a file that evaluates no code. Each entry binds by its same-file module-level function declaration (or `const` arrow), never by name; an imported, reassigned, or `this`-using entry keeps the construct a site. A variable key binds every entry or none (none over the synthesis fan-out cap); a literal key binds its own entry. Edges carry `confidence: 'synthesized'` and `synthesizedBy: 'literal-reflective'`; bound constructs are persisted separately so a directly-resolved-only conclusion still discloses them; a subset rebuild, or a file with more recorded constructs than the per-file retention bound, binds nothing. Self-typed receivers (`this["m"]()`, `getattr(self, "m")()`, Ruby `send(:m)`), bare-name reflection, DI-container resolution, and Python dicts are never resolved. Backed for TypeScript/JavaScript. | `supportsLiteralReflection()` over `DYNAMIC_BOUNDARY_LANG_SPECS` (`dynamic-boundary.ts`) |
 | `messageTopology` | A message hop becomes an edge. A **send** is an object literal handed to a transport call (`send`, `postMessage`, `sendMessage`, `dispatch`, `broadcast`, `publish`, `emit`, also through `JSON.stringify`) whose discriminant field (`type`, `kind`, `action`, `event`, `op`, `cmd`, `command`, `tag`) holds a static tag: a string, a substitution-free template, or `Const.MEMBER` with `Const` bound at module scope or imported (a parameter or local is not static). A **consumer** is a `switch (m.type)` case (empty cases fall through), `if (m.type === tag)` (also as one `&&` operand), an early-exit `if (m.type !== tag) return;`, or `m.type === tag ? … : …`. The edge runs from the sending function to the clause's enclosing function and, when the clause is one call, to that callee (never a method on another object or a package import). A handler in a test file pairs only with a send in the same file. Edges carry `confidence: 'synthesized'` and `synthesizedBy: 'message-topology'`, share the event-channel fan-out cap, and are never treated as calls: `verify_claim` calls them unverifiable, `analyze_error_propagation` does not follow them, test reach and `tested_by` ignore them, a change-impact path across one is marked `crossesMessageHop`, `find_path`, `trace_execution_path` and `orient` label the hop with `via` (as for every synthesized rule), and `blast_radius` counts them per symbol (`synthesizedEdges`). A send no recognized clause selects is a `message-send` dynamic-boundary site with the most specific reason (`over-cap`, `unattributed-caller`, `unattributed-message-consumer`, `uncomparable-message-consumer`, `test-only-message-consumer`, `unindexed-message-consumer`). Declared union types are not read. Backed for TypeScript/JavaScript. | `MESSAGE_TOPOLOGY_LANGUAGES` (`message-topology.ts`) |
 | `errorPropagation` | Static exception escape/handler extraction for TypeScript, JavaScript, Python, Java, and C#; Java/C# typed handlers are exact-name lower bounds, with finally/resource-cleanup limits disclosed. Go uses a separate value-shaped model for proven returned-error positions and a narrow unconditional deferred-recover pattern; ambiguous result types, unwind ordering, and unresolved calls are boundaries, never exception terminology. | `ERROR_PROPAGATION_LANGUAGES` (`exception-flow.ts`) |
+| `deprecationMarkers` | The language's standard deprecation marker is recorded on the symbol with its replacement hint: a JSDoc `@deprecated` tag at the start of a line of the block right before the declaration (past `export`/modifiers and a `const name =` binding) for TypeScript/JavaScript, a `Deprecated:` comment paragraph for Go (staticcheck SA1019's convention), and a `@deprecated` / `@warnings.deprecated` / `@typing_extensions.deprecated` decorator for Python (PEP 702). The word "deprecated" in prose is never read. `structural_diff` reports calls a diff adds into marked symbols as `deprecated-symbol-use`. Java/Kotlin annotations and Python's `.. deprecated::` directive are not read yet. | `DEPRECATION_MARKER_LANGUAGES` (`call-graph-extract.ts`) |
 
 ## The registry is derived, not hand-listed
 
@@ -36,13 +39,17 @@ cross-checks **every member** of the `signatures`, `callGraph`, `complexity`, `i
 `receiverResolution`, `cfgOverlay`, `styleFingerprint`, `crossServiceHttp`, `errorPropagation`, and
 `dynamicBoundary` sets by running the real extractor on a per-language fixture and asserting it produces
 output (a malformed entry that produced nothing fails the test, not just the predicate tautology);
+`iacCodeBinding` is cross-checked both ways too: exactly against `IAC_CODE_BINDING_LANGUAGES`, and
+behaviorally by requiring each member to emit a resource that carries a `deploys` handler.
 `cfgOverlay` and `iacProjection` are additionally asserted exactly against their predicates
 (`cfgSupportsLanguage`, `isIacLanguage`) for every language, and `iacProjection`'s per-ecosystem node
 tagging is covered by the dedicated `iac/*.test.ts` suite and an end-to-end analyze check.
 `literalReflection` is cross-checked in `literal-reflection.test.ts` instead: the claimed set must equal
 the languages with a declared table rule, and each member must produce an edge on its fixture.
 `messageTopology` is cross-checked in `message-topology.test.ts`: TypeScript and JavaScript must each
-produce a message edge on a fixture, and no other language may claim it.
+produce a message edge on a fixture, and no other language may claim it. `deprecationMarkers` is
+cross-checked in `deprecation-markers.test.ts`: the claimed set must equal `DEPRECATION_MARKER_LANGUAGES`,
+and the live extractor must record a marker for each member on a fixture.
 
 This means an over-claimed matrix is structurally prevented — which matters, because an over-claimed
 coverage matrix is worse than none.
@@ -121,7 +128,8 @@ Lua used to share that lane and no longer does: it moved to the maintained
 for every supported platform. That migration is what lifted the `web-tree-sitter` pin — the old
 `tree-sitter-wasms` binaries were rejected by every loader from 0.26 onward, with an empty-message
 throw that silently removed both languages from the call graph — and it hands Lua two capabilities
-the WASM lane cannot offer: trustworthy parse-health and an enforceable parse budget. Dart's
+the WASM lane cannot offer: trustworthy parse-health and an enforceable in-parse deadline (the rest
+of the per-file extraction budget is language-independent and applies to the WASM lane too). Dart's
 binaries moved to the `@repomix/tree-sitter-wasms` rebuild, whose parse trees are byte-identical to
 the old ones. Both halves of the remaining lane are pinned exactly, and a guard test fails if
 either is loosened to a range, so loader and binaries can never drift apart unreviewed.
@@ -189,7 +197,17 @@ an existing one to a new capability:
         behavioral test — and assert the BOUNDARY fires for an untypeable receiver, not only that
         a resolved edge appears.
    - `imports`: extend the live `buildBaseImportMap` path and add `L` to `IMPORT_RESOLUTION_LANGUAGES`.
-   - `iacProjection`: add the ecosystem to `IAC_LANGUAGES` and its projector under `analyzer/iac/`.
+   - `iacProjection`: add the ecosystem to `IAC_LANGUAGES` and its projector under `analyzer/iac/`,
+     then add a case to `iac-projection-conformance.test.ts` and a fixture contributor to the
+     `iacProjection is behaviorally faithful` block in `language-support.test.ts` — both guards fail
+     until you do.
+   - `iacCodeBinding`: populate `IacResource.deploys` in that ecosystem's extractor and add it to
+     `IAC_CODE_BINDING_LANGUAGES` (`iac/deploy-binding.ts`), then wire a fixture into the
+     `every iacCodeBinding ecosystem emits a resource carrying a deploys binding` test — it fails
+     until a real extractor produces one, so the set cannot claim an ecosystem nothing binds.
+   - `contractSchemas`: add the format to `CONTRACT_LANGUAGES` and its reader under `analyzer/contract/`,
+     then wire it into `projectContracts` and the `contractSchemas` fixture map in
+     `language-support.test.ts` — the real builder must emit a node tagged with it.
    - `crossServiceHttp`: add a client idiom to `extractHttpCalls` and/or a route framework to the
      route extractors (`extractRouteDefinitions`/`extractTsRouteDefinitions`/`extractJavaRouteDefinitions`),
      then add `L` to `HTTP_CLIENT_LANGUAGES` and/or `HTTP_ROUTE_LANGUAGES` (`http-capability.ts`);
@@ -200,7 +218,8 @@ an existing one to a new capability:
      the language's catch semantics — typed catches need exact-name matching, untyped are catch-all.
 2. **Make `detectLanguage` map the file** (extension or classification) to the canonical name `L`.
 3. **Add `L` to the registry universe** if it is a brand-new name: `CODE_LANGUAGES` (extension-detected)
-   — IaC ecosystem tags are derived automatically from `IAC_LANGUAGES`.
+   — IaC ecosystem tags are derived automatically from `IAC_LANGUAGES`, and contract format tags
+   from `CONTRACT_LANGUAGES`.
 4. **Drop in a fixture** so the faithfulness test in `language-support.test.ts` exercises the new
    capability (the test asserts the claimed capability actually produces output — every member of
    every capability set is run through the live extractor). For a new `iacProjection` ecosystem, add

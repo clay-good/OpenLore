@@ -12,18 +12,21 @@
  */
 
 import { Command, Option } from 'commander';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { logger } from '../../utils/logger.js';
+import { logger, withLoggerOptions } from '../../utils/logger.js';
 // Repo-derived values are printed here with bare console.log (not via logger), so
 // they are neutralized explicitly. Whole-line sanitizing is not an option: these
 // lines carry intentional \n spacing that the sanitizer would strip.
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { withQuietStdout } from '../../utils/quiet-stdout.js';
+import { jsonOutput } from '../output.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { estimateTokens } from '../../core/services/llm-service.js';
-import { OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
-import { buildInjection, extractPrompt, pointerLineFor } from './orient-inject.js';
+import { OPENLORE_ANALYSIS_REL_PATH, OPENLORE_DIR } from '../../constants.js';
+import { DECISIONS_REVIEW_COMMAND, takeAutoAcceptsSinceLastSession } from '../../core/decisions/autopilot.js';
+import { buildInjection, buildProposalOnlyInjection, extractPrompt, pointerLineFor } from './orient-inject.js';
+import { SILENCE_CONTRACT_LINE } from './orient-inject-render.js';
 import {
   oneShotBuildNote,
   registerOneShotRepair,
@@ -32,7 +35,11 @@ import {
   type OneShotBuild,
 } from '../../core/services/one-shot-index-build.js';
 import { readStdin } from '../../utils/stdin.js';
-import { isInsideGitWorkTree } from '../../core/services/cold-start-bootstrap.js';
+import { findingIdentity, markShown, readSession, wasShown, writeSession } from '../../core/services/hook-session.js';
+import { errorReason, recordHookRun, type HookOutcome } from '../../core/services/hook-health.js';
+import { autoInitSuppression, isInsideGitWorkTree, recordDetachedRepair } from '../../core/services/cold-start-bootstrap.js';
+import { seedFromSiblingCheckout, servingSeededIndex } from '../../core/runtime/seed-from-sibling.js';
+import { EdgeStore } from '../../core/services/edge-store.js';
 
 interface OrientCliOptions {
   task?: string;
@@ -43,8 +50,11 @@ interface OrientCliOptions {
   json?: boolean;
   metrics?: boolean;
   inject?: boolean;
+  proposalOnly?: boolean;
   backgroundBuild?: boolean;
   backgroundRepair?: boolean;
+  /** The install scope that wired this hook (`user` stands down for repo wiring). */
+  scope?: string;
 }
 
 // readStdin moved to ../../utils/stdin.js (dependency-light leaf) so latency-sensitive hooks can
@@ -53,21 +63,27 @@ export { readStdin };
 
 /**
  * `orient --inject` — task-scoped context injection
- * (change: add-task-scoped-context-injection). Emits a bounded, attributed,
- * ignorable orientation block (or a single pointer line) to stdout for a
- * pre-turn agent hook. Reads the task from --task or the hook's stdin payload.
- * Always exits 0: a hook must never break the user's turn.
+ * (change: add-task-scoped-context-injection). Returns a bounded, attributed,
+ * ignorable orientation block (or a single pointer line) for a pre-turn agent
+ * hook. Reads the task from --task or the hook's stdin payload.
+ *
+ * This is the prompt-submitted moment of the agent loop (change: hook-reliability):
+ * a thrown error returns '' — the agent is told nothing about OpenLore's own failure.
  */
-async function runInject(
+export async function injectOutput(
   directory: string,
   taskOpt: string | undefined,
   buildNote?: string,
   silentWithoutIndex = false,
-): Promise<void> {
+  run?: { outcome: HookOutcome; reason?: string },
+): Promise<string> {
   let prompt = taskOpt ?? '';
+  let sessionId: string | undefined;
   if (!prompt) {
     try {
-      prompt = extractPrompt(await readStdin());
+      const raw = await readStdin();
+      prompt = extractPrompt(raw);
+      sessionId = sessionIdOf(raw);
     } catch {
       prompt = '';
     }
@@ -78,22 +94,127 @@ async function runInject(
     // context. Redirect diagnostics to stderr (same discipline as --json mode)
     // so stdout carries only the orientation block.
     const debug = process.env.OPENLORE_INJECT_DEBUG === '1';
-    const block = await withQuietStdout(() => buildInjection(directory, prompt, debug ? evaluation => {
+    let withheld: string | undefined;
+    // Quiet logger too: a hook writes nothing to stderr either ("[ok] Successfully validated…").
+    const block = await withQuietStdout(() => withLoggerOptions({ quiet: true }, () => buildInjection(directory, prompt, evaluation => {
+      // A failed lookup is silent to the agent and counted for the operator.
+      if (evaluation.reason === 'error' && run) { run.outcome = 'error'; if (evaluation.error) run.reason = evaluation.error; }
+      withheld = evaluation.passes ? undefined : evaluation.reason;
+      if (!debug) return;
       const verdict = evaluation.passes ? 'passed' : 'suppressed';
       process.stderr.write(
         `[openlore:inject] verdict=${verdict} reason=${evaluation.reason ?? 'none'} ` +
         `passed=${evaluation.passedCriteria.join(',') || 'none'} ` +
         `failed=${evaluation.failedCriteria.join(',') || 'none'}\n`,
       );
-    } : undefined));
+    })));
     // Outside any git work tree (e.g. $HOME) with no index, say nothing: "run openlore
     // analyze" on every prompt there invites an agent to index the whole directory.
-    if (block === pointerLineFor('no-graph') && silentWithoutIndex) return;
     // With a build in flight, "run openlore analyze" is the wrong remedy: say what is happening.
-    if (block) console.log(buildNote && block === pointerLineFor('no-graph') ? `[OpenLore] ${safe(buildNote)}` : block);
-  } catch {
-    // buildInjection is fail-open, but guard the print path too: never throw.
+    // A propose prompt may carry the proposal instruction after the pointer line; keep it.
+    let out = block;
+    const noGraph = pointerLineFor('no-graph');
+    if (out.startsWith(noGraph)) {
+      const rest = out.slice(noGraph.length).trim();
+      // A build in flight is the user's to watch (the status line and `openlore status` show its
+      // progress), not the agent's: the agent gets nothing about it, and tool answers served
+      // meanwhile already say they are partial (change: hook-reliability, task 9.4). With no build
+      // possible, the no-index line is stated once per harness session (task 4.3).
+      //
+      // No user-only line either. Task 9.1 asked the Claude Code hooks docs to confirm that a
+      // hook's `systemMessage` reaches the user and NOT the model. Checked 2026-11-14 at
+      // https://code.claude.com/docs/en/hooks: it is "shown to the user", and UserPromptSubmit
+      // accepts it, but the docs do not say it stays out of the model's context. Unconfirmed, so
+      // per 9.1 the line is dropped and the status line is the only progress channel.
+      const notice = silentWithoutIndex || buildNote ? undefined : 'no-index';
+      const head = notice && await firstTimeThisSession(directory, sessionId, notice) ? noGraph : '';
+      out = [head, rest].filter(Boolean).join('\n\n');
+    }
+    // A turn the anchor gate kept silent: what silence means is said once per session, not on every
+    // turn (change: anchor-gated-prompt-briefing).
+    if (!out && withheld && ['no-anchor', 'management-intent', 'empty-prompt'].includes(withheld)
+      && await firstTimeThisSession(directory, sessionId, 'silence-contract')) {
+      out = SILENCE_CONTRACT_LINE;
+    }
+    // Screened on the way out, whole-block: the framed part is already screened by
+    // frameServedContent, but the pointer line and the build note are assembled here, and this is
+    // the always-on UserPromptSubmit path. A bare console.log is invisible to the terminal-sink
+    // guard, which only inspects INTERPOLATIONS — which is why this leaked for so long.
+    return out ? safe(out, { keepNewlines: true }) : '';
+  } catch (error) {
+    // buildInjection is fail-open; guard the assembly too: never throw.
+    if (run) { run.outcome = 'error'; run.reason = errorReason(error); }
+    return '';
   }
+}
+
+/** The harness session id in a hook payload, when it carries one. */
+function sessionIdOf(raw: string): string | undefined {
+  try {
+    const v = JSON.parse(raw) as { session_id?: unknown };
+    return typeof v?.session_id === 'string' && v.session_id ? v.session_id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * True the first time `notice` is asked about in this harness session, and records it. Without a
+ * session id, or without a `.openlore/` to record it in, every time (nothing is deduplicated).
+ */
+async function firstTimeThisSession(root: string, sessionId: string | undefined, notice: string): Promise<boolean> {
+  // No `.openlore/` (auto-init off): write nothing into the repository; nothing is deduplicated.
+  if (!sessionId || !existsSync(join(root, OPENLORE_DIR))) return true;
+  const session = readSession(root, sessionId);
+  const { identity } = findingIdentity('notice', notice);
+  if (wasShown(session, identity, 'agent')) return false;
+  markShown(session, identity, { code: 'notice', subject: notice }, 'prompt-submitted', 'agent');
+  await writeSession(root, sessionId, session);
+  return true;
+}
+
+/**
+ * The prompt-submitted moment's runtime limit, timed in-process: the timer starts after the CLI
+ * has loaded, as every hook moment's does (hook-reliability design section 2; owner, 2026-11-14).
+ */
+export const PROMPT_SUBMITTED_LIMIT_MS = 3_000;
+
+/** What a moment's work settles to when it passed its runtime limit. */
+export const TIMED_OUT = Symbol('timed-out');
+
+/**
+ * Race `work` against `limitMs`. A thrown error settles to '' (silence); a passed limit to
+ * `TIMED_OUT`. Never rejects.
+ */
+export async function withinLimit(work: () => Promise<string>, limitMs: number): Promise<string | typeof TIMED_OUT> {
+  let timer: NodeJS.Timeout | undefined;
+  const limit = new Promise<typeof TIMED_OUT>(r => { timer = setTimeout(() => r(TIMED_OUT), limitMs); timer.unref?.(); });
+  try {
+    return await Promise.race([work().catch(() => ''), limit]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** Whether `hooks.prompt-submitted` is `false` in `.openlore/config.json` (an unreadable config is "on"). */
+export function promptSubmittedOff(root: string): boolean {
+  try {
+    const cfg = JSON.parse(readFileSync(join(root, OPENLORE_DIR, 'config.json'), 'utf-8')) as { hooks?: Record<string, unknown> };
+    return cfg?.hooks?.['prompt-submitted'] === false;
+  } catch {
+    return false;
+  }
+}
+
+/** Emit only the short OpenSpec proposal instruction; Codex gates the full task in its hook. */
+async function runProposalOnly(directory: string, taskOpt: string | undefined): Promise<void> {
+  let prompt = taskOpt ?? '';
+  if (!prompt) {
+    try { prompt = extractPrompt(await readStdin()); }
+    catch { prompt = ''; }
+  }
+  const context = await withQuietStdout(() => buildProposalOnlyInjection(directory, prompt));
+  if (context) console.log(safe(context, { keepNewlines: true }));
 }
 
 /**
@@ -116,6 +237,31 @@ function hasAnalysis(directory: string): boolean {
 }
 
 /**
+ * True when analysis exists but its call graph is UNUSABLE — the edge store is
+ * absent, or (the common field case) a version-upgrade schema reset left it
+ * open-but-empty, since EdgeStore empties itself on a schema change. This is the
+ * same state `readCachedContext`'s empty-store guard detects; it is re-checked
+ * here, cheaply and SYNCHRONOUSLY, because a one-shot `orient` (the install
+ * hooks) `process.exit(0)`s before any deferred read-path repair microtask could
+ * spawn — so the rebuild has to be kicked inline or the graph never self-heals
+ * and `orient` degrades to search-only every turn (change: self-heal-empty-graph-index).
+ */
+function graphIndexUnusable(root: string): boolean {
+  const analysisDir = join(root, OPENLORE_ANALYSIS_REL_PATH);
+  try {
+    if (!EdgeStore.exists(analysisDir)) return true;
+    const es = EdgeStore.open(EdgeStore.dbPath(analysisDir));
+    try {
+      return es.notReady != null || es.countNodes() === 0;
+    } finally {
+      es.close();
+    }
+  } catch {
+    return false; // can't tell → never force a rebuild on a guess
+  }
+}
+
+/**
  * The project an implicit (cwd) orient serves: the nearest ancestor that already has an
  * index, else the enclosing git work tree's root, else the start directory. Agent hooks run
  * from wherever the agent's shell is; from `<repo>/src` a plain cwd would report "no index"
@@ -131,22 +277,29 @@ export function implicitOrientRoot(start: string): string {
 }
 
 /** Session-start primer printed when orient is invoked without a task. */
-function printPrimer(directory: string, asJson: boolean, buildNote?: string): void {
+/**
+ * One line naming the decisions autopilot accepted since the previous session, or
+ * undefined (change: default-decision-autopilot-with-visible-trace).
+ */
+export function autoAcceptLine(entries: ReadonlyArray<{ title: string }>): string | undefined {
+  if (entries.length === 0) return undefined;
+  const clip = (t: string) => (t.length > 60 ? `${t.slice(0, 59)}…` : t);
+  const named = entries.slice(0, 3).map((e) => `"${safe(clip(e.title))}"`).join(', ');
+  const more = entries.length > 3 ? ` and ${entries.length - 3} more` : '';
+  return `Decisions auto-accepted since last session (${entries.length}): ${named}${more} — review: ${DECISIONS_REVIEW_COMMAND}`;
+}
+
+function printPrimer(directory: string, asJson: boolean, buildNote?: string, decisionsLine?: string): void {
   const ready = hasAnalysis(directory);
   if (asJson) {
-    console.log(
-      JSON.stringify(
-        {
-          openlore: ready ? 'ready' : 'no-analysis',
-          message: ready
-            ? 'OpenLore architectural memory is active. Call orient with a task before reading source files.'
-            : buildNote ?? 'OpenLore is installed but no analysis was found. Run "openlore analyze" to build the graph.',
-          usage: 'openlore orient --json --task "<task description>"',
-        },
-        null,
-        2
-      )
-    );
+    console.log(jsonOutput({
+      openlore: ready ? 'ready' : 'no-analysis',
+      message: ready
+        ? 'OpenLore architectural memory is active. Call orient with a task before reading source files.'
+        : buildNote ?? 'OpenLore is installed but no analysis was found. Run "openlore analyze" to build the graph.',
+      usage: 'openlore orient --json --task "<task description>"',
+      ...(decisionsLine ? { decisions: decisionsLine } : {}),
+    }));
     return;
   }
   if (ready) {
@@ -160,6 +313,7 @@ function printPrimer(directory: string, asJson: boolean, buildNote?: string): vo
     console.log('Run "openlore analyze" to build the graph, then:');
     console.log('  openlore orient --task "<task description>"');
   }
+  if (decisionsLine) console.log(decisionsLine);
 }
 
 /** Concise human-readable rendering of a handleOrient result. */
@@ -207,6 +361,31 @@ function printHuman(result: Record<string, unknown>): void {
   }
 }
 
+/**
+ * One-shot self-bootstrap (change: bootstrap-index-from-one-shot-orient): start one detached build
+ * for an absent index, and let the read path's staleness signals start the same build. Neither
+ * waits. A present index whose call graph is unusable (a version-upgrade schema reset empties the
+ * store) is rebuilt too. Both spawn SYNCHRONOUSLY: a one-shot orient process.exit(0)s before any
+ * deferred read-path repair microtask could run (change: self-heal-empty-graph-index).
+ */
+async function bootstrapOneShotIndex(root: string): Promise<OneShotBuild | undefined> {
+  let build: OneShotBuild | undefined;
+  // A new worktree first copies a sibling checkout's verified index, awaited here because
+  // this process exits as soon as it answers (change: seed-worktree-index-from-sibling-checkout).
+  if (!hasAnalysis(root) && !autoInitSuppression(root)) await seedFromSiblingCheckout(root);
+  if (!hasAnalysis(root)) {
+    build = startDetachedIndexBuild(root, 'index-absent');
+  } else if (await servingSeededIndex(root)) {
+    // Until the rebuild publishes, every answer is disclosed as served from the seed.
+    build = startDetachedIndexBuild(root, 'seeded');
+    if (build.state === 'started' || build.state === 'running') recordDetachedRepair(root, 'seeded');
+  } else if (graphIndexUnusable(root)) {
+    build = startDetachedIndexBuild(root, 'stale-region');
+  }
+  registerOneShotRepair(root);
+  return build;
+}
+
 export const orientCommand = new Command('orient')
   .description('Get the relevant functions, callers, specs, and insertion points for a task')
   // Accept the task as a bare positional too (`openlore orient "add rate limiting"`) — the
@@ -221,6 +400,8 @@ export const orientCommand = new Command('orient')
   .option('--json', 'Emit the full result as JSON instead of a human-readable summary', false)
   .option('--metrics', 'Report wall time and output size to stderr (opt-in; off by default)', false)
   .option('--inject', 'Emit a bounded, ignorable task-scoped orientation block for a pre-turn agent hook (reads the task from --task or stdin); always exits 0', false)
+  .option('--proposal-only', 'Emit the concise OpenSpec proposal instruction only when the submitted prompt invokes propose; always exits 0', false)
+  .option('--scope <scope>', 'the install scope that wired this hook; `user` stands down where the repository wires the same hook itself')
   .addOption(new Option('--background-build').hideHelp())
   .addOption(new Option('--background-repair').hideHelp())
   .addHelpText(
@@ -249,26 +430,51 @@ prints a short session-start primer (used by the install SessionStart hook).
       return;
     }
 
-    // One-shot self-bootstrap (change: bootstrap-index-from-one-shot-orient): start one
-    // detached build for an absent index, and let the read path's staleness signals
-    // start the same build. Neither waits.
-    const root = resolve(directory);
-    let build: OneShotBuild | undefined = hasAnalysis(root) ? undefined : startDetachedIndexBuild(root, 'index-absent');
-    registerOneShotRepair(root);
-    const buildNote = (): string | undefined => build && oneShotBuildNote(build);
-
-    // Task-scoped injection hook mode: emit a bounded orientation block (or a
-    // pointer line) to stdout and always exit 0 — a pre-turn hook must never
-    // break the user's turn. Reads the task from --task or stdin.
-    if (opts.inject) {
-      const building = build?.state === 'started' || build?.state === 'running';
-      await runInject(directory, task, buildNote(), !building && !hasAnalysis(root) && !isInsideGitWorkTree(root));
+    // Lightweight proposal trigger for hosts such as Codex whose prompt-submit hook matcher is
+    // ignored. It does no structural lookup and emits nothing for unrelated prompts.
+    if (opts.proposalOnly) {
+      await runProposalOnly(directory, task);
       return;
     }
 
+    const root = resolve(directory);
+    // A user-scope hook stands down where the repository wires the same hook itself, so a
+    // repository wired at both scopes is briefed once (change: user-scope-loop-hooks).
+    if (opts.scope === 'user' && (opts.inject || !task)) {
+      const { repoWiresStep } = await import('../install/hook-wiring-health.js');
+      if (repoWiresStep([process.env.CLAUDE_PROJECT_DIR, root], opts.inject ? 'orient --inject' : 'orient --json')) return;
+    }
+    // The prompt-submitted moment: off switch first (nothing runs, no build), then the whole
+    // moment — index bootstrap and lookup — under its runtime limit (change: hook-reliability).
+    if (opts.inject) {
+      if (promptSubmittedOff(root)) return;
+      const run: { outcome: HookOutcome; reason?: string } = { outcome: 'ok' };
+      const out = await withinLimit(async () => {
+        try {
+          const build = await bootstrapOneShotIndex(root);
+          const building = build?.state === 'started' || build?.state === 'running';
+          return await injectOutput(directory, task, build && oneShotBuildNote(build), !building && !hasAnalysis(root) && !isInsideGitWorkTree(root), run);
+        } catch (error) {
+          run.outcome = 'error';
+          run.reason = errorReason(error);
+          throw error;
+        }
+      }, PROMPT_SUBMITTED_LIMIT_MS);
+      if (out === TIMED_OUT) run.outcome = 'overrun';
+      if (out !== TIMED_OUT && out) console.log(out);
+      // Hook health (change: hook-reliability, task 6.1): whole-process time, after the output.
+      await recordHookRun(root, { moment: 'prompt-submitted', ms: process.uptime() * 1000, outcome: run.outcome, shown: 0, ...(run.reason ? { reason: run.reason } : {}) });
+      // Past the limit: stop the work still running.
+      if (out === TIMED_OUT) process.exit(0);
+      return;
+    }
+
+    let build = await bootstrapOneShotIndex(root);
+    const buildNote = (): string | undefined => build && oneShotBuildNote(build);
+
     // No task → session-start primer (keeps the install hook from erroring).
     if (!task) {
-      printPrimer(directory, asJson, buildNote());
+      printPrimer(directory, asJson, buildNote(), autoAcceptLine(await takeAutoAcceptsSinceLastSession(root)));
       return;
     }
 
@@ -316,14 +522,14 @@ prints a short session-start primer (used by the install SessionStart hook).
       // Always emit structured results (including the "no analysis" error object)
       // on stdout so wrapper scripts can parse them — mirroring the MCP tool.
       if (asJson) {
-        console.log(JSON.stringify(result, null, 2));
+        console.log(jsonOutput(result));
       } else {
         printHuman(result);
       }
     } catch (err) {
       const message = (err as Error).message;
       if (asJson) {
-        console.log(JSON.stringify({ error: message }, null, 2));
+        console.log(jsonOutput({ error: message }));
       } else {
         logger.error(`orient failed: ${message}`);
       }

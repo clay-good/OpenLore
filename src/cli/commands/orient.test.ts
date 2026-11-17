@@ -9,6 +9,7 @@ vi.mock('../../utils/logger.js', () => ({
     error: vi.fn(), info: vi.fn(), section: vi.fn(), success: vi.fn(),
     warning: vi.fn(), discovery: vi.fn(), blank: vi.fn(), debug: vi.fn(),
   },
+  withLoggerOptions: (_options: unknown, callback: () => unknown) => callback(),
 }));
 
 vi.mock('../../core/services/mcp-handlers/orient.js', () => ({
@@ -30,9 +31,13 @@ vi.mock('../../core/services/one-shot-index-build.js', async (importOriginal) =>
   };
 });
 
-import { implicitOrientRoot, orientCommand, readStdin } from './orient.js';
+import { TIMED_OUT, autoAcceptLine, implicitOrientRoot, orientCommand, promptSubmittedOff, readStdin, withinLimit } from './orient.js';
+import { appendLedgerEntries } from '../../core/decisions/ledger.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { startDetachedIndexBuild } from '../../core/services/one-shot-index-build.js';
-import { pointerLineFor } from './orient-inject-render.js';
+import { EdgeStore } from '../../core/services/edge-store.js';
+import { SILENCE_CONTRACT_LINE } from './orient-inject-render.js';
 import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { existsSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
@@ -122,7 +127,8 @@ describe('orient command', () => {
   });
 
   describe('--inject (task-scoped injection hook)', () => {
-    it('emits an attributed, ignorable block for a strong match and never errors', async () => {
+    it('emits an attributed, ignorable block for an exact anchor, showing only what it names', async () => {
+      mockExistsSync.mockImplementation((p: unknown) => String(p).endsWith('llm-context.json'));
       mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'covered', questionKind: 'where-is' },
         task: 'auth flow',
         searchMode: 'hybrid',
@@ -135,24 +141,32 @@ describe('orient command', () => {
         callPaths: [],
         suggestedTools: ['orient'],
       });
-      await orientCommand.parseAsync(['--inject', '--task', 'auth flow'], { from: 'user' });
+      await orientCommand.parseAsync(['--inject', '--task', 'why does `authMiddleware` reject this?'], { from: 'user' });
       expect(output()).toContain('[OpenLore]');
       expect(output().toLowerCase()).toContain('ignore');
+      expect(output()).toContain('authMiddleware — src/auth/mw.ts');
+      expect(output()).not.toContain('Spec domains');
+      expect(mockHandleOrient).toHaveBeenCalledWith('/fake/proj', 'authMiddleware', 8, undefined, true, 'distance', expect.objectContaining({ repoWideParseHealth: false }));
       expect(process.exitCode).toBeUndefined();
     });
 
-    it('emits the pointer line (never throws) when handleOrient returns an error result', async () => {
+    it('prints nothing (never throws) when handleOrient returns an error result', async () => {
       mockHandleOrient.mockResolvedValue({ error: 'No analysis found.' });
       await orientCommand.parseAsync(['--inject', '--task', 'whatever'], { from: 'user' });
-      // The pointer line now states WHY the briefing was withheld
-      // (change: scope-advisory-noise-to-touched-code) — here, orientation failed.
-      expect(output()).toContain('[OpenLore] No briefing:');
-      expect(output()).toContain('orientation failed for this turn');
-      expect(output()).toContain('orient');
+      // A failed lookup is silent to the agent (change: hook-reliability).
+      expect(output()).toBe('');
       expect(process.exitCode).toBeUndefined();
     });
 
-    it('reports a suppressed gate to stderr only when injection debug is enabled', async () => {
+    it('prints nothing (never throws) when handleOrient throws', async () => {
+      mockHandleOrient.mockRejectedValue(new Error('index mid-rebuild'));
+      await orientCommand.parseAsync(['--inject', '--task', 'auth flow'], { from: 'user' });
+      expect(output()).toBe('');
+      expect(process.exitCode).toBeUndefined();
+    });
+
+    it('a prose prompt is not searched; silence is explained once, and the reason goes to stderr only in debug', async () => {
+      mockExistsSync.mockImplementation((p: unknown) => String(p).endsWith('llm-context.json'));
       mockHandleOrient.mockResolvedValue({ coverage: { verdict: 'weak', questionKind: 'where-is' },
         task: 'update the documentation',
         searchMode: 'bm25_fallback',
@@ -166,15 +180,13 @@ describe('orient command', () => {
 
       await orientCommand.parseAsync(['--inject', '--task', 'update the documentation'], { from: 'user' });
 
-      // A weak match is withheld with its own stated reason, distinct from the
-      // "no lookup was performed" variants (change: scope-advisory-noise-to-touched-code).
-      expect(output()).toBe(pointerLineFor('weak-relevance'));
-      expect(output()).toContain('nothing in the graph matched this turn');
+      // No anchor: no lookup at all, and (with no session id to deduplicate on) the silence
+      // contract line (change: anchor-gated-prompt-briefing).
+      expect(mockHandleOrient).not.toHaveBeenCalled();
+      expect(output()).toBe(SILENCE_CONTRACT_LINE);
       const stderrText = stderrSpy.mock.calls.map(c => String(c[0])).join('');
       expect(stderrText).toContain('[openlore:inject] verdict=suppressed');
-      expect(stderrText).toContain('reason=weak-relevance');
-      expect(stderrText).toContain('failed=');
-      expect(stderrText).not.toContain('hybrid-score');
+      expect(stderrText).toContain('reason=no-anchor');
       expect(output()).not.toContain('verdict=suppressed');
 
       stderrSpy.mockClear();
@@ -197,6 +209,32 @@ describe('orient command', () => {
       await orientCommand.parseAsync(['--json'], { from: 'user' });
       const parsed = JSON.parse(output());
       expect(parsed.openlore).toBe('no-analysis');
+    });
+
+    // change: default-decision-autopilot-with-visible-trace
+    it('names decisions auto-accepted since the previous session in one line, once', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'openlore-primer-'));
+      try {
+        const at = '2020-01-01T00:00:00Z';
+        await appendLedgerEntries(dir, [
+          { id: 'aaaa1111', title: 'Use UUIDs', from: null, to: 'auto-approved', actor: 'agent', at },
+          { id: 'bbbb2222', title: 'Cache specs', from: null, to: 'auto-approved', actor: 'agent', at },
+        ]);
+        await orientCommand.parseAsync(['--directory', dir], { from: 'user' });
+        const lines = output().split('\n').filter((l) => l.includes('auto-accepted'));
+        expect(lines).toEqual(['Decisions auto-accepted since last session (2): "Use UUIDs", "Cache specs" — review: openlore decisions review']);
+        consoleSpy.mockClear();
+        await orientCommand.parseAsync(['--directory', dir], { from: 'user' });
+        expect(output()).not.toContain('auto-accepted');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('bounds the auto-accept line to three named decisions', () => {
+      const line = autoAcceptLine(['a', 'b', 'c', 'd', 'e'].map((title) => ({ title })));
+      expect(line).toBe('Decisions auto-accepted since last session (5): "a", "b", "c" and 2 more — review: openlore decisions review');
+      expect(autoAcceptLine([])).toBeUndefined();
     });
 
     it('--json primer reports "ready" when analysis exists', async () => {
@@ -237,12 +275,15 @@ describe('orient command', () => {
       expect(JSON.parse(output()).message).toContain('a build is already running');
     });
 
-    it('--inject reports the build in place of the "run analyze" pointer', async () => {
-      mockStartBuild.mockReturnValue({ state: 'started' });
-      mockHandleOrient.mockResolvedValue({ ...notReady });
-      await orientCommand.parseAsync(['--inject', '--task', 'fix the auth flow bug'], { from: 'user' });
-      expect(output()).toContain('[OpenLore] No index existed for this repository yet');
-      expect(output()).not.toBe(pointerLineFor('no-graph'));
+    it('--inject says nothing to the agent while a build runs: no build note, no "run analyze" pointer (hook-reliability 9.4)', async () => {
+      for (const state of ['started', 'running'] as const) {
+        consoleSpy.mockClear();
+        mockStartBuild.mockReturnValue({ state });
+        mockHandleOrient.mockResolvedValue({ ...notReady });
+        await orientCommand.parseAsync(['--inject', '--task', 'fix the auth flow bug'], { from: 'user' });
+        expect(output()).toBe('');
+        expect(mockStartBuild).toHaveBeenCalled();
+      }
     });
 
     it('--inject says nothing outside a git work tree with no index and no build', async () => {
@@ -256,6 +297,30 @@ describe('orient command', () => {
       mockExistsSync.mockReturnValue(true);
       await orientCommand.parseAsync(['--json'], { from: 'user' });
       expect(mockStartBuild).not.toHaveBeenCalled();
+    });
+
+    it('starts a stale-region rebuild when analysis exists but the call graph is empty (schema reset)', async () => {
+      // Regression (change: self-heal-empty-graph-index): a version-upgrade schema reset
+      // empties the edge store. Before the fix, orient saw hasAnalysis=true and started NO
+      // build, so the one-shot install hooks degraded to search every turn and never
+      // self-healed — the async read-path repair dies on the CLI's process.exit(0). The
+      // empty graph must now kick a SYNCHRONOUS rebuild, exactly as an absent index does.
+      mockExistsSync.mockReturnValue(true); // llm-context.json present → hasAnalysis(root)
+      const existsSpy = vi.spyOn(EdgeStore, 'exists').mockReturnValue(true);
+      const dbPathSpy = vi.spyOn(EdgeStore, 'dbPath').mockReturnValue('/fake/proj/.openlore/analysis/call-graph.db');
+      const openSpy = vi.spyOn(EdgeStore, 'open').mockReturnValue(
+        { notReady: null, countNodes: () => 0, close: () => {} } as unknown as ReturnType<typeof EdgeStore.open>,
+      );
+      mockStartBuild.mockReturnValue({ state: 'started' });
+      mockHandleOrient.mockResolvedValue({ task: 'x', searchMode: 'bm25_fallback', relevantFunctions: [] });
+      try {
+        await orientCommand.parseAsync(['--json', '--task', 'x'], { from: 'user' });
+        expect(mockStartBuild).toHaveBeenCalledWith(resolve('/fake/proj'), 'stale-region');
+      } finally {
+        existsSpy.mockRestore();
+        dbPathSpy.mockRestore();
+        openSpy.mockRestore();
+      }
     });
   });
 
@@ -422,5 +487,30 @@ describe('implicitOrientRoot', () => {
 
   it('keeps the start directory when nothing encloses it', () => {
     expect(implicitOrientRoot('/fake/proj')).toBe('/fake/proj');
+  });
+});
+
+describe('the prompt-submitted moment (change: hook-reliability)', () => {
+  it('withinLimit: a passed limit settles to TIMED_OUT, a throw to silence, an answer to itself', async () => {
+    await expect(withinLimit(() => new Promise(r => setTimeout(() => r('late'), 200)), 5)).resolves.toBe(TIMED_OUT);
+    await expect(withinLimit(async () => { throw new Error('boom'); }, 1000)).resolves.toBe('');
+    await expect(withinLimit(async () => 'block', 1000)).resolves.toBe('block');
+  });
+
+  it('promptSubmittedOff reads hooks.prompt-submitted, and an unreadable config is on', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const dir = mkdtempSync(join(tmpdir(), 'olpromptoff-'));
+    try {
+      expect(promptSubmittedOff(dir)).toBe(false);
+      mkdirSync(join(dir, '.openlore'));
+      writeFileSync(join(dir, '.openlore', 'config.json'), JSON.stringify({ hooks: { 'prompt-submitted': false } }));
+      expect(promptSubmittedOff(dir)).toBe(true);
+      writeFileSync(join(dir, '.openlore', 'config.json'), JSON.stringify({ hooks: { 'prompt-submitted': true } }));
+      expect(promptSubmittedOff(dir)).toBe(false);
+      writeFileSync(join(dir, '.openlore', 'config.json'), '{"hooks": {');
+      expect(promptSubmittedOff(dir)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

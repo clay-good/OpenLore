@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
+import { joinCapped, INVENTORY_ITEMS_SHOWN } from '../../utils/capped-list.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify, rejectRepoConfiguredTlsOptOut } from '../../core/services/repo-config-trust.js';
 import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
 import { safeJoin } from '../../utils/path-confinement.js';
@@ -599,7 +600,7 @@ Each spec.md follows OpenSpec conventions:
         logger.warning('Using a legacy analysis without a generation manifest; run "openlore analyze" to upgrade its coherence guarantee.');
       }
       logger.info('Files analyzed', repoStructure.statistics.analyzedFiles);
-      logger.info('Domains detected', repoStructure.domains.map(d => d.name).join(', ') || 'None');
+      logger.info('Domains detected', joinCapped(repoStructure.domains.map(d => d.name), INVENTORY_ITEMS_SHOWN, ', ', 'domain') || 'None');
       logger.blank();
 
       if (opts.plan || opts.dryRun) {

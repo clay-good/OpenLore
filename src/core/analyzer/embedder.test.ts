@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveEmbedder, embedderMode, servedRetrievalMode, indexCapabilityAgreement, semanticProviderConfigured } from './embedder.js';
+import {
+  resolveEmbedder, embedderMode, servedRetrievalMode, indexCapabilityAgreement, semanticProviderConfigured,
+  backgroundSemanticAllowed, localEmbedderInstalled,
+} from './embedder.js';
 import {
   LocalEmbeddingService,
   DEFAULT_LOCAL_MODEL,
@@ -294,5 +297,60 @@ describe('indexCapabilityAgreement — configured provider vs. realized index', 
     // An unreachable endpoint still answers "configured": the predicate is safe on the
     // index-reuse hot path precisely because it never probes.
     expect(semanticProviderConfigured({ embedding: { baseUrl: 'http://127.0.0.1:1/v1', model: 'm' } } as OpenLoreConfig)).toBe(true);
+  });
+});
+
+describe('background local vectors (change: enable-local-semantic-search-in-background)', () => {
+  let dir: string;
+  const saved = { ...process.env };
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-background-'));
+    delete process.env.EMBED_BASE_URL;
+    delete process.env.EMBED_MODEL;
+  });
+
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  const withMeta = async (meta: Record<string, unknown>): Promise<void> => {
+    await writeFile(join(dir, 'vector-index-meta.json'), JSON.stringify(meta), 'utf-8');
+  };
+  const localVectors = { hasEmbeddings: true, dim: 384, model: `local:${DEFAULT_LOCAL_MODEL}` };
+
+  it('resolves the local embedder for an unconfigured repository whose index carries local vectors', async () => {
+    await withMeta(localVectors);
+    const e = await resolveEmbedder(null, dir);
+    // The package is an optionalDependency: without it, keyword keeps serving.
+    expect(embedderMode(e)).toBe(localEmbedderInstalled() ? 'local-semantic' : 'keyword');
+    expect(servedRetrievalMode(e, dir, 'code', false)).toBe(localEmbedderInstalled() ? 'local-semantic' : 'keyword');
+  });
+
+  it('stays keyword until the vectors exist, and without the analysis directory', async () => {
+    await withMeta({ hasEmbeddings: false, dim: 0, model: null });
+    expect(await resolveEmbedder(null, dir)).toBeNull();
+    await withMeta(localVectors);
+    expect(await resolveEmbedder(null)).toBeNull();
+  });
+
+  it('honours every opt-out: provider "none" (even over EMBED_*) and a null block', async () => {
+    await withMeta(localVectors);
+    process.env.EMBED_BASE_URL = 'http://127.0.0.1:8765/v1';
+    process.env.EMBED_MODEL = 'env-model';
+    expect(await resolveEmbedder(cfg({ provider: 'none' }), dir)).toBeNull();
+    expect(semanticProviderConfigured(cfg({ provider: 'none' }))).toBe(false);
+    delete process.env.EMBED_BASE_URL;
+    delete process.env.EMBED_MODEL;
+    expect(await resolveEmbedder(cfg(null), dir)).toBeNull();
+    expect(backgroundSemanticAllowed(cfg({ provider: 'none' }))).toBe(false);
+    expect(backgroundSemanticAllowed(cfg(null))).toBe(false);
+    expect(backgroundSemanticAllowed(cfg(undefined))).toBe(true);
+  });
+
+  it('treats background vectors as agreeing with the unconfigured default', async () => {
+    await withMeta(localVectors);
+    expect(indexCapabilityAgreement(null, dir)).toEqual({ agrees: true });
+    expect(indexCapabilityAgreement(cfg({ provider: 'none' }), dir)).toEqual({ agrees: false, mismatch: 'vectors-without-provider' });
   });
 });

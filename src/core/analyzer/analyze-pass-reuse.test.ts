@@ -85,7 +85,8 @@ describe('Pass-1 late-fact reuse', () => {
 
     expect(samples[0]).toEqual(samples[1]);
     expect(samples[0].parses).toBe(corpus.length);
-    expect(samples[0].nativeQueryCompiles).toBe(4);
+    // One compile per distinct query; the `new C(...)` query made it five.
+    expect(samples[0].nativeQueryCompiles).toBe(5);
     expect(samples[0].nativeQueryCompileCounts.every(count => count === 1)).toBe(true);
   });
 
@@ -201,7 +202,12 @@ describe('Pass-1 late-fact reuse', () => {
       else process.env.OPENLORE_NO_WORKERS = priorNoWorkers;
     }
     expect(__getAnalyzerWorkCountersForTests().parses).toBe(0);
-    expect(pooled.extractionLane).toMatchObject({ lane: 'pooled', workerFallbackFiles: [], laneDefectFiles: [] });
+    expect(pooled.extractionLane).toMatchObject({
+      lane: 'pooled', workerFallbackFiles: [], laneDefectFiles: [],
+      // Both lanes agreed about every file, so nothing had to be re-checked (change:
+      // fix-recheck-failed-worker-extractions).
+      workerFailureDefectFiles: [], failureRechecks: 0, laneRetiredAfterFailures: false,
+    });
     expect(JSON.stringify(serializeCallGraph(pooled))).toBe(JSON.stringify(serializeCallGraph(serial)));
     expect(pooled.inheritanceEdges).toContainEqual(expect.objectContaining({ kind: 'extends' }));
     expect(pooled.edges.some(edge => edge.synthesizedBy === 'event-channel')).toBe(true);

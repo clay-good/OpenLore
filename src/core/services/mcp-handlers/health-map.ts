@@ -1,6 +1,11 @@
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import type { SerializedCallGraph, FunctionNode, CallEdge } from '../../analyzer/call-graph.js';
 import { volatilityLevel } from '../../provenance/change-coupling.js';
+import { computeComplexityTrends, decliningHealthFindings } from './complexity-trend.js';
+import { classifyFindings, effectivePolicy } from './enforcement-policy.js';
+import { readOpenLoreConfig } from '../config-manager.js';
+import { isDeclarationEdgeKind } from '../../analyzer/projected-language.js';
+import { isCodeNode } from './code-node.js';
 
 const HUB_MIN_FAN_IN = 5;
 const GOD_MIN_FAN_OUT = 8;
@@ -97,12 +102,20 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
 
   const limit = Math.max(1, Math.min(input.limit ?? DEFAULT_LIMIT, 50));
   const cg = ctx.callGraph as SerializedCallGraph;
-  const codeNodes = cg.nodes.filter(n => !n.isExternal && !n.isTest);
+  // A projected declaration is not code whose health can decline, so it is no more a hub,
+  // orchestrator or chokepoint here than it is in the graph's own rankings — `isCodeNode` is
+  // that same predicate. An OpenAPI schema referenced by every operation otherwise lands as the
+  // repository's top bridge node and pushes the real chokepoint down the list.
+  const codeNodes = cg.nodes.filter(n => isCodeNode(n) && !n.isTest);
   // Structural-health signals are measured on the directly-resolved graph: synthesized
   // dynamic-dispatch edges are heuristic shortcuts that can manufacture false betweenness
   // chokepoints and mask untested hotspots, so they are excluded from centrality/coverage
   // here. (Reachability, impact, and dead-code traverse them by default elsewhere.)
-  const directEdges = cg.edges.filter(e => e.confidence !== 'synthesized');
+  // A declaration edge is not a call either: it carries no control flow, so it can shift no
+  // function's betweenness.
+  const directEdges = cg.edges.filter(
+    e => e.confidence !== 'synthesized' && !isDeclarationEdgeKind(e.kind),
+  );
 
   // --- Hubs (high fan-in) ---
   const hubNodes = codeNodes
@@ -135,6 +148,16 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
   }
   const volatileFileList = allVolatileFiles.slice(0, limit);
   const volatileFileSet = new Set(allVolatileFiles.map(v => v.file));
+
+  // --- Complexity trend of high-complexity functions in churned files (add-complexity-trend-signal) ---
+  // Needs churn to pick hotspots; without it the trend is withheld, not reported as flat.
+  const trend = volatileFileSet.size > 0
+    ? await computeComplexityTrends(absDir, codeNodes, volatileFileSet, limit)
+    : undefined;
+  const trendFindings = trend ? decliningHealthFindings(trend) : [];
+  const trendGate = trendFindings.length
+    ? classifyFindings(trendFindings, effectivePolicy(await readOpenLoreConfig(absDir)))
+    : undefined;
 
   // --- Bridge nodes (sampled betweenness centrality on the call graph) ---
   // Compute the FULL ranking, then slice for display — the same shape the volatility
@@ -202,6 +225,7 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
       volatileFileCount: allVolatileFiles.length,
       bridgeCount,
       untestedHotspotCount: allUntestedHotspots.length,
+      decliningHealthCount: trendFindings.length,
       betweennessApprox: codeNodes.length > MAX_BETWEENNESS_SOURCES,
       betweennessSourceCount,
     },
@@ -215,6 +239,14 @@ export async function handleGetHealthMap(input: GetHealthMapInput): Promise<unkn
       ? { indexIntegrity: { verdict: ctx.integrity.verdict, detail: ctx.integrity.detail } }
       : {}),
     topRisks,
+    complexityTrend: trend
+      ? {
+          hotspots: trend.hotspots,
+          ...(trend.notSampled ? { notSampled: trend.notSampled } : {}),
+          ...(trendGate ? { findings: trendGate.classified, gated: trendGate.gated } : {}),
+          caveats: trend.caveats,
+        }
+      : { withheld: 'No change-coupling (churn) data in the index, so hotspots for a complexity trend cannot be chosen. Run openlore analyze in a git repository.' },
     hotspots: {
       hubs: hubNodes.slice(0, Math.min(limit, 5)).map(n => ({
         name: n.name,

@@ -1,0 +1,2470 @@
+{
+  "nodes": [
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CartItem.Reset",
+      "startIndex": 1502,
+      "endIndex": 1702
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CartItem.String",
+      "startIndex": 1704,
+      "endIndex": 1781
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CartItem.ProtoMessage",
+      "startIndex": 1783,
+      "endIndex": 1817
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CartItem.ProtoReflect",
+      "startIndex": 1819,
+      "endIndex": 2117
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CartItem.Descriptor",
+      "startIndex": 2180,
+      "endIndex": 2277
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CartItem.GetProductId",
+      "startIndex": 2279,
+      "endIndex": 2373
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CartItem.GetQuantity",
+      "startIndex": 2375,
+      "endIndex": 2465
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AddItemRequest.Reset",
+      "startIndex": 2794,
+      "endIndex": 3006
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AddItemRequest.String",
+      "startIndex": 3008,
+      "endIndex": 3091
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AddItemRequest.ProtoMessage",
+      "startIndex": 3093,
+      "endIndex": 3133
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AddItemRequest.ProtoReflect",
+      "startIndex": 3135,
+      "endIndex": 3439
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AddItemRequest.Descriptor",
+      "startIndex": 3508,
+      "endIndex": 3611
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AddItemRequest.GetUserId",
+      "startIndex": 3613,
+      "endIndex": 3707
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AddItemRequest.GetItem",
+      "startIndex": 3709,
+      "endIndex": 3803
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::EmptyCartRequest.Reset",
+      "startIndex": 4049,
+      "endIndex": 4265
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::EmptyCartRequest.String",
+      "startIndex": 4267,
+      "endIndex": 4352
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::EmptyCartRequest.ProtoMessage",
+      "startIndex": 4354,
+      "endIndex": 4396
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::EmptyCartRequest.ProtoReflect",
+      "startIndex": 4398,
+      "endIndex": 4704
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::EmptyCartRequest.Descriptor",
+      "startIndex": 4775,
+      "endIndex": 4880
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::EmptyCartRequest.GetUserId",
+      "startIndex": 4882,
+      "endIndex": 4978
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetCartRequest.Reset",
+      "startIndex": 5222,
+      "endIndex": 5434
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetCartRequest.String",
+      "startIndex": 5436,
+      "endIndex": 5519
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetCartRequest.ProtoMessage",
+      "startIndex": 5521,
+      "endIndex": 5561
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetCartRequest.ProtoReflect",
+      "startIndex": 5563,
+      "endIndex": 5867
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetCartRequest.Descriptor",
+      "startIndex": 5936,
+      "endIndex": 6039
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetCartRequest.GetUserId",
+      "startIndex": 6041,
+      "endIndex": 6135
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Cart.Reset",
+      "startIndex": 6460,
+      "endIndex": 6652
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Cart.String",
+      "startIndex": 6654,
+      "endIndex": 6727
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Cart.ProtoMessage",
+      "startIndex": 6729,
+      "endIndex": 6759
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Cart.ProtoReflect",
+      "startIndex": 6761,
+      "endIndex": 7055
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Cart.Descriptor",
+      "startIndex": 7114,
+      "endIndex": 7207
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Cart.GetUserId",
+      "startIndex": 7209,
+      "endIndex": 7293
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Cart.GetItems",
+      "startIndex": 7295,
+      "endIndex": 7383
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Empty.Reset",
+      "startIndex": 7520,
+      "endIndex": 7714
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Empty.String",
+      "startIndex": 7716,
+      "endIndex": 7790
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Empty.ProtoMessage",
+      "startIndex": 7792,
+      "endIndex": 7823
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Empty.ProtoReflect",
+      "startIndex": 7825,
+      "endIndex": 8120
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Empty.Descriptor",
+      "startIndex": 8180,
+      "endIndex": 8274
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.Reset",
+      "startIndex": 8651,
+      "endIndex": 8887
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.String",
+      "startIndex": 8889,
+      "endIndex": 8984
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.ProtoMessage",
+      "startIndex": 8986,
+      "endIndex": 9038
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.ProtoReflect",
+      "startIndex": 9040,
+      "endIndex": 9356
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.Descriptor",
+      "startIndex": 9437,
+      "endIndex": 9552
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.GetUserId",
+      "startIndex": 9554,
+      "endIndex": 9660
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.GetProductIds",
+      "startIndex": 9662,
+      "endIndex": 9779
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListRecommendationsResponse.Reset",
+      "startIndex": 10054,
+      "endIndex": 10292
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListRecommendationsResponse.String",
+      "startIndex": 10294,
+      "endIndex": 10390
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListRecommendationsResponse.ProtoMessage",
+      "startIndex": 10392,
+      "endIndex": 10445
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListRecommendationsResponse.ProtoReflect",
+      "startIndex": 10447,
+      "endIndex": 10764
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListRecommendationsResponse.Descriptor",
+      "startIndex": 10846,
+      "endIndex": 10962
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListRecommendationsResponse.GetProductIds",
+      "startIndex": 10964,
+      "endIndex": 11082
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Product.Reset",
+      "startIndex": 11882,
+      "endIndex": 12080
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Product.String",
+      "startIndex": 12082,
+      "endIndex": 12158
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Product.ProtoMessage",
+      "startIndex": 12160,
+      "endIndex": 12193
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Product.ProtoReflect",
+      "startIndex": 12195,
+      "endIndex": 12492
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Product.Descriptor",
+      "startIndex": 12554,
+      "endIndex": 12650
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Product.GetId",
+      "startIndex": 12652,
+      "endIndex": 12731
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Product.GetName",
+      "startIndex": 12733,
+      "endIndex": 12816
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Product.GetDescription",
+      "startIndex": 12818,
+      "endIndex": 12915
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Product.GetPicture",
+      "startIndex": 12917,
+      "endIndex": 13006
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Product.GetPriceUsd",
+      "startIndex": 13008,
+      "endIndex": 13100
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Product.GetCategories",
+      "startIndex": 13102,
+      "endIndex": 13200
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListProductsResponse.Reset",
+      "startIndex": 13446,
+      "endIndex": 13670
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListProductsResponse.String",
+      "startIndex": 13672,
+      "endIndex": 13761
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListProductsResponse.ProtoMessage",
+      "startIndex": 13763,
+      "endIndex": 13809
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListProductsResponse.ProtoReflect",
+      "startIndex": 13811,
+      "endIndex": 14121
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListProductsResponse.Descriptor",
+      "startIndex": 14196,
+      "endIndex": 14305
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ListProductsResponse.GetProducts",
+      "startIndex": 14307,
+      "endIndex": 14416
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetProductRequest.Reset",
+      "startIndex": 14637,
+      "endIndex": 14856
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetProductRequest.String",
+      "startIndex": 14858,
+      "endIndex": 14944
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetProductRequest.ProtoMessage",
+      "startIndex": 14946,
+      "endIndex": 14989
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetProductRequest.ProtoReflect",
+      "startIndex": 14991,
+      "endIndex": 15299
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetProductRequest.Descriptor",
+      "startIndex": 15371,
+      "endIndex": 15478
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetProductRequest.GetId",
+      "startIndex": 15480,
+      "endIndex": 15569
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SearchProductsRequest.Reset",
+      "startIndex": 15803,
+      "endIndex": 16030
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SearchProductsRequest.String",
+      "startIndex": 16032,
+      "endIndex": 16122
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SearchProductsRequest.ProtoMessage",
+      "startIndex": 16124,
+      "endIndex": 16171
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SearchProductsRequest.ProtoReflect",
+      "startIndex": 16173,
+      "endIndex": 16485
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SearchProductsRequest.Descriptor",
+      "startIndex": 16561,
+      "endIndex": 16672
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SearchProductsRequest.GetQuery",
+      "startIndex": 16674,
+      "endIndex": 16773
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SearchProductsResponse.Reset",
+      "startIndex": 17018,
+      "endIndex": 17247
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SearchProductsResponse.String",
+      "startIndex": 17249,
+      "endIndex": 17340
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SearchProductsResponse.ProtoMessage",
+      "startIndex": 17342,
+      "endIndex": 17390
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SearchProductsResponse.ProtoReflect",
+      "startIndex": 17392,
+      "endIndex": 17705
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SearchProductsResponse.Descriptor",
+      "startIndex": 17782,
+      "endIndex": 17894
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SearchProductsResponse.GetResults",
+      "startIndex": 17896,
+      "endIndex": 18005
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.Reset",
+      "startIndex": 18331,
+      "endIndex": 18546
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.String",
+      "startIndex": 18548,
+      "endIndex": 18632
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.ProtoMessage",
+      "startIndex": 18634,
+      "endIndex": 18675
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.ProtoReflect",
+      "startIndex": 18677,
+      "endIndex": 18983
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.Descriptor",
+      "startIndex": 19053,
+      "endIndex": 19158
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.GetAddress",
+      "startIndex": 19160,
+      "endIndex": 19260
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.GetItems",
+      "startIndex": 19262,
+      "endIndex": 19361
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetQuoteResponse.Reset",
+      "startIndex": 19611,
+      "endIndex": 19828
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetQuoteResponse.String",
+      "startIndex": 19830,
+      "endIndex": 19915
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetQuoteResponse.ProtoMessage",
+      "startIndex": 19917,
+      "endIndex": 19959
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetQuoteResponse.ProtoReflect",
+      "startIndex": 19961,
+      "endIndex": 20268
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetQuoteResponse.Descriptor",
+      "startIndex": 20339,
+      "endIndex": 20445
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetQuoteResponse.GetCostUsd",
+      "startIndex": 20447,
+      "endIndex": 20546
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.Reset",
+      "startIndex": 20873,
+      "endIndex": 21090
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.String",
+      "startIndex": 21092,
+      "endIndex": 21177
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.ProtoMessage",
+      "startIndex": 21179,
+      "endIndex": 21221
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.ProtoReflect",
+      "startIndex": 21223,
+      "endIndex": 21530
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.Descriptor",
+      "startIndex": 21601,
+      "endIndex": 21707
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.GetAddress",
+      "startIndex": 21709,
+      "endIndex": 21810
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.GetItems",
+      "startIndex": 21812,
+      "endIndex": 21912
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ShipOrderResponse.Reset",
+      "startIndex": 22175,
+      "endIndex": 22394
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ShipOrderResponse.String",
+      "startIndex": 22396,
+      "endIndex": 22482
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ShipOrderResponse.ProtoMessage",
+      "startIndex": 22484,
+      "endIndex": 22527
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ShipOrderResponse.ProtoReflect",
+      "startIndex": 22529,
+      "endIndex": 22837
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ShipOrderResponse.Descriptor",
+      "startIndex": 22909,
+      "endIndex": 23016
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ShipOrderResponse.GetTrackingId",
+      "startIndex": 23018,
+      "endIndex": 23123
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Address.Reset",
+      "startIndex": 23762,
+      "endIndex": 23961
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Address.String",
+      "startIndex": 23963,
+      "endIndex": 24039
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Address.ProtoMessage",
+      "startIndex": 24041,
+      "endIndex": 24074
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Address.ProtoReflect",
+      "startIndex": 24076,
+      "endIndex": 24374
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Address.Descriptor",
+      "startIndex": 24436,
+      "endIndex": 24533
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Address.GetStreetAddress",
+      "startIndex": 24535,
+      "endIndex": 24636
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Address.GetCity",
+      "startIndex": 24638,
+      "endIndex": 24721
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Address.GetState",
+      "startIndex": 24723,
+      "endIndex": 24808
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Address.GetCountry",
+      "startIndex": 24810,
+      "endIndex": 24899
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Address.GetZipCode",
+      "startIndex": 24901,
+      "endIndex": 24988
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Money.Reset",
+      "startIndex": 26016,
+      "endIndex": 26211
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Money.String",
+      "startIndex": 26213,
+      "endIndex": 26287
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Money.ProtoMessage",
+      "startIndex": 26289,
+      "endIndex": 26320
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Money.ProtoReflect",
+      "startIndex": 26322,
+      "endIndex": 26618
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Money.Descriptor",
+      "startIndex": 26678,
+      "endIndex": 26773
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Money.GetCurrencyCode",
+      "startIndex": 26775,
+      "endIndex": 26872
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Money.GetUnits",
+      "startIndex": 26874,
+      "endIndex": 26955
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Money.GetNanos",
+      "startIndex": 26957,
+      "endIndex": 27038
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetSupportedCurrenciesResponse.Reset",
+      "startIndex": 27380,
+      "endIndex": 27625
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetSupportedCurrenciesResponse.String",
+      "startIndex": 27627,
+      "endIndex": 27726
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetSupportedCurrenciesResponse.ProtoMessage",
+      "startIndex": 27728,
+      "endIndex": 27784
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetSupportedCurrenciesResponse.ProtoReflect",
+      "startIndex": 27786,
+      "endIndex": 28107
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetSupportedCurrenciesResponse.Descriptor",
+      "startIndex": 28192,
+      "endIndex": 28312
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::GetSupportedCurrenciesResponse.GetCurrencyCodes",
+      "startIndex": 28314,
+      "endIndex": 28441
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.Reset",
+      "startIndex": 28825,
+      "endIndex": 29060
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.String",
+      "startIndex": 29062,
+      "endIndex": 29156
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.ProtoMessage",
+      "startIndex": 29158,
+      "endIndex": 29209
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.ProtoReflect",
+      "startIndex": 29211,
+      "endIndex": 29527
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.Descriptor",
+      "startIndex": 29607,
+      "endIndex": 29722
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.GetFrom",
+      "startIndex": 29724,
+      "endIndex": 29826
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.GetToCode",
+      "startIndex": 29828,
+      "endIndex": 29933
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CreditCardInfo.Reset",
+      "startIndex": 30721,
+      "endIndex": 30934
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CreditCardInfo.String",
+      "startIndex": 30936,
+      "endIndex": 31019
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CreditCardInfo.ProtoMessage",
+      "startIndex": 31021,
+      "endIndex": 31061
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CreditCardInfo.ProtoReflect",
+      "startIndex": 31063,
+      "endIndex": 31368
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CreditCardInfo.Descriptor",
+      "startIndex": 31437,
+      "endIndex": 31541
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CreditCardInfo.GetCreditCardNumber",
+      "startIndex": 31543,
+      "endIndex": 31657
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CreditCardInfo.GetCreditCardCvv",
+      "startIndex": 31659,
+      "endIndex": 31765
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CreditCardInfo.GetCreditCardExpirationYear",
+      "startIndex": 31767,
+      "endIndex": 31895
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::CreditCardInfo.GetCreditCardExpirationMonth",
+      "startIndex": 31897,
+      "endIndex": 32027
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ChargeRequest.Reset",
+      "startIndex": 32391,
+      "endIndex": 32602
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ChargeRequest.String",
+      "startIndex": 32604,
+      "endIndex": 32686
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ChargeRequest.ProtoMessage",
+      "startIndex": 32688,
+      "endIndex": 32727
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ChargeRequest.ProtoReflect",
+      "startIndex": 32729,
+      "endIndex": 33033
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ChargeRequest.Descriptor",
+      "startIndex": 33101,
+      "endIndex": 33204
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ChargeRequest.GetAmount",
+      "startIndex": 33206,
+      "endIndex": 33300
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ChargeRequest.GetCreditCard",
+      "startIndex": 33302,
+      "endIndex": 33413
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ChargeResponse.Reset",
+      "startIndex": 33685,
+      "endIndex": 33898
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ChargeResponse.String",
+      "startIndex": 33900,
+      "endIndex": 33983
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ChargeResponse.ProtoMessage",
+      "startIndex": 33985,
+      "endIndex": 34025
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ChargeResponse.ProtoReflect",
+      "startIndex": 34027,
+      "endIndex": 34332
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ChargeResponse.Descriptor",
+      "startIndex": 34401,
+      "endIndex": 34505
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::ChargeResponse.GetTransactionId",
+      "startIndex": 34507,
+      "endIndex": 34615
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderItem.Reset",
+      "startIndex": 34917,
+      "endIndex": 35120
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderItem.String",
+      "startIndex": 35122,
+      "endIndex": 35200
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderItem.ProtoMessage",
+      "startIndex": 35202,
+      "endIndex": 35237
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderItem.ProtoReflect",
+      "startIndex": 35239,
+      "endIndex": 35539
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderItem.Descriptor",
+      "startIndex": 35603,
+      "endIndex": 35702
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderItem.GetItem",
+      "startIndex": 35704,
+      "endIndex": 35793
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderItem.GetCost",
+      "startIndex": 35795,
+      "endIndex": 35881
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderResult.Reset",
+      "startIndex": 36670,
+      "endIndex": 36877
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderResult.String",
+      "startIndex": 36879,
+      "endIndex": 36959
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderResult.ProtoMessage",
+      "startIndex": 36961,
+      "endIndex": 36998
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderResult.ProtoReflect",
+      "startIndex": 37000,
+      "endIndex": 37302
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderResult.Descriptor",
+      "startIndex": 37368,
+      "endIndex": 37469
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderResult.GetOrderId",
+      "startIndex": 37471,
+      "endIndex": 37564
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderResult.GetShippingTrackingId",
+      "startIndex": 37566,
+      "endIndex": 37681
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderResult.GetShippingCost",
+      "startIndex": 37683,
+      "endIndex": 37787
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderResult.GetShippingAddress",
+      "startIndex": 37789,
+      "endIndex": 37901
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::OrderResult.GetItems",
+      "startIndex": 37903,
+      "endIndex": 37999
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.Reset",
+      "startIndex": 38332,
+      "endIndex": 38573
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.String",
+      "startIndex": 38575,
+      "endIndex": 38672
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.ProtoMessage",
+      "startIndex": 38674,
+      "endIndex": 38728
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.ProtoReflect",
+      "startIndex": 38730,
+      "endIndex": 39049
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.Descriptor",
+      "startIndex": 39132,
+      "endIndex": 39250
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.GetEmail",
+      "startIndex": 39252,
+      "endIndex": 39358
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.GetOrder",
+      "startIndex": 39360,
+      "endIndex": 39473
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.Reset",
+      "startIndex": 40185,
+      "endIndex": 40404
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.String",
+      "startIndex": 40406,
+      "endIndex": 40492
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.ProtoMessage",
+      "startIndex": 40494,
+      "endIndex": 40537
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.ProtoReflect",
+      "startIndex": 40539,
+      "endIndex": 40847
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.Descriptor",
+      "startIndex": 40919,
+      "endIndex": 41026
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.GetUserId",
+      "startIndex": 41028,
+      "endIndex": 41125
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.GetUserCurrency",
+      "startIndex": 41127,
+      "endIndex": 41236
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.GetAddress",
+      "startIndex": 41238,
+      "endIndex": 41340
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.GetEmail",
+      "startIndex": 41342,
+      "endIndex": 41437
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.GetCreditCard",
+      "startIndex": 41439,
+      "endIndex": 41554
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderResponse.Reset",
+      "startIndex": 41791,
+      "endIndex": 42012
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderResponse.String",
+      "startIndex": 42014,
+      "endIndex": 42101
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderResponse.ProtoMessage",
+      "startIndex": 42103,
+      "endIndex": 42147
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderResponse.ProtoReflect",
+      "startIndex": 42149,
+      "endIndex": 42458
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderResponse.Descriptor",
+      "startIndex": 42531,
+      "endIndex": 42639
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::PlaceOrderResponse.GetOrder",
+      "startIndex": 42641,
+      "endIndex": 42744
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AdRequest.Reset",
+      "startIndex": 43083,
+      "endIndex": 43286
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AdRequest.String",
+      "startIndex": 43288,
+      "endIndex": 43366
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AdRequest.ProtoMessage",
+      "startIndex": 43368,
+      "endIndex": 43403
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AdRequest.ProtoReflect",
+      "startIndex": 43405,
+      "endIndex": 43705
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AdRequest.Descriptor",
+      "startIndex": 43769,
+      "endIndex": 43868
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AdRequest.GetContextKeys",
+      "startIndex": 43870,
+      "endIndex": 43972
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AdResponse.Reset",
+      "startIndex": 44188,
+      "endIndex": 44393
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AdResponse.String",
+      "startIndex": 44395,
+      "endIndex": 44474
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AdResponse.ProtoMessage",
+      "startIndex": 44476,
+      "endIndex": 44512
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AdResponse.ProtoReflect",
+      "startIndex": 44514,
+      "endIndex": 44815
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AdResponse.Descriptor",
+      "startIndex": 44880,
+      "endIndex": 44980
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::AdResponse.GetAds",
+      "startIndex": 44982,
+      "endIndex": 45066
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Ad.Reset",
+      "startIndex": 45482,
+      "endIndex": 45671
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Ad.String",
+      "startIndex": 45673,
+      "endIndex": 45744
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Ad.ProtoMessage",
+      "startIndex": 45746,
+      "endIndex": 45774
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Ad.ProtoReflect",
+      "startIndex": 45776,
+      "endIndex": 46069
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Ad.Descriptor",
+      "startIndex": 46126,
+      "endIndex": 46218
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Ad.GetRedirectUrl",
+      "startIndex": 46220,
+      "endIndex": 46312
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::Ad.GetText",
+      "startIndex": 46314,
+      "endIndex": 46392
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::file_demo_proto_rawDescGZIP",
+      "startIndex": 73238,
+      "endIndex": 73450
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::init",
+      "startIndex": 80982,
+      "endIndex": 81020
+    },
+    {
+      "id": "src/frontend/genproto/demo.pb.go::file_demo_proto_init",
+      "startIndex": 81021,
+      "endIndex": 89614
+    }
+  ],
+  "rawEdges": [
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CartItem.Reset",
+      "calleeName": "Pointer",
+      "line": 50,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CartItem.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 51,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CartItem.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 64,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CartItem.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 65,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CartItem.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 66,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CartItem.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 70,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CartItem.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 75
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AddItemRequest.Reset",
+      "calleeName": "Pointer",
+      "line": 105,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AddItemRequest.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 106,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AddItemRequest.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 119,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AddItemRequest.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 120,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AddItemRequest.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 121,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AddItemRequest.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 125,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AddItemRequest.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 130
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::EmptyCartRequest.Reset",
+      "calleeName": "Pointer",
+      "line": 159,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::EmptyCartRequest.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 160,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::EmptyCartRequest.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 173,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::EmptyCartRequest.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 174,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::EmptyCartRequest.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 175,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::EmptyCartRequest.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 179,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::EmptyCartRequest.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 184
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetCartRequest.Reset",
+      "calleeName": "Pointer",
+      "line": 206,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetCartRequest.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 207,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetCartRequest.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 220,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetCartRequest.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 221,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetCartRequest.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 222,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetCartRequest.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 226,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetCartRequest.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 231
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Cart.Reset",
+      "calleeName": "Pointer",
+      "line": 254,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Cart.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 255,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Cart.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 268,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Cart.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 269,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Cart.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 270,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Cart.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 274,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Cart.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 279
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Empty.Reset",
+      "calleeName": "Pointer",
+      "line": 306,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Empty.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 307,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Empty.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 320,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Empty.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 321,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Empty.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 322,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Empty.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 326,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Empty.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 331
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.Reset",
+      "calleeName": "Pointer",
+      "line": 347,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 348,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 361,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 362,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 363,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 367,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsRequest.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 372
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsResponse.Reset",
+      "calleeName": "Pointer",
+      "line": 401,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsResponse.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 402,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsResponse.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 415,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsResponse.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 416,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsResponse.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 417,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsResponse.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 421,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListRecommendationsResponse.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 426
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Product.Reset",
+      "calleeName": "Pointer",
+      "line": 455,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Product.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 456,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Product.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 469,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Product.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 470,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Product.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 471,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Product.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 475,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Product.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 480
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListProductsResponse.Reset",
+      "calleeName": "Pointer",
+      "line": 537,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListProductsResponse.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 538,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListProductsResponse.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 551,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListProductsResponse.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 552,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListProductsResponse.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 553,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListProductsResponse.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 557,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ListProductsResponse.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 562
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetProductRequest.Reset",
+      "calleeName": "Pointer",
+      "line": 584,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetProductRequest.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 585,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetProductRequest.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 598,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetProductRequest.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 599,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetProductRequest.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 600,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetProductRequest.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 604,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetProductRequest.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 609
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsRequest.Reset",
+      "calleeName": "Pointer",
+      "line": 631,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsRequest.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 632,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsRequest.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 645,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsRequest.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 646,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsRequest.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 647,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsRequest.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 651,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsRequest.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 656
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsResponse.Reset",
+      "calleeName": "Pointer",
+      "line": 678,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsResponse.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 679,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsResponse.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 692,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsResponse.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 693,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsResponse.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 694,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsResponse.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 698,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SearchProductsResponse.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 703
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.Reset",
+      "calleeName": "Pointer",
+      "line": 726,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 727,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 740,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 741,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 742,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 746,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteRequest.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 751
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteResponse.Reset",
+      "calleeName": "Pointer",
+      "line": 780,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteResponse.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 781,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteResponse.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 794,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteResponse.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 795,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteResponse.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 796,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteResponse.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 800,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetQuoteResponse.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 805
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.Reset",
+      "calleeName": "Pointer",
+      "line": 828,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 829,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 842,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 843,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 844,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 848,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderRequest.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 853
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderResponse.Reset",
+      "calleeName": "Pointer",
+      "line": 882,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderResponse.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 883,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderResponse.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 896,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderResponse.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 897,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderResponse.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 898,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderResponse.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 902,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ShipOrderResponse.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 907
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Address.Reset",
+      "calleeName": "Pointer",
+      "line": 933,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Address.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 934,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Address.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 947,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Address.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 948,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Address.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 949,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Address.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 953,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Address.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 958
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Money.Reset",
+      "calleeName": "Pointer",
+      "line": 1020,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Money.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1021,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Money.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1034,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Money.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1035,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Money.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1036,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Money.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1040,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Money.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1045
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetSupportedCurrenciesResponse.Reset",
+      "calleeName": "Pointer",
+      "line": 1082,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetSupportedCurrenciesResponse.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1083,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetSupportedCurrenciesResponse.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1096,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetSupportedCurrenciesResponse.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1097,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetSupportedCurrenciesResponse.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1098,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetSupportedCurrenciesResponse.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1102,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::GetSupportedCurrenciesResponse.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1107
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.Reset",
+      "calleeName": "Pointer",
+      "line": 1131,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1132,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1145,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1146,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1147,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1151,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CurrencyConversionRequest.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1156
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CreditCardInfo.Reset",
+      "calleeName": "Pointer",
+      "line": 1188,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CreditCardInfo.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1189,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CreditCardInfo.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1202,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CreditCardInfo.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1203,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CreditCardInfo.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1204,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CreditCardInfo.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1208,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::CreditCardInfo.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1213
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeRequest.Reset",
+      "calleeName": "Pointer",
+      "line": 1257,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeRequest.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1258,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeRequest.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1271,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeRequest.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1272,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeRequest.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1273,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeRequest.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1277,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeRequest.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1282
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeResponse.Reset",
+      "calleeName": "Pointer",
+      "line": 1311,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeResponse.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1312,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeResponse.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1325,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeResponse.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1326,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeResponse.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1327,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeResponse.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1331,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::ChargeResponse.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1336
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderItem.Reset",
+      "calleeName": "Pointer",
+      "line": 1359,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderItem.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1360,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderItem.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1373,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderItem.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1374,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderItem.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1375,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderItem.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1379,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderItem.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1384
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderResult.Reset",
+      "calleeName": "Pointer",
+      "line": 1417,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderResult.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1418,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderResult.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1431,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderResult.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1432,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderResult.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1433,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderResult.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1437,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::OrderResult.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1442
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.Reset",
+      "calleeName": "Pointer",
+      "line": 1493,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1494,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1507,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1508,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1509,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1513,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::SendOrderConfirmationRequest.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1518
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.Reset",
+      "calleeName": "Pointer",
+      "line": 1551,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1552,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1565,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1566,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1567,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1571,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderRequest.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1576
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderResponse.Reset",
+      "calleeName": "Pointer",
+      "line": 1626,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderResponse.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1627,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderResponse.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1640,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderResponse.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1641,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderResponse.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1642,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderResponse.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1646,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::PlaceOrderResponse.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1651
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdRequest.Reset",
+      "calleeName": "Pointer",
+      "line": 1674,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdRequest.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1675,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdRequest.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1688,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdRequest.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1689,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdRequest.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1690,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdRequest.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1694,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdRequest.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1699
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdResponse.Reset",
+      "calleeName": "Pointer",
+      "line": 1721,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdResponse.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1722,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdResponse.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1735,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdResponse.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1736,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdResponse.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1737,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdResponse.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1741,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::AdResponse.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1746
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Ad.Reset",
+      "calleeName": "Pointer",
+      "line": 1771,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Ad.Reset",
+      "calleeName": "StoreMessageInfo",
+      "line": 1772,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Ad.ProtoReflect",
+      "calleeName": "Pointer",
+      "line": 1785,
+      "calleeObject": "protoimpl"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Ad.ProtoReflect",
+      "calleeName": "LoadMessageInfo",
+      "line": 1786,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Ad.ProtoReflect",
+      "calleeName": "StoreMessageInfo",
+      "line": 1787,
+      "calleeObject": "ms"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Ad.ProtoReflect",
+      "calleeName": "MessageOf",
+      "line": 1791,
+      "calleeObject": "mi"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::Ad.Descriptor",
+      "calleeName": "file_demo_proto_rawDescGZIP",
+      "line": 1796
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::file_demo_proto_rawDescGZIP",
+      "calleeName": "Do",
+      "line": 2099,
+      "calleeObject": "file_demo_proto_rawDescOnce"
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::init",
+      "calleeName": "file_demo_proto_init",
+      "line": 2201
+    },
+    {
+      "callerId": "src/frontend/genproto/demo.pb.go::file_demo_proto_init",
+      "calleeName": "TypeOf",
+      "line": 2595,
+      "calleeObject": "reflect"
+    }
+  ]
+}

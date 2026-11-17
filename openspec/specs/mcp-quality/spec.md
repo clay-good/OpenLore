@@ -7,8 +7,7 @@
 ## Purpose
 
 OpenLore ships an MCP (Model Context Protocol) server (`openlore mcp`, stdio transport,
-`@modelcontextprotocol/sdk`) that currently exposes ~55 tools (and trending upward) across five
-handler modules (`graph`, `semantic`, `analysis`, `change`, `decisions`). The server is registered in
+`@modelcontextprotocol/sdk`) that exposes the full tool registry `TOOL_DEFINITIONS`. The server is registered in
 `src/cli/commands/mcp.ts` (`startMcpServer`, `TOOL_DEFINITIONS`) with handlers under
 `src/core/services/mcp-handlers/`. Because the total count grows over time, the quality lever is the
 *opt-in preset* surface, not the full registry (see "Tool Surface Size and Progressive Disclosure").
@@ -54,22 +53,23 @@ for parameters — an agent that reads only the schema SHALL be able to construc
 
 ### Requirement: Structured Output Schemas
 
-Tools that return machine-parseable data SHALL declare an `outputSchema` and return
-`structuredContent` alongside the human-readable `content` text, per the MCP structured-output
-capability. This lets calling agents parse results deterministically instead of regex-scraping
-JSON out of a text blob. Tools whose output is inherently prose (e.g. a rendered report) MAY
-omit `outputSchema` but SHALL document the output shape in the tool description.
+Tools that return machine-parseable data SHALL return it as one JSON text item in `content`,
+so a calling agent can parse the result without scraping prose. The size cap SHALL truncate at
+the structured level, so a capped JSON result still parses. Freshness, panic, and ledger notes
+SHALL be separate `content` items, never concatenated into the result text. Tools whose output
+is inherently prose (e.g. a rendered report) SHALL document the output shape in the tool
+description.
 
-#### Scenario: Structured tool advertises its output
-- **GIVEN** a tool that today returns `JSON.stringify(result)` as text (e.g. `orient`, `analyze_impact`, `get_route_inventory`)
-- **WHEN** the tool is defined
-- **THEN** it declares an `outputSchema` describing the JSON shape
-- **AND** the handler returns `structuredContent` matching that schema in addition to the text content
+#### Scenario: Structured tool returns parseable JSON text
+- **GIVEN** a tool that returns machine-parseable data (e.g. `orient`, `analyze_impact`, `get_route_inventory`)
+- **WHEN** the tool executes successfully
+- **THEN** its result `content` item is text that parses as JSON
+- **AND** any freshness or panic note is a separate `content` item
 
-#### Scenario: Output schema matches actual output
-- **GIVEN** a tool that declares an `outputSchema`
-- **WHEN** the tool executes successfully on a fixture project
-- **THEN** the returned `structuredContent` validates against the declared schema
+#### Scenario: Capped result stays parseable
+- **GIVEN** a JSON result larger than `MCP_TOOL_MAX_BYTES`
+- **WHEN** the server caps it
+- **THEN** the returned result text still parses as JSON
 
 ### Requirement: Description Quality and Token Budget
 
@@ -114,9 +114,9 @@ capability) SHALL remain available strictly by opt-in: a named preset, or the ex
 selector (`--preset full` / `--all-tools`). The server SHALL document which set is appropriate for
 which use case.
 
-The server SHALL define a **`substrate` surface** that spans both faces of the substrate (per the
-`architecture` `UnifiedStructuralSubstrate` requirement): the `navigation` graph-traversal core plus
-the highest-value governance *reads* — `recall`, `verify_claim`, and `blast_radius` — so that an
+The server SHALL define a **`substrate` surface**: the `navigation` graph-traversal core, the
+spec-preparation composites (`prepare_spec_generation`, `prepare_spec_repair`), and the
+highest-value governance *reads* — `recall`, `verify_claim`, and `blast_radius` — so that an
 out-of-box agent receives the value of the whole substrate (navigate, recall what is known, verify a
 claim, weigh a diff) and not navigation alone. The `substrate` surface SHALL remain small and SHALL
 hold governance *reads* only, never write or gate tools.
@@ -144,8 +144,8 @@ evidence-backed justification.
 - **THEN** they get the lean, high-signal `substrate` surface (the navigation core plus the governance reads), not the full registry
 - **AND** the docs explain how to expand to the full set (`--preset full` / `--all-tools`) and why they would
 
-#### Scenario: The default surface spans both faces
-- **GIVEN** the `substrate` surface (navigation core + recall + verify_claim + blast_radius)
+#### Scenario: The default surface carries navigation, spec preparation and governance reads
+- **GIVEN** the `substrate` surface (navigation core + prepare_spec_generation + prepare_spec_repair + recall + verify_claim + blast_radius)
 - **WHEN** an out-of-box agent begins a task
 - **THEN** it can navigate, recall anchored knowledge, verify a claim, and weigh a diff without widening its preset
 - **AND** no write or gate tool is part of that default surface
@@ -163,13 +163,14 @@ expansion handle rather than the full payload. This is OpenLore's answer to loss
 compression: do not shrink bytes, send fewer items and make every omitted or collapsed
 item recoverable by a single deterministic follow-up call. The reference implementation is
 `src/core/services/mcp-handlers/progressive.ts` (`applyTokenBudget`, `collapseExactDuplicates`,
-`expandHandle`, `omissionNote`), today wired into `orient` and `search_code`; this
+`expandHandle`, `omissionNote`); `orient`, `search_code`, `get_minimal_context`,
+`working_set_context`, `get_handoff_briefing`, and `recall` accept a `tokenBudget`; this
 requirement generalizes that pattern to every tool whose result is an unbounded or
 importance-rankable list.
 
 A **high-volume tool** is any tool whose successful result is a list whose length scales
 with codebase size rather than being inherently bounded — e.g. `get_signatures`,
-`get_schema_inventory`, `get_route_inventory`, `get_env_vars`, `get_ui_components`,
+`get_schema_inventory`, `get_route_inventory`, `get_env_vars`, `get_ui_component_inventory`,
 `get_middleware_inventory`, `find_dead_code`, `get_critical_hubs`, `get_god_functions`,
 `get_leaf_functions`, `get_duplicate_report`, `get_change_coupling`, `analyze_impact`, and
 `select_tests`. Such tools SHOULD accept an optional `tokenBudget` parameter and, when it is
@@ -336,18 +337,15 @@ tool may reach are named, audited rebuildable-cache and self-repair paths.
 
 ### Requirement: MCP Protocol Capability Coverage
 
-The server SHOULD expose more than tools where it improves agent-native ergonomics. Stable,
-frequently-read artifacts (e.g. `CODEBASE.md`, generated spec domains, architecture overview)
-SHOULD be offered as MCP **resources** so an agent can read them without spending a tool call.
-Common multi-step workflows (e.g. the orient → search → analyze sequence) MAY be offered as
-MCP **prompts**. The server SHALL advertise exactly the capabilities it implements in its
-initialize response.
+The server SHALL advertise exactly the capabilities it implements in its initialize response.
+It implements tools only, so it SHALL advertise `capabilities: { tools: {} }` and no
+`resources` or `prompts` capability.
 
-#### Scenario: Stable artifacts are resources
-- **GIVEN** a project that has been analyzed
-- **WHEN** an agent lists MCP resources
-- **THEN** key generated artifacts (e.g. `CODEBASE.md`, spec domains) are available as resources to read directly
-- **AND** the server's advertised capabilities match what it actually serves
+#### Scenario: Advertised capabilities match what is served
+- **GIVEN** a client connected to `openlore mcp`
+- **WHEN** the client reads the initialize response
+- **THEN** `capabilities` is `{ tools: {} }`
+- **AND** no `resources` or `prompts` capability is present
 
 ### Requirement: Installation Reliability
 
@@ -516,14 +514,83 @@ everything" from "this is everything I could see."
 > Decision recorded: 08e71184
 > Date: 2026-06-18
 
+### Requirement: NoCompleteBesideADisclosure
+
+`confidenceBoundary.complete` SHALL be DERIVED from what the answer disclosed, never asserted
+independently by a handler. `complete: true` SHALL be unsayable in the same response as an explicit
+refusal, cap, fallback, degradation or discarded input. A `complete: true` beside a disclosed gap is
+the most damaging form of a false claim, because it tells the agent not to look further — it converts
+a disclosed gap into a silent one.
+
+The derivation SHALL live at the dispatch boundary, the single point both transports and every CLI
+wrapper funnel through, as a sweep of a REGISTERED set of disclosure channels — `O(1)` in the size of
+the payload, reading named paths at most two segments deep, never walking the response. Every response
+field that means "something about this answer is incomplete" SHALL be classified: registered as a
+disclosure channel, or recorded as a non-disclosure with the reason it is not one. A structural guard
+over the boundary-carrying handlers SHALL fail when a new tool declares a disclosure-shaped field
+without classifying it.
+
+A prose field (`note`, `caveats`, `hint`, `reason`) SHALL NOT be swept automatically: each mixes
+standing methodology with live disclosure, so sweeping it would pin `complete` to `false` on every
+answer, and a flag that is always false carries no information. A handler whose live disclosure is
+prose SHALL declare it explicitly, so the derivation sees it.
+
+Where `complete` is `false`, the answer SHALL name WHICH part is incomplete — one reason per cause,
+each naming the field that holds the detail — so an agent can tell whether the gap touches the
+question it asked.
+
+#### Scenario: A refusal is never a complete answer
+
+- **GIVEN** `verify_claim` returns `verdict: "unverifiable"` because no such decision is recorded
+- **WHEN** the response is produced
+- **THEN** `confidenceBoundary.complete` is `false`, and `incompleteBecause` names the `verdict`
+  channel and says the answer is a refusal rather than a conclusion
+
+#### Scenario: An internally capped answer says so
+
+- **GIVEN** `briefing_since` degraded 29 of 34 files to whole-file granularity under an internal time cap
+- **WHEN** the response is produced
+- **THEN** `confidenceBoundary.complete` is `false`, and `incompleteBecause` names
+  `changeGranularity.reasons` and the cap that fired
+
+#### Scenario: A discarded input is a disclosed gap
+
+- **GIVEN** `recall` is called with an `asOf` that does not resolve to a commit, and discards the filter
+- **WHEN** the response is produced
+- **THEN** `confidenceBoundary.complete` is `false`, and the discarded filter is named as the cause
+
+#### Scenario: An empty scope is not an empty result
+
+- **GIVEN** `find_dead_code` is called with a `filePattern` that matches zero indexed files
+- **WHEN** the response is produced
+- **THEN** the answer carries a receipt saying the pattern matched zero files, and
+  `confidenceBoundary.complete` is `false` — an empty `candidateDead` over an empty scope means
+  "nothing was examined", not "nothing is dead"
+
+#### Scenario: A bounded negative answer does not assert the cause it cannot see
+
+- **GIVEN** `find_path` finds no path within its distance bound
+- **WHEN** the response is produced
+- **THEN** `confidenceBoundary.complete` is `false`, and the hint names the causes the search cannot
+  distinguish — unconnected endpoints, a path beyond the bound, a same-name collision — rather than
+  asserting that the endpoints are in different connected components
+
+#### Scenario: A genuinely complete answer still says so
+
+- **GIVEN** a conclusion that crossed no boundary, ran against a current index, and disclosed nothing
+- **WHEN** the response is produced
+- **THEN** `confidenceBoundary.complete` is `true` and no reason is attached; a standing methodology
+  caveat alone SHALL NOT flip it
+
 ### Requirement: DefaultSurfaceCopyMatchesItsContents
 
 Every published description of a tool preset — the `instructions` breadth pointer, CLI `--help`,
 README, docs, and CLAUDE.md — SHALL match the preset's actual contents. A preset SHALL NOT be
 described as carrying a capability face (per the closed capability-family taxonomy) unless it
-contains that face's tools; in particular, a preset holding only governance *reads* (`recall`,
-`verify_claim`, `blast_radius`) SHALL be described as "the navigation core plus governance reads,"
-never as "both faces of the substrate," while it lacks the write face (`remember`,
+contains that face's tools; in particular, a preset holding the navigation core, the
+spec-preparation composites (`prepare_spec_generation`, `prepare_spec_repair`) and only governance
+*reads* (`recall`, `verify_claim`, `blast_radius`) SHALL be described as "the navigation core, spec
+preparation, and governance reads," never as "both faces of the substrate," while it lacks the write face (`remember`,
 `record_decision`). Copy naming the active default preset SHALL name the preset the code actually
 resolves (`LEAN_DEFAULT_PRESET`). The corrected claims SHALL be guarded (per
 QuantitativeDocClaimsAreGuarded and the honesty-contract pattern) so the retired phrasing cannot
@@ -533,11 +600,12 @@ candidate surface, a flip only on no-regression evidence, and a superseding reco
 
 #### Scenario: A reads-only default is described honestly
 
-- **GIVEN** the `substrate` preset containing the navigation core plus `recall`, `verify_claim`,
-  and `blast_radius`, and no `remember` or `record_decision`
+- **GIVEN** the `substrate` preset containing the navigation core, `prepare_spec_generation`,
+  `prepare_spec_repair`, `recall`, `verify_claim`, and `blast_radius`, and no `remember` or
+  `record_decision`
 - **WHEN** any shipped surface (instructions channel, `--help`, README, docs) describes the
   default surface
-- **THEN** it states the preset carries the navigation core plus governance reads
+- **THEN** it states the preset carries the navigation core, spec preparation, and governance reads
 - **AND** it does not claim the preset carries both faces of the substrate
 
 #### Scenario: The declared default matches the resolved default
@@ -612,8 +680,11 @@ stated in source.
 ### Requirement: PiDefaultToolSurfaceIsLean
 
 When a Pi session starts with the default configuration, the Pi extension SHALL activate only its
-lean surface: the Pi tools that correspond to the MCP `substrate` preset, the configuration tool,
-and the tool-group activator. All other OpenLore tools SHALL stay registered and inactive. The
+lean surface: the Pi tools that correspond to the MCP `substrate` preset, except the spec-authoring
+composites (`prepare_spec_generation`, `prepare_spec_repair`), plus the configuration tool and the
+tool-group activator. The spec-authoring composites SHALL belong to the `specs` tool group, and the
+activator description SHALL name that group for creating or repairing a spec. All other OpenLore
+tools SHALL stay registered and inactive. The
 extension SHALL NOT change the active state of any tool that OpenLore does not register. The lean
 surface SHALL apply in every Pi session mode.
 
@@ -621,8 +692,8 @@ surface SHALL apply in every Pi session mode.
 
 - **GIVEN** a repository whose `.openlore/config.json` has no `pi.toolSurface` key
 - **WHEN** a Pi session starts
-- **THEN** the active OpenLore tools are exactly the Pi tools of the `substrate` preset, the
-  configuration tool, and the activator
+- **THEN** the active OpenLore tools are exactly the Pi tools of the `substrate` preset other than
+  the spec-authoring composites, the configuration tool, and the activator
 - **AND** every other OpenLore tool is registered but inactive
 
 #### Scenario: Host tools are not changed
@@ -636,6 +707,12 @@ surface SHALL apply in every Pi session mode.
 - **GIVEN** a change that adds a tool to, or removes a tool from, the MCP `substrate` preset
 - **WHEN** the Pi lean surface does not match the Pi-registered tools of that preset
 - **THEN** a CI test fails, naming the tools that differ
+
+#### Scenario: Spec-authoring composites are activated on demand
+
+- **GIVEN** a default Pi session
+- **WHEN** the agent calls the activator with the `specs` group
+- **THEN** `openlore_prepare_spec_generation` and `openlore_prepare_spec_repair` become active
 
 ### Requirement: PiToolGroupsAreActivatable
 
@@ -784,7 +861,7 @@ fixed and source-declared:
 - `navigate` — read the structural graph, return a conclusion (orient, find_path, analyze_impact,
   get_subgraph, select_tests, find_dead_code, get_map, …).
 - `change` — reason about a specific diff or change set (structural_diff, blast_radius,
-  change_impact_certificate, change_footprint, certify_public_surface, briefing_since).
+  change_impact_certificate, certify_public_surface, briefing_since).
 - `remember` — record and recall durable, code-anchored facts (remember, recall, record_decision and
   its lifecycle).
 - `verify` — settle a claim or a decision's currency against the graph before it reaches a human
@@ -968,20 +1045,20 @@ to overwrite an existing malformed or non-object config.
 
 ### Requirement: PiDaemonFailuresAreBoundedAndHonest
 
-The Pi extension SHALL bound the best-effort context-injection orient call with a timeout and
-degrade to its pointer-line fallback on expiry, so daemon discovery plus orient share one bounded
-first-turn deadline. The extension SHALL launch the package's own CLI with the current Node runtime,
+The Pi extension SHALL NOT call orient on the user's behalf before a turn: the prompt may be a
+greeting rather than a task, so no daemon round-trip is spent before the agent decides to orient.
+The extension SHALL launch the package's own CLI with the current Node runtime,
 without PATH lookup or a shell, and SHALL distinguish launch failure, startup preparation failure,
 early exit, draining, and health timeout rather than uniformly advising the user to run
 `openlore analyze`. Draining and health-timeout outcomes SHALL remain immediately retryable. A daemon
 that becomes reachable after session start SHALL have its keepalive armed so it is not reaped
 mid-session.
 
-#### Scenario: An upgrade rebuild does not hang the first prompt
+#### Scenario: A greeting does not trigger orientation
 
-- **GIVEN** a schema-version bump that makes the daemon rebuild on first request
-- **WHEN** the extension injects context before the first turn
-- **THEN** the orient call times out to the pointer-line fallback and the turn proceeds
+- **GIVEN** a Pi session whose first prompt is a greeting
+- **WHEN** the extension injects context before the turn
+- **THEN** no orient call reaches the daemon and the turn proceeds with the digest and spec index only
 
 #### Scenario: A packaged daemon exits before health
 
@@ -996,10 +1073,69 @@ mid-session.
 - **WHEN** the next Pi tool call retries
 - **THEN** Pi re-probes immediately instead of serving a cached failure for 30 seconds
 
+### Requirement: PiDaemonUpgradeRecovery
+
+The Pi extension SHALL automatically recover from a detached daemon that survives an extension
+update when an authenticated health response proves the daemon belongs to this repository and its
+reported version is older than the installed extension. Recovery SHALL happen when Pi next opens
+the project, without requiring a globally
+installed CLI or a user command, regardless of the daemon's current preset. The replacement SHALL
+reuse the preset reported by the authenticated daemon health response, so the installed release
+applies its current definition of that preset. Discovery SHALL NOT replace a daemon whose identity
+and repository cannot be verified.
+
+Recovery SHALL invoke the packaged CLI with the current Node runtime and no shell. It SHALL reuse
+the authenticated repository/PID/protocol proof and graceful stop path, wait for the announcement
+to be removed, and start the daemon with the preset captured from its authenticated health response
+only after successful stop. A refused or incomplete stop SHALL NOT launch a replacement. Recovery
+SHALL respect the host's spawn opt-out before stopping or starting anything and serialize daemon
+acquisition with restart. Pi MAY also expose `/openlore restart` for an explicit full-preset retry
+while the agent is idle.
+
+#### Scenario: An old daemon survives the host restart after a package update
+
+- **GIVEN** a full-preset daemon whose authenticated health reports a version older than the installed extension
+- **WHEN** Pi opens the project and compares that reported version with its own
+- **THEN** the authenticated old daemon is gracefully stopped and replaced by a daemon exposing
+  the installed extension's required tools, without a user command, PATH lookup, or manual process kill
+
+#### Scenario: A supervising host owns the daemon lifecycle
+
+- **GIVEN** the host has disabled extension daemon spawning
+- **WHEN** Pi opens the project and attempts automatic recovery
+- **THEN** the extension stops and starts no process and directs the user to the supervising host
+
+#### Scenario: An older daemon uses an intentionally narrower preset
+
+- **GIVEN** a repository-bound daemon with an older version and a narrower preset
+- **WHEN** Pi opens the project and attempts automatic recovery
+- **THEN** it replaces the daemon using the same preset and the installed release's current tool definition
+- **AND** it reports any Pi tools that remain unavailable from that preset
+
+#### Scenario: The older daemon's preset is unknown to the installed release
+
+- **GIVEN** a repository-bound daemon with an older version whose reported preset the installed release does not define
+- **WHEN** Pi opens the project and attempts automatic recovery
+- **THEN** it stops and starts no process, keeps using the verified daemon, and warns with the explicit `/openlore restart` command
+
+#### Scenario: A current-version preset omits Pi tools
+
+- **GIVEN** a repository-bound daemon at the installed extension version with a narrower preset
+- **WHEN** Pi opens the project and discovers missing Pi tools
+- **THEN** it preserves the daemon and reports the explicit `/openlore restart` command to switch to Pi's full preset
+- **AND** it does not stop or replace the daemon automatically, because missing tools alone never trigger recovery
+
+#### Scenario: The announced listener cannot be authenticated for this repository
+
+- **GIVEN** a listener whose health does not prove the descriptor's identity and repository
+- **WHEN** Pi opens the project and attempts automatic recovery
+- **THEN** shutdown is refused, no replacement starts, and the UI explains that the owner must stop it
+
 ### Requirement: PiInjectedContextIsBoundedAndCurrent
 
 The Pi extension SHALL build before-agent context from the current event's `cwd` and `mode`, not
-state captured at session start. Its specification index SHALL contain at most 50 sorted domain
+state captured at session start, and SHALL attach it on every turn, because Pi restores its base
+system prompt for a turn whose hook returns none. Its specification index SHALL contain at most 50 sorted domain
 entries and SHALL disclose the number of omitted domains when the repository contains more.
 
 #### Scenario: The active root changes after session start
@@ -1025,6 +1161,8 @@ usable daemon. The status SHALL report a stopped watcher only when the daemon re
 unknown watcher state SHALL NOT be shown as stopped. Each non-ready state SHALL name its condition
 (for example, no index, analysis running, index degraded, daemon incompatible, daemon spawning
 disabled), and it SHALL NOT use a generic failure label.
+The extension SHALL color ready status with the success theme color, in-progress status with the
+accent color, warning conditions with the warning color, and error conditions with the error color.
 
 #### Scenario: Ready repository with a usable daemon
 
@@ -1254,7 +1392,7 @@ agent what to do, not only what is wrong.
 
 A retrieval-backed conclusion SHALL NOT be shaped like an answered question when its results rest on
 evidence too weak to answer it. Every such conclusion SHALL carry a coverage verdict derived from the
-match evidence already attached to its results: `covered`, `weak`, or `uncovered`. A conclusion whose
+match evidence already attached to its results: `covered`, `weak`, `uncovered`, or `partial`. A conclusion whose
 verdict is `uncovered` SHALL NOT return a ranked list of results; it SHALL return the reason and the
 remedy. A conclusion whose verdict is `weak` MAY return results, and SHALL state that every result
 rests on low-tier evidence.
@@ -1281,6 +1419,29 @@ tell "this is what you asked for" from "this is the closest thing I hold."
 - **GIVEN** a query with at least one result matching on a strong field
 - **WHEN** the conclusion is produced
 - **THEN** the verdict is `covered` and the result set is the same as before this requirement
+
+#### Scenario: A partial verdict names material the retrieval could not read
+
+- **GIVEN** a repository where some material in scope was unparseable, excluded by a size cap,
+  served from an index that cannot be vouched for, or whose readability record is itself unreadable
+- **WHEN** a retrieval-backed conclusion is produced
+- **THEN** the verdict is `partial`, never `covered` and never `uncovered`, and the conclusion names
+  the cause and carries the verdict the evidence alone would have produced as `evidenceVerdict`
+
+#### Scenario: A receipt never names evidence its field does not contain
+
+- **GIVEN** a result whose match evidence names a field and the terms that matched
+- **WHEN** the receipt is read
+- **THEN** every named term occurs in the named field's own text, so a hit on the corpus's language
+  marker is attributed to `language` and not to a path that contains no such token
+
+#### Scenario: A bounded page discloses its bound
+
+- **GIVEN** a retrieval request whose `limit` exceeds the per-call maximum, or whose matches reach
+  the served limit
+- **WHEN** the conclusion is produced
+- **THEN** it carries the returned count, the matched count, the requested and served limits, a
+  receipt for any clamp, and whether matches may exist beyond the page — never a silent cut
 
 #### Scenario: The verdict is derived, not tuned
 
@@ -1351,6 +1512,148 @@ a silent spawn and never a misleading remediation.
 - **WHEN** the Pi extension finds no healthy daemon
 - **THEN** it launches one exactly as it does today, with its existing bounded failure handling
 
+### Requirement: DataDependentFollowupHints
+
+Conclusion tool responses SHALL carry at most two deterministic follow-up hints, emitted only
+when a rule in a closed, source-declared rule table matches fields already present in that
+response's payload. Each hint SHALL name the suggested tool and cite the triggering field and its
+value (a receipt, not advice). Rules SHALL reference existing classifier outputs and constants
+only — a rule SHALL NOT introduce a new threshold or re-test an existing one downstream of the
+classifier that computed it. The rule table SHALL be guarded in CI so that a rule naming an
+unregistered tool, on either side, fails the build. Hints SHALL be attached at dispatch, as a
+`followUp` array, and never to an error response. Hints are the
+data-dependent complement to the static NoRedundantConclusions sibling cross-references in tool
+descriptions; they are advisory payload content and SHALL never gate or block. Hint emission
+SHALL be deterministic: the same payload yields the same hints.
+
+#### Scenario: A hub search hit routes to impact analysis
+
+- **GIVEN** a `search_code` response whose top hit is classified a hub (`isHub: true`)
+- **WHEN** the response is returned
+- **THEN** it carries a hint naming `analyze_impact` and citing the hit's actual fan-in value as
+  the trigger
+
+#### Scenario: No matching data, no hint
+
+- **GIVEN** a `search_code` response whose hits are all low-fan-in utilities
+- **WHEN** the response is returned
+- **THEN** it carries no follow-up hints — hints never fire unconditionally
+
+#### Scenario: The hint cap holds under multiple matches
+
+- **GIVEN** a response whose fields satisfy three or more rules
+- **WHEN** hints are evaluated
+- **THEN** exactly two hints are emitted, selected by declared table order, deterministically
+
+#### Scenario: The table cannot drift open
+
+- **GIVEN** a new rule added to the table that names a tool not in the tool registry
+- **WHEN** the CI guard runs
+- **THEN** the build fails until the rule names a real tool and a real payload field
+
+### Requirement: MomentsAreQuietAndEveryFindingIsActionable
+
+A hook moment SHALL emit no finding unless the finding is new (not yet stated in the same harness
+session) and real (it carries proof: a file and line, a graph edge, or a receipt). Each emitted
+finding SHALL state its proof and exactly one action: `fix`, `decide`, or `raise`. The rule SHALL
+hold for every harness that runs the moments.
+
+#### Scenario: Nothing new prints no finding
+
+- **GIVEN** a session in which a finding was already stated
+- **WHEN** a later moment computes the same finding and nothing else
+- **THEN** the moment gives the agent no finding; the before-stop receipt for the user may list it once
+
+#### Scenario: An emitted finding has proof and an action
+
+- **GIVEN** an edit that adds a reference to a symbol that does not exist
+- **WHEN** the after-edit moment reports it
+- **THEN** the finding names the file and line and carries the action `fix`
+
+#### Scenario: The three actions are defined
+
+- **GIVEN** an emitted finding
+- **WHEN** its action is read
+- **THEN** `fix` means the agent repairs it, `decide` means the agent records a decision with a
+  link to the proof, and `raise` means the agent tells a human in its final message or
+  pull-request body
+
+#### Scenario: A finding without proof is dropped
+
+- **GIVEN** a check that returns a result with no file, edge, or receipt
+- **WHEN** the moment builds its receipt
+- **THEN** that result is not printed
+
+### Requirement: PluginToolSetIsFixedAndSmall
+
+The server SHALL define a `plugin` preset of at most 12 tools for the Claude Code plugin, and it
+SHALL contain `orient`, `blast_radius`, `verify_change`, `verify_claim` and `recall`. Every `plugin`
+tool except `verify_change` SHALL also be in the `substrate` preset, and the `plugin` preset SHALL
+NOT contain a spec-generation tool. The npm default SHALL stay the `substrate` preset with its
+current 15 members; `verify_change` is not added to it (owner decision, 2026-11-15: the benchmark
+run that would gate it is not done). Every tool outside the `plugin`
+preset SHALL stay registered under its current name and callable through the other presets, the
+full surface, and Pi. A CI test SHALL guard the set.
+
+#### Scenario: The plugin preset lists 11 tools
+
+- **WHEN** `openlore mcp --preset plugin --list-tools` runs
+- **THEN** it lists exactly `orient`, `search_code`, `get_subgraph`, `analyze_impact`, `find_path`,
+  `get_function_skeleton`, `suggest_insertion_points`, `recall`, `verify_claim`, `blast_radius`
+  and `verify_change`
+
+#### Scenario: The npm default is unchanged
+
+- **WHEN** `openlore mcp` starts with no preset
+- **THEN** the active surface is the `substrate` preset: its 15 tools from before this change
+
+#### Scenario: The plugin set is a subset of the default
+
+- **WHEN** the presets are compared
+- **THEN** every tool in `plugin` except `verify_change` is also in `substrate`
+- **AND** `prepare_spec_generation` and `prepare_spec_repair` are not in `plugin`
+
+#### Scenario: A hidden tool stays reachable
+
+- **GIVEN** a server started with `--preset plugin`
+- **WHEN** the client calls `certify_public_surface`
+- **THEN** the tool error names a preset that contains the tool and the rewire command
+- **AND** the same tool runs under `openlore mcp --preset full` and in Pi
+
+### Requirement: CertificatesAreEvidenceSourcesBehindMoments
+
+The before-stop moment SHALL be able to use `certify_public_surface`, `certify_service_contract`
+and `change_impact_certificate` as evidence sources, each under its current name, each only when
+its trigger holds, and each inside its own time limit and the moment's limits. A source that fails
+or passes its limit SHALL add nothing and SHALL NOT be reported as a clean result. No source SHALL
+run before an edit or after an edit.
+
+#### Scenario: Each source has one trigger
+
+- **GIVEN** the three evidence sources
+- **WHEN** the before-stop moment decides what to run
+- **THEN** `certify_public_surface` runs only when the session diff touches a TypeScript,
+  JavaScript or Python file, `certify_service_contract` only when it touches a service-contract
+  file, and `change_impact_certificate` only when a covering surface is declared in configuration
+
+#### Scenario: A public-API break is stated before stop
+
+- **GIVEN** a session diff that removes an exported TypeScript function with an indexed consumer
+- **WHEN** the before-stop moment runs
+- **THEN** the receipt carries the breaking finding, the consumer as proof, and an action
+
+#### Scenario: No trigger means no cost
+
+- **GIVEN** a session diff that touches only Markdown files and no declared surface
+- **WHEN** the before-stop moment runs
+- **THEN** none of the three sources runs
+
+#### Scenario: A slow source is silent
+
+- **GIVEN** a source that does not finish inside its time limit
+- **WHEN** the before-stop moment builds its receipt
+- **THEN** the receipt has no item from that source and does not claim the check passed
+
 ## Technical Notes
 
 - **Implementation**: `bench/PROTOCOL.md`, `bench/corpora/default-surface.json`,
@@ -1370,9 +1673,7 @@ a silent spawn and never a misleading remediation.
   rejected (see `cli/spec.md` — server-side savings are ~2% and cost per-tool validation and
   discoverability). The high-leverage move is sending *fewer items* with exact, deterministic
   expansion handles, so omission is recoverable in one call rather than a fuzzy re-search. The
-  generic mechanism already exists in `progressive.ts`; the remaining work is wiring `tokenBudget`
-  through the high-volume list tools that do not yet accept it (today only `orient` and
-  `search_code` do).
+  generic mechanism is in `progressive.ts`.
 - **Trust is earned, not configured.** The external "Trust 50" is a no-data default; it rises
   only with real successful calls. The reliability, graceful-degradation, and smoke-validation
   requirements above are how OpenLore maximizes real-world success rate — the thing trust

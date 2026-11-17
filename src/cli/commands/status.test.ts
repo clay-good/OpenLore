@@ -6,11 +6,11 @@
  * is in flight.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { collectIndexStatus, statusCommand } from './status.js';
+import { collectHookMoments, collectIndexStatus, collectWiringScope, formatHookHealth, statusCommand } from './status.js';
 import { _resetVectorIndexCachesForTesting } from '../../core/analyzer/vector-index.js';
 
 const ANALYSIS = join('.openlore', 'analysis');
@@ -82,6 +82,15 @@ describe('openlore status — what the index is', () => {
     expect(status.configuredProvider).toBeNull();
   });
 
+  it('names keyword chosen by configuration apart from the unconfigured default', async () => {
+    await withIndex(false);
+    await writeConfig({ provider: 'none' });
+
+    const status = await collectIndexStatus(root);
+
+    expect(status.keywordCause).toBe('keyword-by-configuration');
+  });
+
   it('reports the semantic mode and no keyword cause when vectors are present', async () => {
     await withIndex(true);
     await writeConfig({ baseUrl: 'http://127.0.0.1:8765/v1', model: 'all-MiniLM-L6-v2' });
@@ -135,6 +144,50 @@ describe('openlore status — what the index is', () => {
     }
   });
 
+  it('offers the optional semantic upgrade to a human, never in --json', async () => {
+    await withIndex(false);
+    await writeConfig(null);
+    const cwd = process.cwd();
+    const run = async (args: string[]): Promise<string> => {
+      const lines: string[] = [];
+      const log = console.log;
+      console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); };
+      try {
+        process.chdir(root);
+        await statusCommand.parseAsync(['node', 'openlore', ...args]);
+      } finally {
+        console.log = log;
+        process.chdir(cwd);
+      }
+      return lines.join('\n');
+    };
+
+    expect(await run([])).toContain('openlore embed --local');
+    expect(await run(['--json'])).not.toContain('openlore embed');
+  });
+
+  // A raw UTC ISO stamp read as TOMORROW's date for anyone west of UTC in the evening, in a
+  // panel where every other line is prose (change: fix-status-built-at-rendering).
+  it('renders the build time relatively, not as a raw UTC ISO stamp', async () => {
+    await withIndex(false);
+    await writeConfig(null);
+    const cwd = process.cwd();
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+    try {
+      process.chdir(root);
+      await statusCommand.parseAsync(['node', 'openlore']);
+    } finally {
+      console.log = log;
+      process.chdir(cwd);
+    }
+    const built = lines.find(l => l.includes('Index built'));
+    expect(built, 'the panel must report a build time').toBeDefined();
+    expect(built).toMatch(/just now|ago/);
+    expect(built, 'no raw ISO timestamp').not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+  });
+
   it('emits the same fields through --json', async () => {
     await withIndex(false);
     await writeConfig({ baseUrl: 'http://127.0.0.1:8765/v1', model: 'all-MiniLM-L6-v2' });
@@ -158,6 +211,70 @@ describe('openlore status — what the index is', () => {
     });
     expect(typeof parsed.retrievalMode).toBe('string');
     expect(Array.isArray(parsed.staleFiles)).toBe(true);
+  });
+
+  // change: default-decision-autopilot-with-visible-trace
+  it('reports the governance block: mode, counts, newest ledger entries, and the review command', async () => {
+    await writeConfig(null);
+    const configPath = join(root, '.openlore', 'config.json');
+    await writeFile(configPath, JSON.stringify({ ...JSON.parse(await readFile(configPath, 'utf8')), governance: { autopilot: true } }));
+    await mkdir(join(root, '.openlore', 'decisions'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'decisions', 'pending.json'), JSON.stringify({
+      decisions: [{ id: 'aaaa1111', status: 'auto-approved' }],
+    }));
+    await writeFile(join(root, '.openlore', 'decisions', 'ledger.jsonl'), JSON.stringify({
+      id: 'aaaa1111', title: 'Use UUIDs', from: null, to: 'auto-approved', actor: 'agent', at: '2026-10-31T00:00:00.000Z',
+    }) + '\n');
+    const cwd = process.cwd();
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+    try {
+      process.chdir(root);
+      await statusCommand.parseAsync(['node', 'openlore']);
+    } finally {
+      console.log = log;
+      process.chdir(cwd);
+    }
+    const text = lines.join('\n');
+    expect(text).toContain('Decision autopilot');
+    expect(text).toContain('governance.autopilot is true — set it to false to require review');
+    expect(text).toContain('1 auto-accepted, 1 unreviewed');
+    expect(text).toContain('[aaaa1111] ∅ → auto-approved by agent');
+    expect(text).toContain('openlore decisions review');
+    // The status line's shared collector stays cheap: no governance block there.
+    expect((await collectIndexStatus(root)).governance).toBeUndefined();
+  });
+
+  it('reports the wiring scope, in text and through --json', async () => {
+    const home = join(root, 'home');
+    await mkdir(home);
+    expect(await collectWiringScope(root, home)).toBe('none');
+    await writeFile(join(root, '.mcp.json'), JSON.stringify({
+      mcpServers: { openlore: { command: 'npx', args: ['--yes', 'openlore', 'mcp'] } },
+      _openlore: { managed: true, version: 1, paths: ['mcpServers.openlore'] },
+    }));
+    expect(await collectWiringScope(root, home)).toBe('repo only');
+
+    const savedHome = process.env.OPENLORE_HOME;
+    process.env.OPENLORE_HOME = home;
+    const cwd = process.cwd();
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+    try {
+      process.chdir(root);
+      await statusCommand.parseAsync(['node', 'openlore', '--json']);
+      expect((JSON.parse(lines.join('\n')) as Record<string, unknown>).wiringScope).toBe('repo only');
+      await writeFile(join(home, '.claude.json'), JSON.stringify({ mcpServers: { openlore: { command: 'npx', args: [] } } }));
+      lines.length = 0;
+      await statusCommand.parseAsync(['node', 'openlore']);
+      expect(lines.join('\n')).toMatch(/Wiring scope\s+user \+ repo/);
+    } finally {
+      console.log = log;
+      process.chdir(cwd);
+      if (savedHome === undefined) delete process.env.OPENLORE_HOME; else process.env.OPENLORE_HOME = savedHome;
+    }
   });
 
   it('reports unknown freshness when git is unavailable rather than claiming current', async () => {
@@ -198,5 +315,108 @@ describe('openlore status — what the index is', () => {
     expect(status.staleFiles).toContain('removed.ts');
     expect(status.staleFiles).toContain('before-rename.ts');
     expect(status.staleFiles).toContain('after-rename.ts');
+  });
+});
+
+describe('openlore status — loop hook moments (change: hook-reliability)', () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'openlore-status-hooks-')); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  /** The groups `openlore install` writes: the prompt group has no `_openloreHook`. */
+  const installed = async (): Promise<void> => {
+    await mkdir(join(root, '.claude'), { recursive: true });
+    await writeFile(join(root, '.claude', 'settings.json'), JSON.stringify({ hooks: {
+      UserPromptSubmit: [
+        { hooks: [{ type: 'command', command: 'my-own-hook' }] },
+        { _openlore: true, hooks: [{ type: 'command', command: 'openlore orient --inject', timeout: 15 }] },
+      ],
+      PreToolUse: [{ _openlore: true, _openloreHook: 'before-edit', matcher: 'Edit|Write', hooks: [{ type: 'command', command: 'openlore hook before-edit' }] }],
+      Stop: [{ _openlore: true, _openloreHook: 'before-stop', hooks: [{ type: 'command', command: 'openlore hook before-stop' }] }],
+    } }));
+  };
+  const config = async (cfg: Record<string, unknown>): Promise<void> => {
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'config.json'), JSON.stringify(cfg));
+  };
+  const wired = () => collectHookMoments(root).filter(m => m.wired).map(m => `${m.moment}${m.enabled ? '' : ' (off)'}`);
+
+  it('lists prompt-submitted first among the wired moments', async () => {
+    await installed();
+    expect(wired()).toEqual(['prompt-submitted', 'before-edit', 'before-stop']);
+  });
+
+  it('a user hook on UserPromptSubmit is not the moment', async () => {
+    await mkdir(join(root, '.claude'), { recursive: true });
+    await writeFile(join(root, '.claude', 'settings.json'), JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'x' }] }, { _openlore: 'yes', hooks: [] }] } }));
+    expect(wired()).toEqual([]);
+  });
+
+  it('marks it off by its own switch or by contextInjection.mode "off"', async () => {
+    await installed();
+    await config({ hooks: { 'prompt-submitted': false } });
+    expect(wired()).toEqual(['prompt-submitted (off)', 'before-edit', 'before-stop']);
+    await config({ contextInjection: { mode: 'off' } });
+    expect(wired()).toEqual(['prompt-submitted (off)', 'before-edit', 'before-stop']);
+    await config({ hooks: { 'before-stop': false } });
+    expect(wired()).toEqual(['prompt-submitted', 'before-edit', 'before-stop (off)']);
+  });
+
+  it('reads an unreadable config as every moment on', async () => {
+    await installed();
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'config.json'), '{"hooks": {');
+    expect(wired()).toEqual(['prompt-submitted', 'before-edit', 'before-stop']);
+  });
+});
+
+describe('openlore status — hook health (change: hook-reliability, task 6.2)', () => {
+  it('formats one line: last run and p95 per moment, then errors, overruns, findings shown', () => {
+    const now = Date.parse('2026-11-14T12:00:00Z');
+    const line = formatHookHealth([
+      { moment: 'prompt-submitted', runs: 3, lastRun: new Date(now - 120_000).toISOString(), p95Ms: 940, errors: 1, overruns: 0, shown: 0 },
+      { moment: 'after-tools', runs: 5, lastRun: new Date(now - 30_000).toISOString(), p95Ms: 430, errors: 0, overruns: 2, shown: 4 },
+    ], now);
+    expect(line).toBe('prompt-submitted 2 minutes ago, p95 0.9 s; after-tools just now, p95 0.4 s — 1 error(s), 2 overrun(s), 4 finding(s) shown (last 7 days)');
+  });
+
+  it('with outcomes, counts each distinct finding and says what happened to it', () => {
+    const now = Date.parse('2026-11-14T12:00:00Z');
+    const line = formatHookHealth([
+      { moment: 'after-tools', runs: 2, lastRun: new Date(now - 30_000).toISOString(), p95Ms: 430, errors: 0, overruns: 0, shown: 3 },
+    ], now, { total: 3, fixed: 1, decided: 1, open: 0, notAssessed: 1 });
+    expect(line).toBe('after-tools just now, p95 0.4 s — 0 error(s), 0 overrun(s), 3 finding(s) shown: 1 fixed, 1 decided, 0 open, 1 not assessed (last 7 days)');
+  });
+
+  it('--json carries hookHealth when runs were recorded, and omits it otherwise', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-status-health-'));
+    const cwd = process.cwd();
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+    try {
+      process.chdir(root);
+      await statusCommand.parseAsync(['node', 'openlore', '--json']);
+      expect((JSON.parse(lines.join('\n')) as Record<string, unknown>).hookHealth).toBeUndefined();
+      await mkdir(join(root, '.openlore', 'session-ledger'), { recursive: true });
+      await writeFile(join(root, '.openlore', 'session-ledger', 'hook-runs.jsonl'), `${JSON.stringify({ t: new Date().toISOString(), moment: 'before-edit', ms: 300, outcome: 'overrun', shown: 0 })}\n`);
+      lines.length = 0;
+      await statusCommand.parseAsync(['node', 'openlore', '--json']);
+      expect((JSON.parse(lines.join('\n')) as { hookHealth: unknown[] }).hookHealth).toEqual([
+        expect.objectContaining({ moment: 'before-edit', runs: 1, overruns: 1 }),
+      ]);
+      lines.length = 0;
+      await statusCommand.parseAsync(['node', 'openlore']);
+      expect(lines.join('\n')).toMatch(/Hook health\s+before-edit just now, p95 0\.3 s — 0 error\(s\), 1 overrun\(s\), 0 finding\(s\) shown/);
+      // A failed run's reason is shown, so an error count can be acted on.
+      await writeFile(join(root, '.openlore', 'session-ledger', 'hook-runs.jsonl'), `${JSON.stringify({ t: new Date().toISOString(), moment: 'before-stop', ms: 300, outcome: 'error', shown: 0, reason: 'TypeError: x is not a function' })}\n`, { flag: 'a' });
+      lines.length = 0;
+      await statusCommand.parseAsync(['node', 'openlore']);
+      expect(lines.join('\n')).toMatch(/1 error\(s\), 1 overrun\(s\).*last error: before-stop just now: TypeError: x is not a function/);
+    } finally {
+      console.log = log;
+      process.chdir(cwd);
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

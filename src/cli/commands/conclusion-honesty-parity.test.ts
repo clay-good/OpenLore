@@ -31,6 +31,7 @@ const read = (rel: string): string => readFileSync(join(process.cwd(), rel), 'ut
  */
 const BASE_REF_COMMANDS: Record<string, { handler: string } | { delegatesTo: string[] }> = {
   'certify-public-surface': { handler: 'src/core/services/mcp-handlers/public-surface.ts' },
+  'certify-service-contract': { handler: 'src/core/services/mcp-handlers/service-contract.ts' },
   'impact-certificate': { handler: 'src/core/services/mcp-handlers/impact-certificate.ts' },
   'blast-radius': { handler: 'src/core/services/mcp-handlers/blast-radius.ts' },
   'briefing-since': { handler: 'src/core/services/mcp-handlers/briefing-since.ts' },

@@ -24,11 +24,21 @@ function decisionsPath(rootPath: string): string {
   return safeJoin(resolve(rootPath), join(OPENLORE_DIR, OPENLORE_DECISIONS_SUBDIR, DECISIONS_PENDING_FILE));
 }
 
-export async function loadDecisionStore(rootPath: string): Promise<DecisionStore> {
+/**
+ * Load the decision store. A torn or malformed store is quarantined and read as empty.
+ * With `readOnly`, a caller that must not change the working tree, and must not read a
+ * broken store as "no decisions" (the commit gate), gets an error instead.
+ */
+export async function loadDecisionStore(rootPath: string, opts: { readOnly?: boolean } = {}): Promise<DecisionStore> {
   const path = decisionsPath(rootPath);
   if (!(await fileExists(path))) {
     return emptyStore();
   }
+  const corrupt = async (reason: string): Promise<DecisionStore> => {
+    if (opts.readOnly) throw new Error(`decision store is unreadable (${reason})`);
+    await quarantineCorrupt(path, reason);
+    return emptyStore();
+  };
   let raw: string;
   try {
     raw = await readFile(path, 'utf-8');
@@ -36,8 +46,7 @@ export async function loadDecisionStore(rootPath: string): Promise<DecisionStore
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return emptyStore();
     // A genuine read fault (not corruption) — quarantine so the file is preserved
     // and the loss is loud, never a silent empty store.
-    await quarantineCorrupt(path, `read failed: ${(err as Error).message}`);
-    return emptyStore();
+    return corrupt(`read failed: ${(err as Error).message}`);
   }
   let parsed: unknown;
   try {
@@ -45,15 +54,13 @@ export async function loadDecisionStore(rootPath: string): Promise<DecisionStore
   } catch (err) {
     // Torn / hand-corrupted JSON: quarantine, never silently empty. Silent memory
     // loss presents absence as current fact. (harden-memory-integrity-invariant)
-    await quarantineCorrupt(path, `invalid JSON: ${(err as Error).message}`);
-    return emptyStore();
+    return corrupt(`invalid JSON: ${(err as Error).message}`);
   }
   // Untrusted artifact: validate top-level shape before use. A malformed store
   // (non-object, or no `decisions` array) is quarantined rather than letting a
   // poisoned shape reach `store.decisions.*` downstream (mcp-security).
   if (parsed === null || typeof parsed !== 'object' || !Array.isArray((parsed as { decisions?: unknown }).decisions)) {
-    await quarantineCorrupt(path, 'invalid shape (missing decisions array)');
-    return emptyStore();
+    return corrupt('invalid shape (missing decisions array)');
   }
   const store = parsed as DecisionStore;
   if (typeof store.sequence !== 'number') store.sequence = 0; // legacy default
@@ -61,8 +68,7 @@ export async function loadDecisionStore(rootPath: string): Promise<DecisionStore
   // array; every field inside it is still attacker-authored (see sanitizeDecision).
   const records = store.decisions as unknown[];
   if (records.some((record) => !isDecisionRecordShaped(record))) {
-    await quarantineCorrupt(path, 'invalid shape (malformed decision record)');
-    return emptyStore();
+    return corrupt('invalid shape (malformed decision record)');
   }
   store.decisions = store.decisions.map(sanitizeDecision);
   return store;

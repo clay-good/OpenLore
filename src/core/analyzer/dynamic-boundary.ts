@@ -823,6 +823,25 @@ function calleeNode(call: DynamicBoundaryNode): DynamicBoundaryNode | undefined 
     ?? childrenOf(call)[0];
 }
 
+/**
+ * Look one rule up in a declared rule table, by a key taken from the ANALYZED SOURCE (change:
+ * fix-recheck-failed-worker-extractions).
+ *
+ * Every rule table here is a `Record<string, …>` object literal, so a plain `table[key]` also
+ * walks `Object.prototype`: a repository calling anything named `toString`, `valueOf`,
+ * `constructor` or `hasOwnProperty` matched a rule that was never declared, and received a native
+ * FUNCTION where a kind or an argument index belonged. Not hypothetical — a Go test file with a
+ * local `toString := func(...)` recorded a boundary whose `kind` was `Object.prototype.toString`,
+ * which then refused to structured-clone out of an extraction worker and cost the entire file its
+ * place in the graph.
+ *
+ * Own properties only: a key the spec did not declare matches nothing, whatever the source calls it.
+ */
+function ownRule<V>(table: Record<string, V> | undefined, key: string): V | undefined {
+  if (!table || !Object.hasOwn(table, key)) return undefined;
+  return table[key];
+}
+
 /** The trailing `.name` of a dotted callee, or the whole text when it is a bare identifier. */
 function lastSegment(text: string): string {
   const i = text.lastIndexOf('.');
@@ -975,7 +994,7 @@ export function matchDynamicBoundaries(
     if (spec.newTypes?.includes(n.type) && spec.constructorKinds) {
       const ctor = field(n, 'constructor');
       const name = ctor ? textOf(source, ctor).trim() : undefined;
-      const kind = name ? spec.constructorKinds[name] : undefined;
+      const kind = name ? ownRule(spec.constructorKinds, name) : undefined;
       if (kind) record(kind, n);
     }
 
@@ -1016,7 +1035,7 @@ export function matchDynamicBoundaries(
       } else if (text) {
         // A dotted rule is checked first, on the FULL dotted text: `Reflect.get` must never be read
         // as a bare `get`.
-        const dotted = spec.dottedKinds?.[text];
+        const dotted = ownRule(spec.dottedKinds, text);
         // A `calleeKinds` rule fires on a bare call, on a self-like receiver, or — only where the
         // language declares the name on its universal base object — on any receiver.
         const bareApplies = !text.includes('.')
@@ -1028,20 +1047,20 @@ export function matchDynamicBoundaries(
         //    so the inner call's own visit (which shares this offset) is already deduped away.
         if (fn && spec.callTypes.includes(fn.type) && spec.invokeOnlyKinds) {
           const innerName = lastSegment(calleeText(source, fn) ?? '');
-          const innerKind = spec.invokeOnlyKinds[innerName];
+          const innerKind = ownRule(spec.invokeOnlyKinds, innerName);
           if (innerKind) {
-            record(innerKind, n, literalTargetOf(source, fn, spec, spec.selectorIndex?.[innerName]));
+            record(innerKind, n, literalTargetOf(source, fn, spec, ownRule(spec.selectorIndex, innerName)));
             pushChildren(stack, n);
             continue;
           }
         }
         // 2. A rule that fires only on a NON-literal argument: `import(spec)` is a boundary,
         //    `import('./known')` is an ordinary statically resolvable import.
-        const dyn = bareApplies ? spec.nonLiteralArg?.[bare] : undefined;
-        const kind = dotted ?? (bareApplies ? spec.calleeKinds[bare] : undefined);
+        const dyn = bareApplies ? ownRule(spec.nonLiteralArg, bare) : undefined;
+        const kind = dotted ?? (bareApplies ? ownRule(spec.calleeKinds, bare) : undefined);
         // A rule whose declared value argument is a literal that cannot be a callable defines
         // nothing dispatchable — `setattr(self, "raw", None)` is `self.raw = None`.
-        const nonCallableAt = bareApplies ? spec.nonCallableValueArg?.[bare] : undefined;
+        const nonCallableAt = bareApplies ? ownRule(spec.nonCallableValueArg, bare) : undefined;
         const inert = nonCallableAt !== undefined
           && isNonCallableLiteral(source, n, spec, nonCallableAt);
         if (inert) {
@@ -1049,20 +1068,20 @@ export function matchDynamicBoundaries(
         } else if (dyn && !kind) {
           if (literalTargetOfAnyShape(source, n, spec, dyn.index) === undefined) record(dyn.kind, n);
         } else if (kind) {
-          record(kind, n, literalTargetOf(source, n, spec, spec.selectorIndex?.[bare]));
+          record(kind, n, literalTargetOf(source, n, spec, ownRule(spec.selectorIndex, bare)));
         } else {
           // 2. Gated member rules — `.invoke(`, `.Call(`, `.getBean(` — which fire only when the
           //    file imports the framework that gives the name its reflective meaning.
           const method = lastSegment(text);
           const gate = gates.find(g => g.methods.includes(method));
           if (gate) {
-            record(gate.kind, n, literalTargetOf(source, n, spec, spec.selectorIndex?.[method]));
+            record(gate.kind, n, literalTargetOf(source, n, spec, ownRule(spec.selectorIndex, method)));
           } else if (
             // 3. DI container resolution — grounded in a declared DI package import, never on the
             //    bare method name. `this.cache.get(key)` in a file with no DI import is not a site.
             diPresent && spec.diMethods?.includes(method) && text.includes('.')
           ) {
-            record('container-resolution', n, literalTargetOf(source, n, spec, spec.selectorIndex?.[method]));
+            record('container-resolution', n, literalTargetOf(source, n, spec, ownRule(spec.selectorIndex, method)));
           }
         }
       }

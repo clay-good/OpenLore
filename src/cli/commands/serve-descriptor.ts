@@ -58,6 +58,8 @@ export interface ServeHealth {
   pid: number;
   preset: string;
   tools: string[];
+  /** Installed package version, when reported by this daemon release. */
+  version?: string;
   tokenProtected: boolean;
   tokenAuthenticated: boolean;
   draining: boolean;
@@ -123,6 +125,7 @@ export function validateServeHealth(
   // other field here is allowlisted. Absent stays absent so the caller can distinguish
   // "watcher stopped" from "this daemon does not report a watcher".
   const watcher = h.watcher === 'healthy' || h.watcher === 'stopped' ? h.watcher : undefined;
+  const version = typeof h.version === 'string' ? h.version : undefined;
   return {
     ok: true,
     protocolVersion: SERVE_PROTOCOL_VERSION,
@@ -131,6 +134,7 @@ export function validateServeHealth(
     pid: h.pid,
     preset: h.preset,
     tools: h.tools as string[],
+    ...(version !== undefined ? { version } : {}),
     tokenProtected: h.tokenProtected,
     tokenAuthenticated: true,
     draining: h.draining,

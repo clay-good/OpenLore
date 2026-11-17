@@ -232,6 +232,46 @@ export function run(engine: { eval(s: string): number }) {
     expect(sites).toEqual([]);
   });
 
+  it('a callee named after an Object.prototype member matches no rule', async () => {
+    // Change: fix-recheck-failed-worker-extractions. Every rule table here is a
+    // `Record<string, …>` object literal keyed by text read out of the ANALYZED SOURCE, so an
+    // unguarded `table[key]` also walked `Object.prototype`: a call to anything named `toString`,
+    // `valueOf`, `constructor` or `hasOwnProperty` matched a rule nobody declared, and its `kind`
+    // came back as a native FUNCTION.
+    //
+    // Found in `grpc-go`'s `test/retry_test.go` (`toString := func(...)`), where the consequence
+    // was out of all proportion to the cause: a function-valued kind will not structured-clone out
+    // of an extraction worker, so the worker reported the file FAILED and the whole file — 13 test
+    // functions and 397 edges — was recorded as a parse failure and dropped from the graph.
+    for (const [path, language, content] of [
+      ['a.go', 'Go', 'package p\n\nfunc run() int {\n  toString := func(x int) int { return x }\n  return toString(1)\n}\n'],
+      ['a.py', 'Python', 'def run(o):\n    return valueOf(o)\n'],
+      ['a.ts', 'TypeScript', 'export function run(o: object) { return constructor(o); }\n'],
+      ['a.rb', 'Ruby', 'def run(o)\n  toString(o)\nend\n'],
+    ] as const) {
+      const sites = await sitesOf(path, language, content);
+      expect(sites, `${language} matched a rule off the prototype chain`).toEqual([]);
+    }
+  });
+
+  it('a recorded kind is always a declared string, never a value off the prototype chain', async () => {
+    // The structural half of the same guard: whatever the source names its locals, the kind that
+    // leaves the matcher is a member of the closed vocabulary — and therefore clonable, which is
+    // the invariant whose violation cost a file its place in the graph.
+    const sites = await sitesOf(
+      'a.go',
+      'Go',
+      'package p\n\nimport "reflect"\n\nfunc run(o interface{}) {\n'
+      + '  toString := func(x int) int { return x }\n  _ = toString(1)\n'
+      + '  reflect.ValueOf(o).MethodByName("toString").Call(nil)\n}\n',
+    );
+    expect(sites.length).toBeGreaterThan(0); // non-vacuity: the reflective call IS a site
+    for (const s of sites) {
+      expect(DYNAMIC_BOUNDARY_KINDS as readonly string[]).toContain(s.kind);
+    }
+    expect(() => structuredClone(sites)).not.toThrow();
+  });
+
   it('a statically-indexed member call is not a computed member', async () => {
     const sites = await sitesOf('a.ts', 'TypeScript', `
 export function run(handlers: Array<() => void>, table: Record<string, () => void>) {

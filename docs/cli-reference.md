@@ -15,6 +15,7 @@
 | `openlore embed --off` | Revert to the first-class keyword (BM25) default and rebuild | No |
 | `openlore orient` | Relevant functions, callers, specs, and insertion points for a task (the flagship) | No |
 | `openlore orient --inject` | Emit a bounded, ignorable task-scoped orientation block for a pre-turn hook | No |
+| `openlore orient --proposal-only` | Emit the concise OpenSpec proposal instruction only for recognized proposal invocations | No |
 | `openlore search <query>` | Search indexed code or specs; optionally explain one named target | No |
 | `openlore generate` | Generate specs from analysis | Yes |
 | `openlore generate --adr` | Also generate Architecture Decision Records | Yes |
@@ -44,9 +45,12 @@
 | `openlore working-set context` | Assemble the working-set briefing for an active change across its targets (read-only, advisory) | Targets indexed |
 | `openlore impact-certificate` | Certify what the current diff opens into declared covering surfaces, before it lands (advisory; opt-in blocking) | Yes |
 | `openlore enforce` | Unified finding-enforcement gate: blocks on `blocking`, new debt under `frozen`, or an unverifiable frozen baseline (advisory by default); `--sarif <path>` also writes every classified finding as SARIF 2.1.0 | Decisions/specs present |
-| `openlore plugin-manifest emit\|validate` | Inspect/validate the OpenSpec plugin manifest (distinct from the federation `manifest`) | No |
 | `openlore mcp` | Start MCP server (stdio, for Cline / Claude Code) | No |
 | `openlore serve` | Start a warm local HTTP daemon exposing tools (loopback, for Pi / editors) | No |
+| `openlore statusline` | Print the current search-index state for Claude Code's status line | No |
+| `openlore hook <moment>` | Print one agent-loop receipt from a hook payload on stdin (`before-edit`, `after-tools`, `before-stop`, `after-compact`, `before-subagent`, `subagent-start`); wired by `install` — see [agent-loop hooks](install.md#agent-loop-hooks) | No |
+| `openlore handoff` | Brief the in-flight change for a successor session (`get_handoff_briefing`); `--json`, `--budget <tokens>` | No |
+| `openlore footprint` | Share this agent's intended write-set and read-set with the other worktrees of the clone and see the hazards with live peers: `declare --write a,b [--read c] [--title …] [--actor id] [--append]`, `release`, `list`. Advisory; nothing is locked | Yes |
 | `openlore doctor` | Check environment and configuration for common issues | No |
 | `openlore features` | List opt-in features, which are active, and the one command/snippet to turn on each (`--json`, `--inactive`) | No |
 | `openlore update` | Upgrade openlore to the latest published version (detects npm-global / Homebrew / npx); `--check` reports availability, `--dry-run` prints the command without running it | No |
@@ -54,11 +58,12 @@
 | `openlore blast-radius` | Pre-flight structural blast-radius briefing for the current diff (advisory; `--install-hook` for a pre-commit hook) | No |
 | `openlore coverage-gaps` | Ranked structural test-coverage gaps: important code with NO reaching test (the inverse of `select_tests`), no runtime. Scope to a diff (`--base`/`--symbols`) or region (`--file-pattern`). Read-only, never blocks | Yes |
 | `openlore certify-public-surface` | Certify the public API surface (no `--base`) or the breaking-change verdict for the working-tree diff (`--base <ref>`): removed/renamed exports, incompatible signatures, each breaking change with its consumers. `--accept` records intended breakages with a justification. Deterministic, never blocks | Yes |
+| `openlore certify-service-contract` | Certify OpenAPI/Swagger contracts against the code: declared operations and parity with the indexed route handlers (no `--base`), or the breaking-change verdict for each changed element with its in-repo callers (`--base <ref>`). Read-only, advisory | Yes |
 | `openlore style-fingerprint` | Descriptive per-language idiom profile (function form, binding, conditional, async, string, naming case) for the repo, a region (`--community <id>`), or a file (`--file <path>`); `--language` filters, `--json` for machine output. Evidence-floor + enforcement-aware nulls. Read-only, deterministic, never blocks | Yes |
 | `openlore briefing-since` | Catch-up briefing of what changed since a base ref (`--base <ref>`), ranked by significance tier — surprising-change (a stable hub moved) > hub-change > chokepoint-change > ordinary-change — from existing labels (not a score); grouped by region, with tests-to-run and a no-silent-truncation receipt. Scope with `--file-pattern`, bound with `--max`, `--json` for machine output. Read-only, deterministic, never blocks | Yes |
 | `openlore find-clones` | Existing clones of ONE query — a function `--symbol <name>` (or `name::path`) in the index, or raw `--snippet <code>` (even code not yet written) — ranked exact > structural > near. The edit-time "does this already exist? reuse it" companion to the whole-repo `get_duplicate_report`. `--min <ratio>` sets the near floor (default 0.7), `--max <n>` bounds the list, `--json` for machine output. Read-only, deterministic, never blocks | Yes |
 | `openlore error-propagation` | Exceptions escaping vs. handled for TS/JS/Python/Java/C#, or returned error values and panic/recover flow for Go. Go results are explicitly value-shaped. Unanalyzable callees and discarded Go results are disclosed as boundaries. `--max-depth <n>` bounds traversal; `--json` emits the structured model. | Yes |
-| `openlore env-impact` | What breaks if an env var (`--name <var>`) is removed or renamed: the line-precise read sites (file/line/enclosing function; module-level reads disclosed), the upstream callers that transitively reach a read (the blast radius), the tests to run, and per-site `required` (no fallback = hard break) — the configuration analogue of `analyze_impact`, for TS/JS/Python/Go/Ruby. Unknown var → not-found + candidates; config-object keys out of scope. `--max-depth <n>` bounds the backward traversal (default 12), `--json` for machine output. Read-only, deterministic, never blocks | Yes |
+| `openlore env-impact` | What breaks if an env var (`--name <var>`) is removed or renamed: the line-precise read sites (file/line/enclosing function; module-level reads disclosed), the upstream callers that transitively reach a read (the blast radius), the tests to run, the infrastructure files that set it (Kubernetes, compose, Dockerfile, Terraform/OpenTofu, CloudFormation/SAM, GitHub Actions, Serverless; never the value), and per-site `required` (no fallback = hard break) — the configuration analogue of `analyze_impact`, for TS/JS/Python/Go/Ruby. Unknown var → not-found + candidates; config-object keys out of scope. `--max-depth <n>` bounds the backward traversal (default 12), `--json` for machine output. Read-only, deterministic, never blocks | Yes |
 | `openlore review` | Deterministic structural PR review (structural delta + blast radius) as a Markdown/JSON briefing; pairs with the bundled GitHub Action | No |
 | `openlore preflight` | CI staleness gate: fail when the analysis graph is stale relative to the working tree | No |
 | `openlore export scip` | Export the analysis graph as an SCIP index for the Sourcegraph / Glean ecosystem | No |
@@ -98,8 +103,8 @@ openlore orient [options]
   --metrics              # Report wall time + output size to stderr (opt-in)
   --inject               # Emit a bounded, ignorable task-scoped orientation block
                          #   for a pre-turn agent hook; reads the task from --task
-                         #   or stdin. Fail-open: any failure degrades to a single
-                         #   pointer line at exit 0 (see docs/install.md).
+                         #   or stdin. Briefs only code the prompt names exactly;
+                         #   otherwise silent. Fail-open, exit 0 (see docs/install.md).
 ```
 
 With no `--task`, `orient` prints a session-start primer. Requires `openlore analyze`
@@ -139,8 +144,9 @@ openlore install [options]   # wire agents (this repo AND your user scope),
                          #   continue, agents-md
   --preset <name>        # MCP tool preset to wire: substrate (default; navigation core +
                          #   spec workflows + recall + verify_claim + blast_radius), navigation (lean escape),
-                         #   minimal, memory, verify, federation, coordination, or full
-  --all-tools            # Wire the full 76-tool surface (alias of --preset full)
+                         #   minimal, memory, verify, federation, coordination,
+                         #   plugin (evidence set + verify_change), or full
+  --all-tools            # Wire the full 84-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --uninstall            # Remove OpenLore-managed blocks and entries (both scopes)
@@ -157,7 +163,7 @@ openlore connect remove [agent]      # disconnect that agent
   <agent>                # Positional: claude-code | cursor | cline | continue |
                          #   agents-md (omit for an interactive picker)
   --preset <name>        # MCP tool preset to wire (same names as install)
-  --all-tools            # Wire the full 76-tool surface (alias of --preset full)
+  --all-tools            # Wire the full 84-tool surface (alias of --preset full)
   --dry-run              # Print planned changes without writing any files
   --force                # Overwrite OpenLore-managed blocks even if hand-edited
   --no-analyze           # Configure surfaces only; do not build the index
@@ -169,7 +175,7 @@ openlore connect remove [agent]      # disconnect that agent
 A bare `openlore install` wires the `substrate` surface (15 tools — navigation core + governance reads + spec-workflow composites) and, for
 Claude Code, both a `SessionStart` primer hook and a `UserPromptSubmit` task-scoped
 injection hook. Use `--preset navigation` for the lean navigate-only core (10 tools), or
-`--preset full` for all 76 tools.
+`--preset full` for all 84 tools.
 
 ### MCP Server Options
 
@@ -178,7 +184,7 @@ openlore mcp [options]             # start the stdio MCP server
 
   --preset <name>        # Expose a named preset (default: substrate, 15 tools — nav + governance + spec workflows)
   --minimal              # Expose only the core 6 governance tools
-  --all-tools            # Expose the full surface — all 76 tools (alias --preset full)
+  --all-tools            # Expose the full surface — all 84 tools (alias --preset full)
   --list-tools           # Print the active surface grouped by capability family and exit
   --watch-auto           # Auto-detect + incrementally re-index the project dir
   --no-watch-auto        # Disable auto-watch (use for one-shot tool calls)
@@ -358,16 +364,19 @@ openlore decisions [options]
   --json                 # Machine-readable output
   --uninstall-hook       # Remove decisions pre-commit hook (install via: openlore setup --tools claude)
 
-# Record a draft decision — the same draft the record_decision MCP tool records, on any wired preset
+# Record a decision — the same handler as the record_decision MCP tool, on any wired preset
 openlore decisions record --title <text> --rationale <text>
   [--consequences <text>] [--files <a.ts,b.ts>] [--supersedes <id>]
   [--scope local|component|cross-domain|system] [--constraints-file <path.json>] [--json]
-                         # Prints the draft id and `openlore decisions status <id>` for its verdict
+                         # Prints the id and `openlore decisions status <id>` for its verdict.
+                         # Under autopilot it is auto-approved at once (anchored files must exist,
+                         # a superseded decision must be live) and synced in background; else a draft
 
-# Decision autopilot (opt-in: { "governance": { "autopilot": true } } in .openlore/config.json):
-# the gate auto-accepts verified decisions (distinct `auto-approved` status), syncs them to
-# specs with an "Auto-accepted (unreviewed)" marker, and never blocks a commit. Every status
-# transition — in every mode — lands on an append-only ledger.
+# Decision autopilot: on when `governance.autopilot` is absent, unless a blocking decisions gate
+# is installed; `false` turns it off, `true` forces it on. `decisions record` and the gate
+# auto-accept (distinct `auto-approved` status), sync to specs with an "Auto-accepted
+# (unreviewed)" marker, and never block a commit. Every status transition — in every mode —
+# lands on an append-only ledger. `openlore status` shows the mode and the trail.
 openlore decisions log [--json] [--since <ref|ISO date>]
                          # Show the transition ledger, newest first
 openlore decisions review [--promote <ids|all>] [--reject <ids|all>] [--note <text>] [--json]
@@ -400,11 +409,11 @@ Checks performed:
 
 | Check | What it looks for |
 |-------|------------------|
-| Node.js version | ≥ 22.19 required, and `node:sqlite` probed as loadable |
+| Node.js version | ≥ 22.22 required, and `node:sqlite` probed as loadable |
 | Git repository | `.git` directory and `git` binary on PATH |
 | openlore config | `.openlore/config.json` exists and is parseable |
 | Analysis artifacts | `repo-structure.json` freshness (warns if >24h old) |
-| OpenSpec directory | `openspec/specs/` exists |
+| Spec source | the OpenSpec corpus in use, or `none` (a supported state, never a warning) |
 | LLM provider | API key or `claude` CLI detected |
 | Disk space | Warns < 500 MB, fails < 200 MB |
 | Install health | Warns when more than one `openlore` install is on PATH, or when the user-scope MCP entry (`~/.claude.json`) names a launcher that no longer exists; `--fix` re-wires the launcher |
@@ -618,7 +627,7 @@ openlore env-impact --name PORT --max-depth 5             # bound the backward (
 openlore env-impact --name SECRET_KEY --json              # machine-readable (stable shape)
 ```
 
-`readSites` locates each read of the env var to a file/line and its enclosing function (a read outside any function is reported **module-level** — it runs at import time, so its effective blast radius is every importer, disclosed in `boundaries`); each site carries `required` (true when no site-local fallback `??`/`||` or strict subscript means removing the var is a hard break there). `affectedFunctions` is the upstream callers that transitively reach a read (the blast radius, with distance); `reachingTests` is the tests to run. Honest by construction — a **sound lower bound**: an unknown var returns an explicit not-found with candidates (never an empty "unused"); config-object key reads (`config.x.y`) are an explicit out-of-scope boundary, never guessed; the call graph's resolution limits (dynamic dispatch, reflection) are disclosed; and a **stale index** (read-site lines come from the current source but map to cached function spans) is disclosed via a `staleness` marker + boundary, never presented as clean. Scope is env-var reads in TS/JS/Python/Go/Ruby (exactly what the env extractor scans); per-site `required` reflects the actual fallback (TS `??`/`||`, Python/Ruby defaultless `get`/`getenv`/`fetch` vs. a positional or block default). Computed live from the cached graph plus a re-read of the var's files — no new persisted artifact. The matching MCP tool `analyze_env_impact` is exposed under `openlore mcp --preset full`; it is the conclusion companion to the `get_env_vars` inventory.
+`readSites` locates each read of the env var to a file/line and its enclosing function (a read outside any function is reported **module-level** — it runs at import time, so its effective blast radius is every importer, disclosed in `boundaries`); each site carries `required` (true when no site-local fallback `??`/`||` or strict subscript means removing the var is a hard break there). `affectedFunctions` is the upstream callers that transitively reach a read (the blast radius, with distance); `reachingTests` is the tests to run. Honest by construction — a **sound lower bound**: an unknown var returns an explicit not-found with candidates (never an empty "unused"); config-object key reads (`config.x.y`) are an explicit out-of-scope boundary, never guessed; the call graph's resolution limits (dynamic dispatch, reflection) are disclosed; and a **stale index** (read-site lines come from the current source but map to cached function spans) is disclosed via a `staleness` marker + boundary, never presented as clean. An env-var name passed into a helper that performs the read is followed **one hop** where provable from literal text (a same-file free function whose single parameter is the whole key, called with a plain string literal); the site is reported at the **call site** with the helper in `via`, and every unfollowable non-literal read is counted in `boundaries` with its evidence in `unfollowedEnvReads`. Scope is env-var reads in TS/JS/Python/Go/Ruby (exactly what the env extractor scans); per-site `required` reflects the actual fallback (TS `??`/`||`, Python/Ruby defaultless `get`/`getenv`/`fetch` vs. a positional or block default). Computed live from the cached graph plus a re-read of the var's files — no new persisted artifact. The matching MCP tool `analyze_env_impact` is exposed under `openlore mcp --preset full`; it is the conclusion companion to the `get_env_vars` inventory.
 
 #### Public API surface contract
 
@@ -635,6 +644,18 @@ openlore certify-public-surface --base v2.0.0 --accept --justification "v3 drops
 
 The closed classification rules: a **removed** or **renamed** export, an **added required parameter**, a parameter made **required**, or a **narrowed** parameter/return type is `breaking`; an added **trailing optional** parameter, a **new export**, or a **widened** return type is `non-breaking`; anything that cannot be *proven* compatible from the available signatures (untyped/dynamically-typed, or an incomparable type change) is `potentially-breaking` — **never silently safe**, since there is no type checker and no build in the loop. A renamed export is reported as a rename (via symbol-identity continuity), not a remove+add. A symbol still defined but no longer exported is reported as `visibility-reduced` (public → private); a re-export (`export { X } from …`) follows its definition — it is tracked at the definition site, not separately at the barrel, so a barrel'd symbol is never double-counted. Each breaking or potentially-breaking change, and each added export, carries stable rule codes (`export-removed`, `export-renamed`, `export-visibility-reduced`, `param-removed`, `param-required-added`, `param-became-required`, `param-type-narrowed`, `return-type-narrowed`, `signature-unprovable`, `export-added`), and the verdict carries a `suggestedBump`: `major` when any change is breaking; withheld (`null`, printed as `withheld (reason)`) when any change is potentially-breaking or any changed code file is in a language whose signatures are not classified (for example Go, Vue, or shell; test, Terraform, and config files do not count); otherwise `minor` when an export was added, else `patch` (an added optional parameter or a widened return type alone suggests `patch`). Each breaking rule code (severity `error`) and each `signature-unprovable` (severity `warning`) is also a registered governance finding in `findings[]`, so the caller that runs the tool can gate an individual rule with `enforcement.policy`; `openlore enforce` does not run it. Each breaking change is also split into `breaking-consumed` (at least one indexed consumer binds it; the consumers are listed, each with how it binds: a resolved `call`; an `import` of the symbol by name, aliases resolved and followed through re-exporting modules; a `module-import` (a default, namespace, or whole-module import that may use it); or an `unresolved-call` from an importing file or the defining file when the index was rebuilt after the symbol went away) or `breaking-unconsumed-in-index` (none found). `consumerCensus` names the import evidence used and what it cannot see — imports the analyzer does not resolve (for example Python absolute imports in a src layout) and aliased re-exports. For a rename only callers of the old name count; for a removed `export` keyword only other files count. Zero indexed consumers is never "safe": external/unindexed consumers are disclosed as a known-unknowable boundary on both. By default only in-repo consumers are checked; `--federation` (optionally `--federation-repos a,b`) also counts consumers in indexed sibling repos, matched by symbol name, and names the repos it checked and skipped. `--accept --justification "<why>"` records the diff's unaccepted breaking findings in the checked-in `.openlore/public-surface-baseline.jsonl` (one sorted JSON line per rule code, symbol, and discriminator — the before/after contract with parameter names and types but not formatting, the removed declaration, or the rename target — so accepting one break never covers a later, different one). `--accept` never edits `.gitignore`: it reports whether Git tracks, would track, or ignores the file, and for an ignored file (the usual case, since `.openlore/` is ignored) prints the one command that adds it: `git add -f .openlore/public-surface-baseline.jsonl`. Once committed, ignore rules no longer apply to it. It refuses without a justification, never overwrites a baseline it cannot read, never accepts findings computed against a fallback base, and never silently drops a decision anchor: re-accepting an entry whose decision expired needs a new `--decision`. An accepted entry's justification is changed by editing the file. Later runs list a matched finding under `baseline.accepted` with its justification and leave it out of `findings[]`; the verdict, summary, and bump still count it, and any new break still reports. `--decision <id>` anchors the acceptance to a current decision: when that decision is superseded, rejected, or missing, the acceptance is listed as `stale` (naming the superseder) and the finding reports again. A baseline that cannot be read honors nothing and says why. Signature classification covers TypeScript/JavaScript/Python; other languages fail-soft to surface membership only (a removed/added export is still reported, without a signature classification). Test files are excluded from the surface. Advisory — it is a report and never blocks; its only write is `--accept`. The matching MCP tool `certify_public_surface` is exposed under `openlore mcp --preset full`.
 
+#### Service contract certification
+
+Check OpenAPI 3.x and Swagger 2.0 documents against the routes that serve them and the clients that call them:
+
+```bash
+openlore certify-service-contract                  # declared operations + parity with the indexed route handlers
+openlore certify-service-contract --base main      # verdict for each changed contract element vs the merge-base
+openlore certify-service-contract --base main --json
+```
+
+Without `--base`, every specification in the repository (tracked or untracked, not ignored; `node_modules`, `vendor`, `dist`, and `build` skipped) is listed with its operations, and parity is checked against the route inventory `openlore analyze` writes: an operation no handler serves, and a handler under a path the specification covers (the operation's path or its parent) that the specification does not declare. A route is matched with and without the specification's base path (`servers[0].url` or `basePath`), and path parameters match whatever the framework names them. With `--base <ref>`, each changed element gets one rule from a closed table — `breaking`, `dangerous`, `non-breaking`, or `potentially-breaking` — and each breaking or dangerous one lists the client call sites in this repository whose method and literal path match. Only local `$ref`s are followed; external `$ref`s, `oneOf`/`anyOf`, callbacks, and webhooks are listed as outside the model. Every element also carries a hash of what the rules do not compare (constraints, nested schemas, composition, media types, status codes), so any other difference is `potentially-breaking`, which withholds the suggested version bump. Renaming a path parameter, reordering a set (`required`, `enum`), or moving a schema into `components` is not a change. A specification that cannot be parsed is `notAssessed`, never "no changes". Findings `contract-breaking`, `contract-declared-unimplemented`, and `contract-implemented-undeclared` are advisory unless `enforcement.policy` says otherwise; `openlore enforce` does not run this command. The matching MCP tool `certify_service_contract` is exposed under `openlore mcp --preset full`.
+
 #### Change significance briefing
 
 ```bash
@@ -645,7 +666,7 @@ openlore briefing-since --max 25                     # bound the briefing (defau
 openlore briefing-since --base main --json           # machine-readable (stable shape) for CI / an orchestrator
 ```
 
-`briefing-since` answers the reviewer / catch-up / onboarding question the other change tools don't — not "what does *my* pending diff do?" but **"a lot changed since I last looked; which of it structurally matters?"** Each changed production symbol is labeled with exactly one **tier**, ordered highest-first: `surprising-change` (a high-fan-in **hub** whose file **rarely changed before** — a normally-stable, widely-depended-on symbol that suddenly moved) > `hub-change` (a broad high-fan-in/high-fan-out hub) > `chokepoint-change` (a high-fan-in funnel) > `ordinary-change`. The tiers come **entirely from existing classifiers** (`landmark-signals` hub/orchestrator/chokepoint + the `volatilityLevel` churn classifier) plus raw evidence (fan-in, fan-out, prior churn) — there is **no weighted significance score and no new tuning constant**; the caller makes the final judgment from the evidence. **Honest by construction**: changed symbols are **exact** where both revisions hash cleanly (normalized per-symbol content hashes: a formatting- or comment-only edit is not a change, and a rename is listed under `carried`), and a changed file kept whole — a module-level change, parse errors, a language with no native parse tree — is named with its reason in `changeGranularity`; the `surprising-change` label is **withheld** when git history is too shallow (`< 2` non-bulk commits) to say "rarely changed before"; a bounded briefing always carries a **truncation receipt** (omitted count + per-tier breakdown + lowest tier reached) and **never drops a higher tier for a lower one**; a **silent base-ref fallback is disclosed** — a `--base` that git cannot resolve (a typo) is reported (`baseRefFallback`) and you are told which base was actually used, rather than briefing against `main` unannounced; because per-file churn is matched by exact path (git history does not follow renames), a just-renamed file that reads as low-churn carries a caveat so its `surprising-change` label isn't trusted blindly; and the scope is **hand-authored source code** — infrastructure (IaC) resources and generated/vendored files are excluded (the same candidate set `coverage-gaps` ranks), so the briefing stays about the code whose call-graph significance the tiers actually measure. The cursor is the **base ref**, never wall-clock time. It also includes the tests to run for the whole change set (via `select_tests`), grouped by region/community. Deterministic and offline. The matching MCP tool `briefing_since` is exposed under `openlore mcp --preset full`.
+`briefing-since` answers the reviewer / catch-up / onboarding question the other change tools don't — not "what does *my* pending diff do?" but **"a lot changed since I last looked; which of it structurally matters?"** Each changed production symbol is labeled with exactly one **tier**, ordered highest-first: `surprising-change` (a high-fan-in **hub** whose file **rarely changed before** — a normally-stable, widely-depended-on symbol that suddenly moved) > `hub-change` (a broad high-fan-in/high-fan-out hub) > `chokepoint-change` (a high-fan-in funnel) > `ordinary-change`. The tiers come **entirely from existing classifiers** (`landmark-signals` hub/orchestrator/chokepoint + the `volatilityLevel` churn classifier) plus raw evidence (fan-in, fan-out, prior churn) — there is **no weighted significance score and no new tuning constant**; the caller makes the final judgment from the evidence. **Honest by construction**: changed symbols are **exact** where both revisions hash cleanly (normalized per-symbol content hashes: a formatting- or comment-only edit is not a change, and a rename is listed under `carried`), and a changed file kept whole — a module-level change, parse errors, a language with no native parse tree — is named with its reason in `changeGranularity`; the `surprising-change` label is **withheld** when git history is too shallow (`< 2` non-bulk commits) to say "rarely changed before", and **withheld per file** for a file added (or renamed into its path) in the briefed range with no pre-base churn there (a brand-new file's zero churn is not stability — its symbols are still briefed one tier lower, with the withholding stated per entry and counted in `withholding`); the hub-derived tiers are likewise withheld from a **function-local helper** — a function nested inside another with every caller inside it, whose fan-in is internal to one body, so the significance belongs to the enclosing symbol; a bounded briefing always carries a **truncation receipt** (omitted count + per-tier breakdown + lowest tier reached) and **never drops a higher tier for a lower one**; a **silent base-ref fallback is disclosed** — a `--base` that git cannot resolve (a typo) is reported (`baseRefFallback`) and you are told which base was actually used, rather than briefing against `main` unannounced; because per-file churn is matched by exact path (git history does not follow renames), a just-renamed file that reads as low-churn carries a caveat so its `surprising-change` label isn't trusted blindly; and the scope is **hand-authored source code** — infrastructure (IaC) resources and generated/vendored files are excluded (the same candidate set `coverage-gaps` ranks), so the briefing stays about the code whose call-graph significance the tiers actually measure. The cursor is the **base ref**, never wall-clock time. It also includes the tests to run for the whole change set (via `select_tests`), grouped by region/community. Deterministic and offline. The matching MCP tool `briefing_since` is exposed under `openlore mcp --preset full`.
 
 #### Enforcement gate
 
@@ -668,35 +689,13 @@ The version 3 JSON envelope adds disjoint `new[]` and `frozen[]` ratchet partiti
 
 ---
 
-## OpenSpec plugin manifest
+## Node-version guard
 
-`openlore plugin-manifest` inspects and validates the OpenSpec **plugin** manifest
-OpenLore publishes — the `"openspec"` key in its `package.json` — so the OpenSpec
-marketplace can discover, surface, gate, and invoke OpenLore as a subprocess
-without importing its code. It is **distinct** from `openlore manifest` (the
-federation `.well-known/openlore.json`); the names never collide.
-
-```bash
-openlore plugin-manifest emit            # human-readable summary
-openlore plugin-manifest emit --json     # the manifest as JSON, stdout only
-openlore plugin-manifest validate        # schema + semantic check of OpenLore's own manifest
-openlore plugin-manifest validate <dir>  # validate another package's manifest
-```
-
-`validate` exits `0` when the manifest is valid, `1` on a schema/semantic failure
-(missing required field, no `bin`/`binArgs`, non-token `namespace`, a traversing
-skill `dir`/`source`), and `2` when no manifest is found. The manifest declares the
-namespace (`lore`), the executable (`bin: openlore`), `openspecCompat` (kept
-coherent with the `@fission-ai/openspec` peer-dep range), the help-only surfaced
-commands, the contributed skill, and `ownsConfigKeys: ["openlore"]`. See
-[OPENSPEC-INTEGRATION.md](OPENSPEC-INTEGRATION.md) for the full marketplace contract.
-
-> **Node-version guard.** OpenLore requires Node ≥22.19 (the supported dependency floor where the
-> built-in `node:sqlite` is available without runtime flags). The CLI checks this before
-> any command runs; under an older Node it prints one stderr line naming the
-> required and actual versions and exits with the stable code **78** — never a
-> stack trace — so a host delegating to OpenLore (e.g. `openspec lore generate` on
-> Node 20) surfaces a clean, legible failure.
+OpenLore requires Node ≥22.22 (the supported dependency floor where the
+built-in `node:sqlite` is available without runtime flags). The CLI checks this before
+any command runs; under an older Node it prints one stderr line naming the
+required and actual versions and exits with the stable code **78** — never a
+stack trace — so a tool that spawns OpenLore surfaces a clean, legible failure.
 
 ---
 
@@ -711,7 +710,7 @@ over plain HTTP so non-MCP clients (e.g. the [Pi](https://pi.dev) extension in
 
 ```bash
 openlore serve                          # substrate preset, ephemeral port, watch on
-openlore serve --preset all --port 7077 # all 76 tools on a fixed port
+openlore serve --preset all --port 7077 # all 84 tools on a fixed port
 openlore serve --no-watch               # transport only, no freshness lane
 openlore serve --stop                   # stop the daemon serving this directory
 ```
@@ -754,9 +753,10 @@ field in openlore's `package.json`) and `openlore setup --tools pi --global`
 serve daemon, injecting structural context and exposing Pi's curated tool surface.
 Pi starts a full-preset backing daemon and curates the model-visible tools itself;
 if an existing narrow daemon owns the repository, stop it before starting Pi.
-A session starts with the `substrate` tools (the MCP default), `openlore_configure`,
-and `openlore_activate_tools`, which turns on the `specs`, `memory`, `review`,
-`quality`, or `inspect` group. `"pi": { "toolSurface": "all" }` in
+A session starts with the `substrate` tools (the MCP default) except the two
+spec-authoring tools, `openlore_configure`, and `openlore_activate_tools`, which
+turns on the `specs` (including spec authoring), `memory`, `review`, `quality`,
+or `inspect` group. `"pi": { "toolSurface": "all" }` in
 `.openlore/config.json` keeps every tool active.
 Its `openlore_prepare_spec_generation` and `openlore_prepare_spec_repair` tools
 compose the same deterministic daemon evidence used by MCP hosts; Pi writes or
@@ -771,3 +771,11 @@ See `examples/pi/README.md`.
 |--------|-------------|
 | `npm run bench` | EdgeStore micro-benchmark (node lookup, BFS, orient path) — requires `openlore analyze` |
 | `npm run bench:mcp` | MCP handler benchmark — measures cold vs warm path for `readCachedContext`, `handleOrient`, `handleSearchCode`. Requires `openlore analyze`. Pass a project dir: `npm run bench:mcp -- /path/to/project` |
+
+## `openlore configure`
+
+Provider-free repository configuration operations: `inspect`, `preview`, `apply`, `verify`,
+`revert`. `--candidate-file` supplies a preview candidate; `--plan-file` supplies the exact
+revision-bound plan. Mutations require `--apply`, with `--replace-choices` separately authorizing
+existing-choice conflicts. `--json` emits the shared structured result. An explicit `--config`
+selects the confined project target. See [configuration assistance](configuration-assistant.md).

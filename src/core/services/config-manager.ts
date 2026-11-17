@@ -4,7 +4,9 @@
  * Handles reading/writing .openlore/config.json and openspec/config.yaml
  */
 
-import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { detectOpenSpecRoot } from '../spec-sources/openspec.js';
+import { YAML_QUIET } from '../analyzer/yaml-diagnostics.js';
 import { dirname, join, resolve } from 'node:path';
 import YAML from 'yaml';
 import type { ProjectType, OpenLoreConfig } from '../../types/index.js';
@@ -26,7 +28,7 @@ import {
   validateOpenLoreConfig,
   backfillRequiredConfigDefaults,
   isFatalConfigFinding,
-  CONFIG_SCHEMA_VERSION,
+  CONFIG_DEFAULT_STAMP_VERSION,
   type ConfigValidationFinding,
 } from './config-schema.js';
 
@@ -111,11 +113,13 @@ async function ensureDir(dirPath: string): Promise<void> {
 /**
  * Get default openlore configuration
  */
-export function getDefaultConfig(projectType: ProjectType, openspecPath: string): OpenLoreConfig {
+export function getDefaultConfig(projectType: ProjectType, openspecPath?: string): OpenLoreConfig {
   return {
-    version: CONFIG_SCHEMA_VERSION,
+    version: CONFIG_DEFAULT_STAMP_VERSION,
     projectType,
-    openspecPath,
+    // Recorded only for an OpenSpec corpus that exists or was named: no corpus is a supported
+    // state, and readers default to `openspec` (change: spec-framework-neutrality, task 3.1).
+    ...(openspecPath !== undefined ? { openspecPath } : {}),
     analysis: {
       maxFiles: DEFAULT_MAX_FILES,
       includePatterns: [],
@@ -142,9 +146,8 @@ export function normalizeOpenLoreConfig(parsed: unknown): {
   const projectType = typeof record.projectType === 'string'
     ? record.projectType as ProjectType
     : 'unknown';
-  const openspecPath = typeof record.openspecPath === 'string'
-    ? record.openspecPath
-    : './openspec';
+  // No `openspecPath` backfill: a config without one has no OpenSpec corpus recorded.
+  const openspecPath = typeof record.openspecPath === 'string' ? record.openspecPath : undefined;
   return backfillRequiredConfigDefaults(parsed, getDefaultConfig(projectType, openspecPath));
 }
 
@@ -279,7 +282,7 @@ export async function readOpenLoreConfigData(rootPath: string, explicitPath?: st
   const path = resolveOpenLoreConfigPath(rootPath, explicitPath);
   const hasOverride = explicitPath || (primaryConfigOverride?.root === resolve(rootPath));
   return hasOverride ? readConfigObject(path) : readLayeredConfig(
-    path, getDefaultConfig('unknown', './openspec') as unknown as Record<string, unknown>,
+    path, getDefaultConfig('unknown') as unknown as Record<string, unknown>,
     (block, userPath) => warnWithheldCredential(path, block, userPath),
   );
 }
@@ -339,7 +342,7 @@ export async function readOpenSpecConfig(openspecPath: string): Promise<OpenSpec
     return null; // File doesn't exist — normal case before generate
   }
   try {
-    return YAML.parse(content) as OpenSpecConfig;
+    return YAML.parse(content, { ...YAML_QUIET }) as OpenSpecConfig;
   } catch (err) {
     logger.warning(`Failed to parse ${configPath}: ${(err as Error).message}`);
     return null;
@@ -399,27 +402,10 @@ export interface DetectedSpecDir {
  * when nothing is found.
  */
 export async function detectExistingSpecDir(rootPath: string): Promise<DetectedSpecDir | null> {
-  // root (relative) → specs live at `<root>/specs`. '.' covers a bare `specs/`.
-  const candidateRoots = ['openspec', 'docs', '.'];
-  for (const root of candidateRoots) {
-    const specsRel = root === '.' ? 'specs' : `${root}/specs`;
-    const specsDir = join(rootPath, specsRel);
-    let count = 0;
-    try {
-      const stack = [specsDir];
-      while (stack.length) {
-        const dir = stack.pop()!;
-        for (const d of await readdir(dir, { withFileTypes: true })) {
-          if (d.isDirectory()) stack.push(join(dir, d.name));
-          else if (d.name.endsWith('.md')) count++;
-        }
-      }
-    } catch {
-      continue; // specs dir doesn't exist — try the next candidate
-    }
-    if (count > 0) return { root, specsRel, count };
-  }
-  return null;
+  // The OpenSpec source owns detection: a bare `specs/` or `docs/specs` with no
+  // `### Requirement:` heading is not OpenSpec (it is Spec Kit's layout), so it is not
+  // pointed at (change: spec-framework-neutrality, task 4.2).
+  return detectOpenSpecRoot(rootPath);
 }
 
 /**

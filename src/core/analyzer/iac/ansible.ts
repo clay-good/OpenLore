@@ -10,6 +10,7 @@
  */
 
 import { dirname, posix as posixPath } from 'node:path';
+import { YAML_QUIET, reportStringifiedCollectionKeys } from '../yaml-diagnostics.js';
 import { parseDocument, LineCounter } from 'yaml';
 import type { IacGraph, IacReference, IacResource } from './types.js';
 import { emptyIacGraph } from './types.js';
@@ -32,7 +33,9 @@ export function extractAnsible(files: InFile[]): IacGraph {
     const lc = new LineCounter();
     let js: unknown;
     try {
-      js = parseDocument(file.content, { lineCounter: lc }).toJS();
+      const doc = parseDocument(file.content, { ...YAML_QUIET, lineCounter: lc });
+      reportStringifiedCollectionKeys(doc, file.path);
+      js = doc.toJS();
     } catch {
       continue;
     }

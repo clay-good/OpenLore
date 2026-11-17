@@ -57,7 +57,7 @@ describe('extractProvenance (real git repo)', () => {
     commit(repo, 'fileB.ts', 'b2\n', 'chore: c', ALICE2);
   });
 
-  afterAll(() => rmSync(repo, { recursive: true, force: true }));
+  afterAll(() => rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   it('attributes last-touch author, recent authors, and PR per file (deterministic)', async () => {
     const recs = await extractProvenance(repo, ['fileA.ts', 'fileB.ts'], { useGh: false });
@@ -96,7 +96,7 @@ describe('extractProvenance — graceful degradation', () => {
     try {
       expect(await extractProvenance(dir, ['x.ts'], { useGh: false })).toEqual([]);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -110,7 +110,7 @@ describe('extractProvenance — graceful degradation', () => {
       const meta = await enrichWithGh(dir);
       expect(meta.size).toBe(0); // no remote / gh absent → empty, no throw
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });
@@ -128,7 +128,7 @@ describe('extractProvenance — below-root re-framing (fix-git-derived-signal-ho
     commit(repo, 'packages/foo/x.ts', 'x1\n', 'feat: x (#11)', ALICE);
     commit(repo, 'root.ts', 'r1\n', 'feat: root (#22)', BOB);
   });
-  afterAll(() => rmSync(repo, { recursive: true, force: true }));
+  afterAll(() => rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   it('matches analyzed-root-relative files against re-framed git paths below the repo root', async () => {
     const sub = join(repo, 'packages', 'foo');

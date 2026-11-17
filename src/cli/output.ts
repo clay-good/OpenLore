@@ -12,7 +12,7 @@
  * the full payload is guaranteed delivered.
  */
 
-import { sanitizeForTerminal } from '../utils/misc.js';
+import { sanitizeForTerminal, stringifyScreened } from '../utils/misc.js';
 /**
  * Strip terminal control sequences, keeping newlines.
  *
@@ -47,6 +47,29 @@ export function writeStdout(text: string): Promise<void> {
     );
     if (acceptedWithoutBackpressure) resolve();
   });
+}
+
+/**
+ * Serialize a value for a machine-readable (`--json`) command mode, screened.
+ *
+ * `--json` output is agent-facing by definition — it is what a wrapper, a hook or an agent
+ * parses — and it was the one output face with no screening at all.
+ * `console.log(JSON.stringify(x))` looked safe because `JSON.stringify` escapes C0 controls to
+ * `\uXXXX` by itself, so ESC appeared handled; bidi overrides and zero-width characters pass
+ * through verbatim, and a decision title or file name carrying U+202E reached the consumer raw
+ * while the human render of the same value stripped it.
+ *
+ * Screening happens at the string VALUES (`stringifyScreened`), because serializing a control
+ * character escapes it into a form the consumer decodes back into the control character — a pass
+ * over the finished document would have nothing left to remove. The document is then screened
+ * too, which is what catches an object KEY carrying a bidi override.
+ *
+ * This returns the text rather than writing it, so a command keeps its own sink (several write
+ * the JSON through `console.log` precisely so `--json` mode's stdout discipline can capture it).
+ * Two-space indentation, no trailing newline — the shape every `--json` mode already emitted.
+ */
+export function jsonOutput(value: unknown): string {
+  return sanitizeForTerminal(stringifyScreened(value, 2), { keepNewlines: true });
 }
 
 /**

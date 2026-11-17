@@ -16,8 +16,6 @@ import {
   readOpenLoreConfig,
   writeOpenLoreConfig,
   openloreConfigExists,
-  openspecDirExists,
-  createOpenSpecStructure,
   detectExistingSpecDir,
 } from '../core/services/config-manager.js';
 import { ensureGitignored } from '../core/services/gitignore-manager.js';
@@ -48,7 +46,9 @@ async function init(options: InitApiOptions): Promise<InitResult> {
     const detected = await detectExistingSpecDir(rootPath);
     if (detected && detected.root !== 'openspec') openspecRelPath = detected.root;
   }
-  const openspecFullPath = safeJoin(rootPath, openspecRelPath);
+  // Confine the spec path even though nothing is created there now: a path that escapes the
+  // project (or an `openspec` symlink that resolves outside it) is still refused before any write.
+  safeJoin(rootPath, openspecRelPath);
   const force = options.force ?? false;
   const { onProgress } = options;
 
@@ -71,26 +71,20 @@ async function init(options: InitApiOptions): Promise<InitResult> {
     };
   }
 
-  // Create config
+  // Create config. The spec path is recorded only when a corpus was found or named.
   progress(onProgress, 'Creating configuration', 'start');
-  const config = getDefaultConfig(detection.projectType, openspecRelPath);
+  const recordedSpecPath = options.openspecPath ?? (await detectExistingSpecDir(rootPath))?.root;
+  const config = getDefaultConfig(detection.projectType, recordedSpecPath);
   await writeOpenLoreConfig(rootPath, config, options.configPath);
   progress(onProgress, 'Creating configuration', 'complete');
 
-  // Create openspec directory
-  const hasOpenspec = await openspecDirExists(openspecFullPath);
-  if (!hasOpenspec) {
-    progress(onProgress, 'Creating openspec directory', 'start');
-    await createOpenSpecStructure(openspecFullPath);
-    progress(onProgress, 'Creating openspec directory', 'complete');
-  } else {
-    progress(onProgress, 'OpenSpec directory exists', 'skip');
-  }
+  // No spec folder is created at first run: OpenLore works without one, and `openlore generate`
+  // creates what it writes (change: spec-framework-neutrality, task 1.1).
 
   // Ensure .openlore/ analysis artifacts (multi-MB lance binaries) are ignored,
   // creating .gitignore when absent so a fresh `git init` repo doesn't leak them.
   progress(onProgress, 'Updating .gitignore', 'start');
-  const gitignoreResult = await ensureGitignored(rootPath, `${OPENLORE_DIR}/`, 'openlore analysis artifacts');
+  const gitignoreResult = await ensureGitignored(rootPath, `${OPENLORE_DIR}/`);
   progress(onProgress, 'Updating .gitignore', gitignoreResult === 'present' ? 'skip' : 'complete');
 
   return {

@@ -18,6 +18,7 @@ import {
 } from './commands/drift.js';
 import { installBlastRadiusHook } from './commands/blast-radius.js';
 import { installImpactCertificateHook } from './commands/impact-certificate.js';
+import { insertHookBlock } from './git-hooks.js';
 import { installPostCommitHook as installRefreshStoriesHook } from './commands/refresh-stories.js';
 import { logger } from '../utils/logger.js';
 
@@ -682,5 +683,47 @@ describe('effective Git hook delivery', () => {
 
     expect(await readFile(join(gitDir, 'hooks', 'pre-commit'), 'utf-8'))
       .toContain('# openlore-enforcement-hook');
+  });
+});
+
+// An existing hook is the user's script. Four installers used to append their block to the end
+// and delete a trailing `exit 0` to keep it reachable — silently changing what that script does
+// for anyone whose `exit 0` was deliberately swallowing a linter's status.
+describe('insertHookBlock', () => {
+  const BLOCK = '# openlore-x\nopenlore x\n# end-openlore-x\n';
+
+  it('authors a new script when there is no hook yet', () => {
+    expect(insertHookBlock(null, BLOCK)).toBe('#!/bin/sh\n\n' + BLOCK);
+    expect(insertHookBlock('', BLOCK)).toBe('#!/bin/sh\n\n' + BLOCK);
+  });
+
+  it('keeps an existing script byte for byte, including a trailing exit 0', () => {
+    const theirs = '#!/bin/sh\n# mine\nnpm run lint\nexit 0\n';
+    const next = insertHookBlock(theirs, BLOCK);
+    expect(next).toContain('# mine\nnpm run lint\nexit 0');
+    expect(next.indexOf('openlore x')).toBeLessThan(next.indexOf('npm run lint'));
+    expect(next.startsWith('#!/bin/sh\n')).toBe(true);
+  });
+
+  it('supplies a shebang when the script has none, without losing its first line', () => {
+    const next = insertHookBlock('npm run lint\n', BLOCK);
+    expect(next.startsWith('#!/bin/sh\n')).toBe(true);
+    expect(next).toContain('npm run lint');
+  });
+
+  it('removes only the legacy OpenLore markers it is given', () => {
+    const theirs = '#!/bin/sh\n# legacy-start\nold\n# legacy-end\nnpm run lint\n';
+    const next = insertHookBlock(theirs, BLOCK, [/\n*# legacy-start[\s\S]*?# legacy-end\n*/g]);
+    expect(next).not.toContain('legacy-start');
+    expect(next).toContain('npm run lint');
+  });
+
+  it('is stable under repeated installers — each block lands and the user script survives', () => {
+    const theirs = '#!/bin/sh\nnpm run lint\nexit 0\n';
+    const one = insertHookBlock(theirs, BLOCK);
+    const two = insertHookBlock(one, '# openlore-y\nopenlore y\n# end-openlore-y\n');
+    expect(two).toContain('openlore x');
+    expect(two).toContain('openlore y');
+    expect(two).toContain('npm run lint\nexit 0');
   });
 });

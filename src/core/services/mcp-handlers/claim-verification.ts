@@ -7,7 +7,8 @@
  * agent's confident-wrong failure mode ("this function is dead", "Y calls Z") into
  * checked-or-flagged, and makes the agent's output auditable.
  *
- *   claim   = { kind: 'calls'|'reaches'|'dead'|'impacts'|'safe-to-change'|'decision-current', subject, object? }
+ *   claim   = { kind: 'calls'|'reaches'|'dead'|'impacts'|'safe-to-change'|'decision-current'
+ *              |'decision-governed'|'endpoint-implemented'|'endpoint-consumed'|'lease-current', subject, object? }
  *   verdict = { verdict: 'confirmed'|'refuted'|'unverifiable', reason, receipt?, confidenceBoundary }
  *
  * Every verdict is a deterministic computation, never an LLM judgement and never a
@@ -40,7 +41,7 @@ import { readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
 import { traversalIndexFor, messageFreeTraversalIndexFor } from './traversal.js';
 import type { TraversalIndex, Direction } from '../../analyzer/condensation.js';
-import { deadCodeIds, loadExternalWiring } from './reachability.js';
+import { deadCodeIds, loadExternalWiring, unreadEnclosingManifests } from './reachability.js';
 import {
   loadDynamicBoundaryReport,
   loadImportAdjacency,
@@ -67,10 +68,14 @@ import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-grap
 import { MESSAGE_TOPOLOGY_RULE } from '../../analyzer/message-topology.js';
 import type { GroundingCertificate, StructuralAnchor, PendingDecision } from '../../../types/index.js';
 
-export type ClaimKind = 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current';
+export type ClaimKind = 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current'
+  | 'decision-governed' | 'endpoint-implemented' | 'endpoint-consumed' | 'lease-current';
 const CLAIM_KINDS: ReadonlySet<string> = new Set<ClaimKind>([
   'calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current',
+  'decision-governed', 'endpoint-implemented', 'endpoint-consumed', 'lease-current',
 ]);
+/** Kinds over contracts and governance, evaluated in `claim-kinds-graph.ts` (change: add-graph-claim-kinds). */
+const GRAPH_KINDS: ReadonlySet<ClaimKind> = new Set<ClaimKind>(['decision-governed', 'endpoint-implemented', 'endpoint-consumed', 'lease-current']);
 /** Kinds that relate two symbols and so require an `object`. */
 const RELATIONAL_KINDS: ReadonlySet<ClaimKind> = new Set<ClaimKind>(['calls', 'reaches', 'impacts']);
 /** Kinds verified against the decision store rather than the call graph. */
@@ -129,6 +134,17 @@ interface Resolution {
   matched: number;
   /** The match strategy that resolved it. */
   how: 'exact' | 'fuzzy' | 'none' | 'ambiguous';
+  /** When ambiguous: the first few matches as `name::path`, the form that disambiguates. */
+  candidates?: string[];
+}
+
+/** How many ambiguous matches a reason names. */
+const MAX_NAMED_CANDIDATES = 5;
+
+/** The disambiguation advice for an ambiguous symbol, naming the `name::path` forms that resolve. */
+export function ambiguityAdvice(res: Resolution): string {
+  const named = res.candidates?.length ? ` Candidates: ${res.candidates.join(', ')}${res.matched > res.candidates.length ? ', …' : ''}.` : '';
+  return `Pass name::path (or Class.method::path) to pick one.${named}`;
 }
 
 /**
@@ -137,20 +153,45 @@ interface Resolution {
  * name (multiple matches at the chosen precision) resolves to no node so the
  * caller can return `unverifiable` rather than guess which symbol was meant.
  */
+export function resolveClaimSymbol(cg: SerializedCallGraph, name: string): Resolution {
+  return resolveSymbol(cg, name);
+}
+
 function resolveSymbol(cg: SerializedCallGraph, name: string): Resolution {
-  const lower = name.toLowerCase();
   const code = cg.nodes.filter(isCodeNode);
-  const exact = code.filter(n => n.name.toLowerCase() === lower);
+  const qualified = (n: FunctionNode) => (n.className ? `${n.className}.${n.name}` : n.name);
+  const ambiguous = (hits: FunctionNode[]): Resolution => ({
+    matched: hits.length,
+    how: 'ambiguous',
+    candidates: hits.slice(0, MAX_NAMED_CANDIDATES).map(n => `${qualified(n)}::${n.filePath}`),
+  });
+  // An exact node id (`path::Class.method`), as other tools report it.
+  const byId = code.find(n => n.id === name);
+  if (byId) return { node: byId, matched: 1, how: 'exact' };
+  // `name::path` / `Class.method::path` — the form every other symbol-taking tool accepts. The
+  // ambiguity reason told agents to disambiguate, and no form did.
+  const sep = name.indexOf('::');
+  if (sep > 0) {
+    const namePart = name.slice(0, sep);
+    const pathPart = name.slice(sep + 2).replace(/^\.\//, '');
+    const hits = code.filter(n => (n.name === namePart || qualified(n) === namePart)
+      && (n.filePath === pathPart || n.filePath.endsWith(`/${pathPart}`)));
+    if (hits.length === 1) return { node: hits[0], matched: 1, how: 'exact' };
+    if (hits.length > 1) return ambiguous(hits);
+    return { matched: 0, how: 'none' };
+  }
+  const lower = name.toLowerCase();
+  const exact = code.filter(n => n.name.toLowerCase() === lower || qualified(n).toLowerCase() === lower);
   if (exact.length === 1) return { node: exact[0], matched: 1, how: 'exact' };
-  if (exact.length > 1) return { matched: exact.length, how: 'ambiguous' };
+  if (exact.length > 1) return ambiguous(exact);
   const fuzzy = code.filter(n => n.name.toLowerCase().includes(lower));
   if (fuzzy.length === 1) return { node: fuzzy[0], matched: 1, how: 'fuzzy' };
-  if (fuzzy.length > 1) return { matched: fuzzy.length, how: 'ambiguous' };
+  if (fuzzy.length > 1) return ambiguous(fuzzy);
   return { matched: 0, how: 'none' };
 }
 
 /** Read the build commit the index was analyzed at, if it was captured. */
-async function readIndexCommit(absDir: string): Promise<string | null> {
+export async function readIndexCommit(absDir: string): Promise<string | null> {
   try {
     // Bounded read: repository-controlled artifact (symlink / FIFO / oversized all fail closed).
     const raw = await readArtifactBounded(join(absDir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_FINGERPRINT));
@@ -332,7 +373,8 @@ async function dynamicHitFor(absDir: string, subject: FunctionNode): Promise<Qua
  *     dispatch blind spot; static reachability cannot decide deadness).
  */
 async function verifyDead(absDir: string, cg: SerializedCallGraph, subject: FunctionNode): Promise<ClaimResult> {
-  const externalWiring = (await loadExternalWiring(absDir)).byFile;
+  const wiring = await loadExternalWiring(absDir);
+  const externalWiring = wiring.byFile;
   const deadFull = await deadCodeIds(absDir, cg, { externalWiring });
   const strictCg: SerializedCallGraph = { ...cg, edges: cg.edges.filter(e => e.confidence !== 'synthesized') };
   const deadStrict = await deadCodeIds(absDir, strictCg, { externalWiring });
@@ -341,6 +383,14 @@ async function verifyDead(absDir: string, cg: SerializedCallGraph, subject: Func
   const inStrict = deadStrict.has(subject.id);
 
   if (inFull) {
+    // `find_dead_code` never rates such a candidate high-confidence dead; neither may this confirm it.
+    const manifest = (await unreadEnclosingManifests(absDir, [subject], wiring.report)).get(subject.filePath);
+    if (manifest) {
+      return {
+        verdict: 'unverifiable',
+        reason: `"${subject.name}" has no in-repo caller, but it sits inside the package declared by ${manifest}, which was not read for wiring (only the root and declared workspace manifests are) — that manifest's main/bin/exports may make it an entry point.`,
+      };
+    }
     return {
       verdict: 'confirmed',
       reason: `"${subject.name}" is unreachable from every liveness root (tests, imported symbols, route handlers, main, files a config invokes) — even counting synthesized dynamic-dispatch edges. It is a strong dead-code candidate; external consumers and reflection are still invisible to static analysis.`,
@@ -417,6 +467,9 @@ function shortTitle(s: string, max = 80): string {
  */
 const AUTHORITATIVE_FOR_CITATION: ReadonlySet<PendingDecision['status']> =
   new Set<PendingDecision['status']>(['verified', 'approved', 'auto-approved', 'synced']);
+
+/** Whether a decision status puts it in force (shared with `decision-governed`). */
+export const isAuthoritativeForCitation = (status: PendingDecision['status']): boolean => AUTHORITATIVE_FOR_CITATION.has(status);
 
 /** A citation for a decision-claim verdict — the decision-store analogue of {@link Receipt}. */
 interface DecisionReceipt {
@@ -581,7 +634,7 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
   const absDir = await validateDirectory(input.directory);
 
   if (!CLAIM_KINDS.has(input.kind)) {
-    return { error: `Unknown claim kind "${input.kind}". Use one of: calls, reaches, dead, impacts, safe-to-change, decision-current.` };
+    return { error: `Unknown claim kind "${input.kind}". Use one of: ${[...CLAIM_KINDS].join(', ')}.` };
   }
   if (!input.subject || !input.subject.trim()) {
     return { error: 'A claim must name a "subject" symbol.' };
@@ -592,6 +645,10 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
   // verifier path stays untouched.
   if (DECISION_KINDS.has(input.kind)) {
     return verifyDecisionCurrent(absDir, input.subject);
+  }
+  if (GRAPH_KINDS.has(input.kind)) {
+    const { verifyGraphClaim } = await import('./claim-kinds-graph.js');
+    return verifyGraphClaim(absDir, input.kind as 'decision-governed' | 'endpoint-implemented' | 'endpoint-consumed' | 'lease-current', input.subject.trim());
   }
 
   const needsObject = RELATIONAL_KINDS.has(input.kind);
@@ -614,7 +671,7 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
       claim,
       verdict: 'unverifiable' as Verdict,
       reason: subjRes.how === 'ambiguous'
-        ? `Subject "${input.subject}" is ambiguous — it matches ${subjRes.matched} symbols. Disambiguate (e.g. by exact name) before verifying.`
+        ? `Subject "${input.subject}" is ambiguous — it matches ${subjRes.matched} symbols. ${ambiguityAdvice(subjRes)}`
         : `Subject "${input.subject}" was not found in the call graph. It may be external, mis-spelled, or in an unindexed file.`,
       confidenceBoundary: assembleBoundary({
         extraCrossings: [{ kind: 'unindexed-repo', count: 0, detail: `"${input.subject}" does not resolve to an indexed symbol.` }],
@@ -630,7 +687,7 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
         claim,
         verdict: 'unverifiable' as Verdict,
         reason: objRes.how === 'ambiguous'
-          ? `Object "${input.object}" is ambiguous — it matches ${objRes.matched} symbols. Disambiguate before verifying.`
+          ? `Object "${input.object}" is ambiguous — it matches ${objRes.matched} symbols. ${ambiguityAdvice(objRes)}`
           : `Object "${input.object}" was not found in the call graph. It may be external, mis-spelled, or in an unindexed file.`,
         confidenceBoundary: assembleBoundary({
           extraCrossings: [{ kind: 'unindexed-repo', count: 0, detail: `"${input.object}" does not resolve to an indexed symbol.` }],

@@ -184,7 +184,10 @@ export interface LockHeld {
 
 /** The `held` descriptor for an unreclaimable holder, with the disclosure filled in. */
 function describeHolder(payload: string, mtimeMs: number, lockPath: string): LockHeld {
-  const held: LockHeld = { held: true, payload, ageMs: Date.now() - mtimeMs, lockPath };
+  // `mtimeMs` carries sub-millisecond precision while `Date.now()` is truncated to whole
+  // milliseconds, so a lock written microseconds ago can read as a fraction of a millisecond
+  // in the future. An age is never negative.
+  const held: LockHeld = { held: true, payload, ageMs: Math.max(0, Date.now() - mtimeMs), lockPath };
   // Both payload shapes count as identifying: the default `"<pid> <iso>"` and the
   // structured JSON an ownership policy writes. Only a payload naming neither is
   // one no staleness predicate can ever act on.

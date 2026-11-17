@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtemp, writeFile, readFile, mkdir, rm, stat, symlink } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, mkdir, rm, stat, symlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LLMContext } from '../analyzer/artifact-generator.js';
@@ -117,6 +117,83 @@ describe('McpWatcher — real fs watcher', () => {
     for (const w of watchers) await w.stop();
     watchers.length = 0;
   });
+
+  it('starts with gitignore rules, prunes build directories, and matches analyze on nested negation', async () => {
+    const { rootPath, outputPath, contextPath } = await setupProject();
+    await mkdir(join(rootPath, 'cargo-cache', 'debug'), { recursive: true });
+    await mkdir(join(rootPath, 'src'));
+    await writeFile(join(rootPath, '.gitignore'), 'cargo-cache/\n*.cache.ts\n');
+    await writeFile(join(rootPath, 'src', '.gitignore'), '!kept.cache.ts\n');
+
+    const kept = join(rootPath, 'src', 'kept.ts');
+    // Git would re-include this; analyze does not (nested scopes are independent), so neither may the watcher.
+    const negated = join(rootPath, 'src', 'kept.cache.ts');
+    const ignored = join(rootPath, 'cargo-cache', 'debug', 'generated.ts');
+    const ignoredFile = join(rootPath, 'src', 'ignored.cache.ts');
+    await writeFile(kept, 'export function before() {}\n');
+    await writeFile(negated, 'export function negatedBefore() {}\n');
+    await writeFile(ignored, 'export function generatedBefore() {}\n');
+    await writeFile(ignoredFile, 'export function ignoredBefore() {}\n');
+
+    const watcher = new McpWatcher({ rootPath, outputPath, debounceMs: DEBOUNCE_MS });
+    watchers.push(watcher);
+    await expect(watcher.start()).resolves.not.toThrow();
+
+    // Inspect real chokidar subscriptions, not merely the absence of events:
+    // ignored build directories must be pruned before they consume watch FDs.
+    const source = (watcher as unknown as {
+      fsWatcher?: { getWatched(): Record<string, string[]> };
+    }).fsWatcher;
+    expect(source).toBeDefined();
+    const directories = Object.keys(source!.getWatched());
+    expect(directories.some((p) => /(^|[/\\])cargo-cache([/\\]|$)/.test(p))).toBe(false);
+
+    await writeFile(ignored, 'export function generatedAfter() {}\n');
+    await writeFile(ignoredFile, 'export function ignoredAfter() {}\n');
+    await writeFile(negated, 'export function negatedAfter() {}\n');
+    await writeFile(kept, 'export function after() {}\n');
+    await settle(contextPath);
+
+    const updated = JSON.parse(await readFile(contextPath, 'utf8')) as LLMContext;
+    expect(updated.signatures?.find((s) => s.path === 'src/kept.ts')?.entries.some((e) => e.name === 'after')).toBe(true);
+    expect(updated.signatures?.some((s) => s.path === 'cargo-cache/debug/generated.ts')).toBe(false);
+    expect(updated.signatures?.some((s) => s.path === 'src/ignored.cache.ts')).toBe(false);
+    expect(updated.signatures?.some((s) => s.path === 'src/kept.cache.ts')).toBe(false);
+  }, 20_000);
+
+  it('honors .openlore-ignore and analysis.excludePatterns like analyze, and an ignore file edited while running (ROADMAP P0, #717)', async () => {
+    const { rootPath, outputPath, contextPath } = await setupProject();
+    for (const dir of ['src', 'generated', 'legacy', 'vendored-lib']) await mkdir(join(rootPath, dir), { recursive: true });
+    await writeFile(join(rootPath, '.openlore-ignore'), 'generated/\n');
+    await writeFile(join(rootPath, '.openlore', 'config.json'), JSON.stringify({
+      version: '1.2.0', projectType: 'nodejs', analysis: { maxFiles: 100, includePatterns: [], excludePatterns: ['vendored-lib/**'] },
+      generation: { model: 'x', domains: 'auto' }, createdAt: '2026-11-15T00:00:00.000Z', lastRun: null,
+    }));
+    const kept = join(rootPath, 'src', 'kept.ts');
+    const gen = join(rootPath, 'generated', 'client.ts');
+    const vendored = join(rootPath, 'vendored-lib', 'lib.ts');
+    const legacy = join(rootPath, 'legacy', 'old.ts');
+    for (const f of [kept, gen, vendored, legacy]) await writeFile(f, 'export function before() {}\n');
+
+    const watcher = new McpWatcher({ rootPath, outputPath, debounceMs: DEBOUNCE_MS });
+    watchers.push(watcher);
+    await watcher.start();
+    await wait(WATCHER_WARMUP_MS);
+
+    // Edited while running: legacy/ is excluded from the next event on.
+    await writeFile(join(rootPath, '.openlore-ignore'), 'generated/\nlegacy/\n');
+    await wait(QUIET_WINDOW_MS);
+    for (const f of [gen, vendored, legacy]) await writeFile(f, 'export function after() {}\n');
+    await writeFile(kept, 'export function after() {}\n');
+    await settle(contextPath);
+
+    const updated = JSON.parse(await readFile(contextPath, 'utf8')) as LLMContext;
+    const paths = (updated.signatures ?? []).map((s) => s.path);
+    expect(updated.signatures?.find((s) => s.path === 'src/kept.ts')?.entries.some((e) => e.name === 'after')).toBe(true);
+    expect(paths).not.toContain('generated/client.ts');
+    expect(paths).not.toContain('vendored-lib/lib.ts');
+    expect(paths).not.toContain('legacy/old.ts');
+  }, 30_000);
 
   it('picks up a changed TypeScript file and updates llm-context.json', async () => {
     const { rootPath, outputPath, contextPath } = await setupProject();
@@ -422,7 +499,9 @@ describe('McpWatcher — real fs watcher', () => {
     await writeFile(srcFile, 'export function after() {}', 'utf-8');
     await settle(join(outputPath, 'llm-context.json'));
 
-    // The real event path handed the patched context to the read cache.
+    // The real event path handed the patched context to the read cache. On a loaded runner the file
+    // event can land after `settle`'s budget, so wait for the priming itself, not a fixed time.
+    await vi.waitFor(() => expect(primeSpy).toHaveBeenCalled(), { timeout: 15_000, interval: 50 });
     expect(primeSpy, 'watcher must prime the read cache after a save').toHaveBeenCalled();
     const primed = primeSpy.mock.calls.at(-1)![1] as LLMContext;
     // Freshness (G6) landed in the primed object itself.
@@ -433,7 +512,7 @@ describe('McpWatcher — real fs watcher', () => {
     // re-parse would return a different object reference.
     const afterRead = await readCachedContext(rootPath);
     expect(afterRead, 'post-save read must be the primed object, not a fresh disk parse').toBe(primed);
-  }, 10_000);
+  }, 30_000);
 
   // The Windows half of this pair is the 8.3 test below; this one covers POSIX, where the
   // equivalent alias is a symlink. skipIf(win32) because creating a symlink there needs
@@ -446,7 +525,10 @@ describe('McpWatcher — real fs watcher', () => {
     try {
       const w = new McpWatcher({ rootPath: aliasRoot, debounceMs: DEBOUNCE_MS }) as unknown as
         { rootPath: string; watchRoot: string };
-      expect(w.watchRoot, 'libuv must be given the resolved root').toBe(rootPath);
+      // Resolve the EXPECTATION too: on macOS the temp root is itself reached through a symlink
+      // (`/var` → `/private/var`), so `rootPath` is another alias and comparing against it
+      // asserted that resolution stops halfway.
+      expect(w.watchRoot, 'libuv must be given the resolved root').toBe(await realpath(rootPath));
       // The caller's spelling stays the identity: artifact paths and graph node ids are
       // derived from it, so re-spelling it would silently rename every node.
       expect(w.rootPath, 'identity must remain what the caller passed').toBe(aliasRoot);

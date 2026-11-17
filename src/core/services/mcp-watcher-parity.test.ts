@@ -121,7 +121,10 @@ async function fullBuild(files: Files): Promise<{
 }> {
   const { CallGraphBuilder } = await import('../analyzer/call-graph.js');
   const input = Object.entries(files).map(([path, content]) => ({
-    path, content, language: path.endsWith('.py') ? 'Python' : 'TypeScript',
+    path, content,
+    language: path.endsWith('.py') ? 'Python'
+      : path.endsWith('serverless.yml') ? 'Serverless'
+        : 'TypeScript',
   }));
   const r = await new CallGraphBuilder().build(input);
   return {
@@ -239,6 +242,44 @@ describe('incremental watch converges to analyze --force (parity oracle)', () =>
       'edit-broken-reference',
     ]);
     expect(findings.map(f => f.location?.path).sort()).toEqual(['src/a.ts', 'src/b.ts']);
+  });
+
+  // A projected edge is produced only by a full analyze, so a subset rebuild must PRESERVE it.
+  // The guard covered contract kinds only, so a watcher save of a DEPLOYED HANDLER deleted its
+  // own deploy binding: the edge's callee is the handler, and the handler's file is the one
+  // being rebuilt. The index then reported itself current (change: fix-projection-integrity).
+  it('preserves a deploy binding across a watcher save of the deployed handler', async () => {
+    const v1: Files = {
+      'src/orders.ts': "import { helper } from './helper';\nexport function create(e) { return helper(e); }\n",
+      'src/helper.ts': 'export function helper(x) { return x; }\n',
+      'serverless.yml': 'service: orders\nprovider: { name: aws, runtime: nodejs22.x }\nfunctions:\n  createOrder:\n    handler: src/orders.create\n',
+    };
+    await writeFiles(v1);
+    const graph = await fullBuild(v1);
+    expect(graph.edges.some(e => e.kind === 'deploys_symbol'), 'setup must project the binding').toBe(true);
+    const store = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    seedStore(store, v1, graph);
+    store.close();
+    await writeFile(join(outputPath, 'repo-structure.json'), '{}');
+    await writeFile(join(outputPath, 'fingerprint.json'), '{}');
+    await writeFile(join(outputPath, 'dependency-graph.json'), JSON.stringify({ nodes: [], edges: [] }));
+
+    // Edit the handler itself. The manifest is never touched, and only a full analyze can
+    // re-project its binding.
+    await writeFiles({
+      'src/orders.ts': "import { helper } from './helper';\nexport function create(e) { return helper(e) + 1; }\n",
+    });
+    const { McpWatcher } = await import('./mcp-watcher.js');
+    await new McpWatcher({ rootPath: root, outputPath, embed: false })
+      .handleChange(join(root, 'src/orders.ts'));
+
+    const after = EdgeStore.open(EdgeStore.dbPath(outputPath));
+    try {
+      const kinds = after.getCallers('src/orders.ts::create').map(e => e.kind);
+      expect(kinds).toContain('deploys_symbol');
+    } finally {
+      after.close();
+    }
   });
 
   it('applies an explicit repository delta and reports the over-budget remainder stale', async () => {

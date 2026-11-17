@@ -13,6 +13,7 @@
  */
 
 import { dirname, posix } from 'node:path';
+import { importGrammar } from './grammar-entry.js';
 import type Parser from 'tree-sitter';
 import { FunctionRegistryTrie } from './function-registry-trie.js';
 import type { ImportMap } from './import-resolver-bridge.js';
@@ -40,9 +41,20 @@ import {
 } from './http-route-parser.js';
 import { mapFilesBounded } from './bounded-file-scan.js';
 import type { CfgSpill } from './cfg-spill.js';
-import { buildProjectedIac } from './iac/index.js';
+import { buildIacGraph } from './iac/index.js';
+import { projectIacGraph } from './iac/project.js';
+import { bindDeployHandlers, type UnresolvedDeployBinding } from './iac/deploy-binding.js';
+import { projectContracts, contractDisclosure, emptyContractProjection, type ProjectedContracts } from './contract/project.js';
+import { generatedClientFunctionsFor } from './contract/generated-client.js';
+import { scanGrpcRegistrations, isGeneratedGrpcStub, createImportResolver, type GrpcRegistration, type ImportTarget, type PathAlias } from './contract/grpc-registration.js';
+import { isProtobufPath } from './contract/protobuf.js';
+import { isGraphqlPath } from './contract/graphql.js';
+import { scanResolverMaps, hasInlineSdl, type ResolverMap } from './contract/graphql-resolvers.js';
+import { isProjectedLanguage, isDeclarationEdgeKind } from './projected-language.js';
 import { isIacLanguage } from './iac/types.js';
 import { isTestFile } from './test-file.js';
+import { dynamicImportNames, objectLiteralSpan } from './test-dynamic-imports.js';
+import { hasRustTestAttribute } from './rust-test-attributes.js';
 import { type FunctionCfg, type CfgNode } from './cfg.js';
 import { stableSymbolId, stableClassId } from '../scip/moniker.js';
 import { synthesizeTypeHierarchyEdges, type RawMethodCall } from './cha.js';
@@ -98,7 +110,7 @@ import {
 } from './literal-reflection.js';
 // Per-file parse budget (change: fix-analyze-native-abort-and-file-cost-budget). Bounds the one
 // synchronous native call nothing else can interrupt.
-import { parseWithBudget as rawParseWithBudget, parseBudgetOverrunMs, type BudgetableParser } from './parse-budget.js';
+import { parseWithBudget as rawParseWithBudget, extractionBudgetOverrunMs, checkExtractionBudget, runWithExtractionBudget, type BudgetableParser } from './extraction-budget.js';
 import { usesTsxGrammar } from './language-detection.js';
 import { extractScriptContainer, SCRIPT_CONTAINER_FORMATS } from './sfc-script-extractor.js';
 // Pass-1 extraction lane (change: optimize-parallel-extraction-pool). The pool holds no
@@ -139,7 +151,7 @@ import { classifyLayerEdge, AMBIGUOUS_CANDIDATE_CAP } from './call-graph-types.j
 
 // Docstring/declaration extraction helpers — extracted to ./call-graph-extract.ts
 // (internal, not re-exported; see the banner at the original section site below).
-import { extractDocstringBefore, extractDeclaration } from './call-graph-extract.js';
+import { extractDocstringBefore, extractDeclaration, deprecationOf } from './call-graph-extract.js';
 
 // External-node helper — extracted to ./call-graph-external.ts (internal, not
 // re-exported; classifyExternal + the EXTERNAL_* tables stay private to that module).
@@ -234,6 +246,9 @@ export function __resetAnalyzerWorkCountersForTests(clearQueries = false): void 
  * A normal analyze leaves this `undefined`, so its facts and its cost are unchanged.
  */
 function contentHashesFor(root: unknown, nodes: FunctionNode[], content: string, language: string): FileContentHashes | undefined {
+  // Cooperative per-file extraction-budget checkpoint at a shared phase boundary — every
+  // language extractor funnels through here (change: bound-large-literal-extraction).
+  checkExtractionBudget();
   if (!contentHashesRequested()) return undefined;
   return computeFileContentHashes(root as HashTreeNode, nodes, content, language);
 }
@@ -245,6 +260,9 @@ function contentHashesFor(root: unknown, nodes: FunctionNode[], content: string,
  * add-codebase-style-fingerprint).
  */
 function tallyStyle(language: string, tree: Parser.Tree, nodes: FunctionNode[], filePath: string): FileStyleRaw | undefined {
+  // Cooperative per-file extraction-budget checkpoint at a shared phase boundary — every
+  // language extractor funnels through here (change: bound-large-literal-extraction).
+  checkExtractionBudget();
   try {
     const raw = tallyFileStyle({
       language,
@@ -282,6 +300,9 @@ function tallyDynamicBoundary(
   nodes: FunctionNode[],
   content: string,
 ): AttributedCandidate[] | undefined {
+  // Cooperative per-file extraction-budget checkpoint at a shared phase boundary — every
+  // language extractor funnels through here (change: bound-large-literal-extraction).
+  checkExtractionBudget();
   if (!root) return undefined;
   try {
     const candidates = matchDynamicBoundaries(
@@ -508,7 +529,7 @@ async function getTSParser(
   if (usesTsxGrammar(filePath)) {
     if (!_tsxParser) {
       const loaded = await loadCoreGrammarSoft(language, async () => {
-        const tsModule = await import('tree-sitter-typescript');
+        const tsModule = await importGrammar('tree-sitter-typescript');
         const lang = (tsModule.default as { tsx: object }).tsx;
         const parser = new NP();
         parser.setLanguage(lang as unknown as Parser.Language);
@@ -523,7 +544,7 @@ async function getTSParser(
   }
   if (!_tsParser) {
     const loaded = await loadCoreGrammarSoft(language, async () => {
-      const tsModule = await import('tree-sitter-typescript');
+      const tsModule = await importGrammar('tree-sitter-typescript');
       const lang = (tsModule.default as { typescript: object }).typescript;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -543,7 +564,7 @@ async function getPyParser(): Promise<{ parser: Parser; lang: object } | null> {
   if (grammarStatus('Python') === 'unavailable') return null;
   if (!_pyParser) {
     const loaded = await loadCoreGrammarSoft('Python', async () => {
-      const pyModule = await import('tree-sitter-python');
+      const pyModule = await importGrammar('tree-sitter-python');
       const lang = pyModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -563,7 +584,7 @@ async function getGoParser(): Promise<{ parser: Parser; lang: object } | null> {
   if (grammarStatus('Go') === 'unavailable') return null;
   if (!_goParser) {
     const loaded = await loadCoreGrammarSoft('Go', async () => {
-      const goModule = await import('tree-sitter-go');
+      const goModule = await importGrammar('tree-sitter-go');
       const lang = goModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -583,7 +604,7 @@ async function getRustParser(): Promise<{ parser: Parser; lang: object } | null>
   if (grammarStatus('Rust') === 'unavailable') return null;
   if (!_rustParser) {
     const loaded = await loadCoreGrammarSoft('Rust', async () => {
-      const rustModule = await import('tree-sitter-rust');
+      const rustModule = await importGrammar('tree-sitter-rust');
       const lang = rustModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -603,7 +624,7 @@ async function getRubyParser(): Promise<{ parser: Parser; lang: object } | null>
   if (grammarStatus('Ruby') === 'unavailable') return null;
   if (!_rubyParser) {
     const loaded = await loadCoreGrammarSoft('Ruby', async () => {
-      const rubyModule = await import('tree-sitter-ruby');
+      const rubyModule = await importGrammar('tree-sitter-ruby');
       const lang = rubyModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -623,7 +644,7 @@ async function getJavaParser(): Promise<{ parser: Parser; lang: object } | null>
   if (grammarStatus('Java') === 'unavailable') return null;
   if (!_javaParser) {
     const loaded = await loadCoreGrammarSoft('Java', async () => {
-      const javaModule = await import('tree-sitter-java');
+      const javaModule = await importGrammar('tree-sitter-java');
       const lang = javaModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -641,7 +662,7 @@ async function getPhpParser(): Promise<{ parser: Parser; lang: object } | null> 
   const NP = await loadNativeParserFor('PHP');
   if (!NP) return null;
   if (!_phpParser) {
-    const phpModule = await import('tree-sitter-php');
+    const phpModule = await importGrammar('tree-sitter-php');
     _PhpLanguage = (phpModule.default as { php: object }).php;
     _phpParser = new NP();
     _phpParser.setLanguage(_PhpLanguage as unknown as Parser.Language);
@@ -653,7 +674,7 @@ async function getCSharpParser(): Promise<{ parser: Parser; lang: object } | nul
   const NP = await loadNativeParserFor('C#');
   if (!NP) return null;
   if (!_csParser) {
-    const csModule = await import('tree-sitter-c-sharp');
+    const csModule = await importGrammar('tree-sitter-c-sharp');
     _CsLanguage = csModule.default;
     _csParser = new NP();
     _csParser.setLanguage(_CsLanguage as unknown as Parser.Language);
@@ -665,7 +686,7 @@ async function getKotlinParser(): Promise<{ parser: Parser; lang: object } | nul
   const NP = await loadNativeParserFor('Kotlin');
   if (!NP) return null;
   if (!_ktParser) {
-    const ktModule = await import('tree-sitter-kotlin');
+    const ktModule = await importGrammar('tree-sitter-kotlin');
     _KtLanguage = ktModule.default;
     _ktParser = new NP();
     _ktParser.setLanguage(_KtLanguage as unknown as Parser.Language);
@@ -677,7 +698,7 @@ async function getScalaParser(): Promise<{ parser: Parser; lang: object } | null
   const NP = await loadNativeParserFor('Scala');
   if (!NP) return null;
   if (!_scalaParser) {
-    const scalaModule = await import('tree-sitter-scala');
+    const scalaModule = await importGrammar('tree-sitter-scala');
     _ScalaLanguage = (scalaModule as { default: object }).default;
     _scalaParser = new NP();
     _scalaParser.setLanguage(_ScalaLanguage as unknown as Parser.Language);
@@ -689,7 +710,7 @@ async function getElixirParser(): Promise<{ parser: Parser; lang: object } | nul
   const NP = await loadNativeParserFor('Elixir');
   if (!NP) return null;
   if (!_exParser) {
-    const exModule = await import('tree-sitter-elixir');
+    const exModule = await importGrammar('tree-sitter-elixir');
     _ExLanguage = exModule.default;
     _exParser = new NP();
     _exParser.setLanguage(_ExLanguage as unknown as Parser.Language);
@@ -703,7 +724,7 @@ async function getCppParser(): Promise<{ parser: Parser; lang: object } | null> 
   if (grammarStatus('C++') === 'unavailable') return null;
   if (!_cppParser) {
     const loaded = await loadCoreGrammarSoft('C++', async () => {
-      const cppModule = await import('tree-sitter-cpp');
+      const cppModule = await importGrammar('tree-sitter-cpp');
       const lang = cppModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -723,7 +744,7 @@ async function getSwiftParser(): Promise<{ parser: Parser; lang: object } | null
   if (grammarStatus('Swift') === 'unavailable') return null;
   if (!_swiftParser) {
     const loaded = await loadCoreGrammarSoft('Swift', async () => {
-      const swiftModule = await import('tree-sitter-swift');
+      const swiftModule = await importGrammar('tree-sitter-swift');
       const lang = swiftModule.default;
       const parser = new NP();
       parser.setLanguage(lang as unknown as Parser.Language);
@@ -908,6 +929,9 @@ function materializeCfgByNodeId(
   nodes: FunctionNode[],
   cfgByStart: Map<number, FunctionCfg>,
 ): Map<string, FunctionCfg> {
+  // Cooperative per-file extraction-budget checkpoint at a shared phase boundary — every
+  // language extractor funnels through here (change: bound-large-literal-extraction).
+  checkExtractionBudget();
   const cfg = new Map<string, FunctionCfg>();
   if (cfgByStart.size === 0) return cfg;
   for (const n of nodes) {
@@ -1257,6 +1281,12 @@ const TS_CALL_QUERY = `
                  property: (property_identifier) @call.name)]) @call.node
 `;
 
+/** `new C(...)` with a plain identifier class — `new ns.C()` and `new (f())()` are not bound. */
+const TS_NEW_QUERY = `
+  (new_expression
+    constructor: (identifier) @new.name) @new.node
+`;
+
 async function extractTSGraph(
   filePath: string,
   content: string,
@@ -1359,12 +1389,15 @@ async function extractTSGraph(
       filePath,
       className,
       isAsync,
-      language: 'TypeScript',
+      // The file's own language: a `.js/.mjs/.cjs/.jsx` function is JavaScript, though both are
+      // parsed by the same extractor (every consumer accepts either; ROADMAP P0, #724).
+      language,
       startIndex: fnNode.startIndex,
       endIndex: fnNode.endIndex,
       fanIn: 0,
       fanOut: 0,
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'TypeScript'),
+      ...deprecationOf(content, fnNode.startIndex, language),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'TypeScript'),
       ...(language === 'TypeScript'
         ? { callArity: declarationCallArity(valueNode ?? nameCapture.node.parent ?? fnNode, 'TypeScript') }
@@ -1419,6 +1452,27 @@ async function extractTSGraph(
       callType,
       ...callArgumentFacts(nodeCapture.node, language),
     });
+  }
+
+  // `new C(...)` is not a call_expression, so before this no constructor ever had a caller: its
+  // callers were invisible to analyze_impact and blast_radius, and it read as dead.
+  const newQuery = nativeQuerySoft(language, lang, TS_NEW_QUERY);
+  if (newQuery) {
+    for (const match of newQuery.matches(tree.rootNode)) {
+      const nameCapture = match.captures.find(c => c.name === 'new.name');
+      const nodeCapture = match.captures.find(c => c.name === 'new.node');
+      if (!nameCapture || !nodeCapture) continue;
+      const caller = findEnclosingFunction(nodes, nodeCapture.node.startIndex);
+      if (!caller) continue;
+      rawEdges.push({
+        callerId: caller.id,
+        calleeName: nameCapture.node.text,
+        line: nodeCapture.node.startPosition.row + 1,
+        callType: 'constructor',
+        newExpression: true,
+        ...callArgumentFacts(nodeCapture.node, language),
+      });
+    }
   }
 
   const style = tallyStyle('TypeScript', tree, nodes, filePath);
@@ -1559,6 +1613,7 @@ async function extractPyGraph(
       fanIn: 0,
       fanOut: 0,
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Python'),
+      ...deprecationOf(content, fnNode.startIndex, 'Python'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Python'),
       callArity: declarationCallArity(nameCapture.node.parent ?? fnNode, 'Python', className !== undefined),
     });
@@ -1742,6 +1797,7 @@ async function extractGoGraph(
       endIndex: fnNode.endIndex,
       fanIn: 0, fanOut: 0,
       docstring: extractDocstringBefore(content, fnNode.startIndex, 'Go'),
+      ...deprecationOf(content, fnNode.startIndex, 'Go'),
       signature: extractDeclaration(content, fnNode.startIndex, fnNode.endIndex, 'Go'),
     });
 
@@ -2547,6 +2603,9 @@ function collectClassRelationshipFacts(
   language: string,
   runQuery: (source: string) => TsMatch[],
 ): ClassRelationshipFact[] {
+  // Cooperative per-file extraction-budget checkpoint at a shared phase boundary — every
+  // language extractor funnels through here (change: bound-large-literal-extraction).
+  checkExtractionBudget();
   try {
   const byClass = new Map<string, ClassRelationshipFact>();
   const merge = (className: string, parents: string[] = [], interfaces: string[] = []): void => {
@@ -2997,7 +3056,7 @@ async function extractByQueries(
 // ── C# ──────────────────────────────────────────────────────────────────────
 const CSHARP_SPEC: QueryLangSpec = {
   language: 'C#',
-  loader: () => loadGrammarSoft('C#', () => import('tree-sitter-c-sharp'), m => m.default),
+  loader: () => loadGrammarSoft('C#', () => importGrammar('tree-sitter-c-sharp'), m => m.default),
   classTypes: new Set(['class_declaration', 'struct_declaration', 'record_declaration', 'interface_declaration', 'enum_declaration']),
   fnQuery: `
     (method_declaration name: (identifier) @fn.name) @fn.node
@@ -3014,7 +3073,7 @@ const CSHARP_SPEC: QueryLangSpec = {
 // ── Kotlin ──────────────────────────────────────────────────────────────────
 const KOTLIN_SPEC: QueryLangSpec = {
   language: 'Kotlin',
-  loader: () => loadGrammarSoft('Kotlin', () => import('tree-sitter-kotlin'), m => m.default),
+  loader: () => loadGrammarSoft('Kotlin', () => importGrammar('tree-sitter-kotlin'), m => m.default),
   classTypes: new Set(['class_declaration', 'object_declaration', 'interface_declaration', 'companion_object']),
   // Extension functions: `fun Foo.bar()` — the receiver user_type becomes the className.
   // The receiver is the user_type that appears BEFORE the function name. A user_type
@@ -3046,7 +3105,7 @@ const KOTLIN_SPEC: QueryLangSpec = {
 // ── PHP ─────────────────────────────────────────────────────────────────────
 const PHP_SPEC: QueryLangSpec = {
   language: 'PHP',
-  loader: () => loadGrammarSoft('PHP', () => import('tree-sitter-php'), m => (m.default as { php: object }).php),
+  loader: () => loadGrammarSoft('PHP', () => importGrammar('tree-sitter-php'), m => (m.default as { php: object }).php),
   classTypes: new Set(['class_declaration', 'trait_declaration', 'interface_declaration', 'enum_declaration']),
   fnQuery: `
     (function_definition name: (name) @fn.name) @fn.node
@@ -3064,7 +3123,7 @@ const PHP_SPEC: QueryLangSpec = {
 // ── C ───────────────────────────────────────────────────────────────────────
 const C_SPEC: QueryLangSpec = {
   language: 'C',
-  loader: () => loadGrammarSoft('C', () => import('tree-sitter-c'), m => m.default),
+  loader: () => loadGrammarSoft('C', () => importGrammar('tree-sitter-c'), m => m.default),
   classTypes: new Set(), // C has no classes — file scope is the implicit grouping
   fnQuery: `
     (function_definition declarator: (function_declarator declarator: (identifier) @fn.name)) @fn.node
@@ -3077,7 +3136,7 @@ const C_SPEC: QueryLangSpec = {
 // ── Scala ───────────────────────────────────────────────────────────────────
 const SCALA_SPEC: QueryLangSpec = {
   language: 'Scala',
-  loader: () => loadGrammarSoft('Scala', () => import('tree-sitter-scala'), m => m.default),
+  loader: () => loadGrammarSoft('Scala', () => importGrammar('tree-sitter-scala'), m => m.default),
   classTypes: new Set(['object_definition', 'class_definition', 'trait_definition']),
   fnQuery: `
     (function_definition name: (identifier) @fn.name) @fn.node
@@ -3136,7 +3195,7 @@ const LUA_SPEC: QueryLangSpec = {
 // ── Bash ────────────────────────────────────────────────────────────────────
 const BASH_SPEC: QueryLangSpec = {
   language: 'Bash',
-  loader: () => loadGrammarSoft('Bash', () => import('tree-sitter-bash'), m => m.default),
+  loader: () => loadGrammarSoft('Bash', () => importGrammar('tree-sitter-bash'), m => m.default),
   classTypes: new Set(),
   // Only edge to project-defined functions, never external binaries (grep/ls/…).
   callFilter: (calleeName, definedNames) => definedNames.has(calleeName),
@@ -3306,7 +3365,7 @@ async function extractElixirGraph(
   filePath: string,
   content: string,
 ): Promise<{ nodes: FunctionNode[]; rawEdges: RawEdge[]; parseHealth?: FileParseHealth }> {
-  const loaded = await loadGrammarSoft('Elixir', () => import('tree-sitter-elixir'), m => m.default);
+  const loaded = await loadGrammarSoft('Elixir', () => importGrammar('tree-sitter-elixir'), m => m.default);
   if (!loaded) return { nodes: [], rawEdges: [] };
 
   return loaded.withTree(content, (root) => {
@@ -3720,7 +3779,7 @@ export async function _extractClassRelationshipsLegacyForTesting(
       // Best-effort; skip unparseable files — but a file abandoned at the BUDGET is reported, not
       // swallowed. "We ran out of time on this file" and "the grammar rejected it" call for
       // different actions, and only one of them used to leave any trace.
-      if (parseBudgetOverrunMs((err as Error | undefined)?.message) !== undefined) {
+      if (extractionBudgetOverrunMs((err as Error | undefined)?.message) !== undefined) {
         budgetExceeded?.add(file.path);
       }
     }
@@ -5281,6 +5340,9 @@ function collectPass1DynamicDispatch(
   nodes: FunctionNode[],
   filePath: string,
 ): DynamicDispatchFacts | undefined {
+  // Cooperative per-file extraction-budget checkpoint at a shared phase boundary — every
+  // language extractor funnels through here (change: bound-large-literal-extraction).
+  checkExtractionBudget();
   const events: DynamicDispatchFacts['events'] = [];
   const callbacks: DynamicDispatchFacts['callbacks'] = [];
   const tree = { rootNode } as unknown as Parser.Tree;
@@ -5595,6 +5657,23 @@ function isEmptyExtractResult(result: FileExtractResult | undefined): boolean {
 }
 
 /** Construction-time options for {@link CallGraphBuilder}. */
+/**
+ * Resolution-mechanism toggles. TEST / CALIBRATION SURFACE ONLY — production passes nothing, so
+ * every mechanism is on and behaviour is byte-for-byte unchanged. The soundness-calibration
+ * checker (change: add-callgraph-soundness-calibration) drives the builder with a mechanism
+ * disabled to assert the precision-order (monotone-refinement) invariant: disabling a refining
+ * mechanism must only make a call site fall through to a more conservative tier, never change what
+ * the full ladder resolves. A field left undefined means on.
+ */
+export interface CallGraphResolutionToggles {
+  /** Strategy 2: receiver type inference (produces `type_inference` edges). */
+  typeInference?: boolean;
+  /** Strategy 3: resolution through a re-export / barrel chain (produces `re_export` edges). */
+  reExport?: boolean;
+  /** Pass 7b: class-hierarchy (CHA) polymorphic-dispatch `overrides` edges. */
+  cha?: boolean;
+}
+
 export interface CallGraphBuilderOptions {
   /**
    * Controls for the Pass-1 extraction lane (change: optimize-parallel-extraction-pool).
@@ -5621,6 +5700,44 @@ export interface CallGraphBuilderOptions {
   cfgSpill?: CfgSpill;
   /** Test-only oracle: run the pre-optimization late parsers for byte-equivalence checks. */
   legacyLatePassesForTesting?: boolean;
+  /**
+   * Resolution-mechanism toggles for the soundness-calibration checker (test surface only; a
+   * field left undefined is on, so production is unchanged).
+   */
+  resolution?: CallGraphResolutionToggles;
+  /**
+   * Interface-specification candidates (change: add-contract-node-projection): the repository's
+   * OpenAPI/Swagger documents, path + content. They are NOT source files — no grammar parses
+   * them and they never enter Pass 1 — so they ride beside `files` rather than in it. Absent
+   * (the watcher's per-file rebuilds, tests, any embedded caller) means no contract projection.
+   */
+  contractFiles?: ReadonlyArray<{ path: string; content: string }>;
+  /** Specification candidates the caller did not retain, so the projection discloses the cap. */
+  contractFilesOmitted?: number;
+  /** `.proto` files the walk did not retain (change: add-contract-graph-projection). */
+  protoFilesOmitted?: number;
+  /** GraphQL files the walk did not retain. */
+  graphqlFilesOmitted?: number;
+  /** Schema files deliberately not read (fixtures, a Relay compiler's copy), each with why. */
+  contractFilesSkipped?: ReadonlyArray<{ file: string; reason: string }>;
+  /**
+   * Project-root directories the walk saw (change: scope-graphql-schema-universes), so GraphQL
+   * schema identity is scoped to a project instead of the whole repository.
+   */
+  projectRoots?: readonly string[];
+  /**
+   * The project's declared build-output mapping (change: add-iac-deploy-binding-commands), so a
+   * deployed handler naming a built file (`dist/orders.handler`) binds to its source. Absent means
+   * no mapping: a built path then binds only if it is itself indexed.
+   */
+  buildOutput?: import('./iac/build-output.js').BuildOutputMap;
+  /**
+   * The path aliases the project DECLARED (tsconfig/jsconfig `compilerOptions.paths`, a
+   * `package.json` `imports` subpath), read by `readPathAliases` (change:
+   * fix-bind-aliased-grpc-node-handlers). Absent means none were read, and a bare specifier then
+   * resolves to nothing — as before.
+   */
+  pathAliases?: readonly PathAlias[];
 }
 
 export class CallGraphBuilder {
@@ -5628,12 +5745,35 @@ export class CallGraphBuilder {
   private readonly pass1Cache: Pass1FactCache | undefined;
   private readonly cfgSpill: CfgSpill | undefined;
   private readonly legacyLatePassesForTesting: boolean;
+  /** Every mechanism on unless a test/calibration caller explicitly turned one off. */
+  private readonly resolution: Required<CallGraphResolutionToggles>;
+  private readonly contractFiles: ReadonlyArray<{ path: string; content: string }>;
+  private readonly contractFilesOmitted: number;
+  private readonly protoFilesOmitted: number;
+  private readonly graphqlFilesOmitted: number;
+  private readonly contractFilesSkipped: ReadonlyArray<{ file: string; reason: string }>;
+  private readonly projectRoots: readonly string[];
+  private readonly buildOutput: import('./iac/build-output.js').BuildOutputMap | undefined;
+  private readonly pathAliases: readonly PathAlias[];
 
   constructor(options: CallGraphBuilderOptions = {}) {
     this.extractionOptions = options.extraction;
     this.pass1Cache = options.pass1Cache;
     this.cfgSpill = options.cfgSpill;
     this.legacyLatePassesForTesting = options.legacyLatePassesForTesting === true;
+    this.contractFiles = options.contractFiles ?? [];
+    this.contractFilesOmitted = options.contractFilesOmitted ?? 0;
+    this.protoFilesOmitted = options.protoFilesOmitted ?? 0;
+    this.graphqlFilesOmitted = options.graphqlFilesOmitted ?? 0;
+    this.contractFilesSkipped = options.contractFilesSkipped ?? [];
+    this.projectRoots = options.projectRoots ?? [];
+    this.buildOutput = options.buildOutput;
+    this.pathAliases = options.pathAliases ?? [];
+    this.resolution = {
+      typeInference: options.resolution?.typeInference !== false,
+      reExport: options.resolution?.reExport !== false,
+      cha: options.resolution?.cha !== false,
+    };
   }
 
   /**
@@ -5869,7 +6009,7 @@ export class CallGraphBuilder {
         // never guessed at. A worker fault never reaches here: the pool routes that file to the
         // main thread instead, so this message is always the main thread's own verdict.
         const message = (error as Error | undefined)?.message;
-        const overrunBudgetMs = parseBudgetOverrunMs(message);
+        const overrunBudgetMs = extractionBudgetOverrunMs(message);
         const exclusion: FileExclusionReason = overrunBudgetMs !== undefined
           ? 'budget-exceeded'
           : 'parse-failure';
@@ -6181,6 +6321,20 @@ export class CallGraphBuilder {
       let calleeNode: FunctionNode | undefined;
       let confidence: EdgeConfidence = 'name_only';
 
+      // Strategy 0n — `new C(...)` (TS/JS) binds only to class C's own `constructor`, declared in
+      // the caller's file or in the file the caller imports C from. Anything else — an external
+      // class (`new Map()`), a class with no explicit constructor, an unproven same name elsewhere —
+      // makes no edge at all, exactly as before this site was extracted.
+      if (raw.newExpression) {
+        const ctors = trie.findByQualifiedName(raw.calleeName, 'constructor');
+        const sameFile = ctors.filter(n => n.filePath === callerNode.filePath);
+        const importedFile = callImportMap.get(callerNode.filePath)?.get(raw.calleeName);
+        const imported = importedFile ? ctors.filter(n => matchesImportedTarget(n.filePath, importedFile)) : [];
+        if (sameFile.length === 1) { calleeNode = sameFile[0]; confidence = 'same_file'; }
+        else if (sameFile.length === 0 && imported.length === 1) { calleeNode = imported[0]; confidence = 'import'; }
+        if (!calleeNode) continue;
+      }
+
       // Strategy 1r — CHAINED intra-object receiver: `this.repo.save()` / `self.repo.save()`
       // (change: shrink-receiver-resolution-boundary). Before this change the call query matched
       // no alternative for a nested receiver, so the site produced NO raw edge — not a resolved
@@ -6284,7 +6438,7 @@ export class CallGraphBuilder {
       }
 
       // Strategy 2 — type inference on receiver variable
-      if (!calleeNode && raw.calleeObject) {
+      if (!calleeNode && raw.calleeObject && this.resolution.typeInference) {
         const fileContent = fileContents.get(callerNode.filePath);
         if (fileContent) {
           const bodySlice = fileContent.slice(callerNode.startIndex, callerNode.endIndex);
@@ -6373,10 +6527,38 @@ export class CallGraphBuilder {
           );
           const requiresUniqueTarget = UNIQUE_IMPORT_BINDING_LANGUAGES.has(callerNode.language);
           if (candidates.length > 0 && (!requiresUniqueTarget || candidates.length === 1)) {
-            calleeNode = candidates[0];
-            confidence = (viaName && reExportedNames.has(`${callerNode.filePath}\0${raw.calleeName}`))
-              ? 're_export'
-              : 'import';
+            const viaReExport = Boolean(viaName) &&
+              reExportedNames.has(`${callerNode.filePath}\0${raw.calleeName}`);
+            // Calibration: with re-export resolution off, a barrel-hop binding falls through to the
+            // more conservative tiers below instead of binding here. A direct import is unaffected.
+            if (!(viaReExport && !this.resolution.reExport)) {
+              calleeNode = candidates[0];
+              confidence = viaReExport ? 're_export' : 'import';
+            }
+          }
+        }
+      }
+
+      // Strategy 3p — Python instantiation `C(...)` of an in-repo class binds to `C.__init__`, on
+      // the same proof as `new C(...)`: declared in the caller's file, or in the file the caller
+      // imports `C` from. Without it the call fell through to an `external::C` leaf, listing the
+      // repository's own class as an external dependency and leaving `__init__` without a caller.
+      if (!calleeNode && !raw.calleeObject && callerNode.language === 'Python') {
+        const inits = trie.findByQualifiedName(raw.calleeName, '__init__');
+        if (inits.length > 0) {
+          const sameFile = inits.filter(n => n.filePath === callerNode.filePath);
+          const importedFile = callImportMap.get(callerNode.filePath)?.get(raw.calleeName);
+          const imported = importedFile ? inits.filter(n => matchesImportedTarget(n.filePath, importedFile)) : [];
+          if (sameFile.length === 1) { calleeNode = sameFile[0]; confidence = 'same_file'; }
+          else if (sameFile.length === 0 && imported.length === 1) { calleeNode = imported[0]; confidence = 'import'; }
+          // An absolute in-project import records no binding (see buildBaseImportMap), which is
+          // why a plain function reached that way binds by its unique name below. A class gets the
+          // same policy — the one in-repo `C.__init__` — unless the file imported `C` from a
+          // module outside the repository, which the source has just contradicted.
+          else if (sameFile.length === 0 && imported.length === 0 && inits.length === 1
+            && !callImportMap.get(callerNode.filePath)?.has(`${EXTERNAL_IMPORT_PREFIX}${raw.calleeName}`)) {
+            calleeNode = inits[0];
+            confidence = 'name_only';
           }
         }
       }
@@ -6469,8 +6651,23 @@ export class CallGraphBuilder {
 
     // Pass 2b: HTTP cross-language edges (JS/TS caller → Python handler)
     const httpClientDegradations: HttpExtractionDegradation[] = [...pass1HttpDegradations];
+    // The same registrations and call sites the contract projection binds to declared operations
+    // (change: add-contract-node-projection) — extracted once, here. Retained only when a
+    // specification exists: on a repository with none, holding the whole route and call list
+    // across Passes 3-8 would be memory spent for nothing.
+    const projectContractsFor = this.contractFiles.length > 0 || this.contractFilesOmitted > 0 || this.protoFilesOmitted > 0 || this.graphqlFilesOmitted > 0
+      // A schema skipped as a fixture or a Relay copy is still disclosed when it is the only one.
+      || this.contractFilesSkipped.length > 0;
+    let httpRoutes: RouteDefinition[] = [];
+    let httpCalls: HttpCall[] = [];
+    /** Why the route/call extraction is not complete — withholds every "unmatched" conclusion. */
+    const extractionNotAssessed = new Set<string>();
     try {
-      const { edges: httpEdges, degradations } = await extractAllHttpEdges(structuralFiles, httpCallFacts);
+      const { edges: httpEdges, routes, calls, degradations } = await extractAllHttpEdges(structuralFiles, httpCallFacts);
+      if (projectContractsFor) {
+        httpRoutes = routes;
+        httpCalls = calls;
+      }
       httpClientDegradations.push(...degradations);
       // Group once, then look up per edge. Rebuilt per edge this was an O(edges × nodes) scan.
       const httpNodesByFile = new Map<string, FunctionNode[]>();
@@ -6528,14 +6725,26 @@ export class CallGraphBuilder {
         });
       }
     } catch {
-      // HTTP edge extraction is best-effort; don't fail the whole build
+      // HTTP edge extraction is best-effort; don't fail the whole build. The contract projection
+      // reads the same routes and calls, so a failure here is not "nothing serves this operation".
+      extractionNotAssessed.add('the route and client-call extraction failed, so no registration or call site was assessed');
+    }
+    if (projectContractsFor && httpClientDegradations.length) {
+      extractionNotAssessed.add(`${httpClientDegradations.length} file(s) hit a parse budget or failed to parse, so their routes and call sites were not assessed`);
     }
 
     // Pass 2c: Infrastructure-as-Code projection (spec-07).
     // IaC resources/references project onto the existing node/edge primitives.
     let iacClasses: ClassNode[] = [];
+    let unresolvedDeployBindings: UnresolvedDeployBinding[] = [];
+    // Named failures, never a silent empty projection. Before this, a single throw anywhere in
+    // Pass 2c erased every resource, reference and deploy binding, and nothing said so: orient
+    // reported no infrastructure (read as "no resource runs a function in scope") and
+    // `unresolvedDeployBindings` was absent (read as "every binding resolved").
+    const iacFailures: string[] = [];
     try {
-      const iac = buildProjectedIac(structuralFiles);
+      const iacGraph = buildIacGraph(structuralFiles, iacFailures);
+      const iac = projectIacGraph(iacGraph);
       for (const n of iac.nodes) if (!allNodes.has(n.id)) allNodes.set(n.id, n);
       edges.push(...iac.edges);
       iacClasses = iac.classes;
@@ -6547,8 +6756,15 @@ export class CallGraphBuilder {
       // boundary end-to-end. Standalone IaC (.tf/.yaml) has no co-located code, so
       // no edge is created — those stay infra-only components, exactly as today.
       edges.push(...linkCodeToInfra(iac.nodes, allNodes));
-    } catch {
-      // IaC extraction is best-effort; never fail the whole build
+
+      // Pass 2c.2: function resources → the code they run (change: add-iac-deploy-binding).
+      const codeNodes = [...allNodes.values()].filter(n => !n.isExternal && !isIacLanguage(n.language));
+      const deploys = bindDeployHandlers(iacGraph, codeNodes, this.buildOutput);
+      edges.push(...deploys.edges.filter(e => allNodes.has(e.callerId)));
+      unresolvedDeployBindings = deploys.unresolved;
+    } catch (error) {
+      // Best-effort still: a failure never fails the whole build. But it is disclosed.
+      iacFailures.push(`projection: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     // Transport sends no indexed consumer selects, disclosed as boundary sites below.
@@ -6589,6 +6805,12 @@ export class CallGraphBuilder {
     const seenPairs = new Set<string>();
     for (const edge of edges) {
       if (edge.confidence === 'synthesized') continue;
+      // A declaration binding is not a call. Contract edges are pushed after this loop for
+      // exactly that reason, but `deploys_symbol` is pushed in Pass 2c, before it: the deployed
+      // handler was given a fan-in of 1 by its own manifest, which removed it from the entry
+      // points and left the YAML stanza as the only entry point of the repository. The store's
+      // `recomputeStructuralMetrics` excludes the same set, so both copies agree.
+      if (isDeclarationEdgeKind(edge.kind)) continue;
       const pairKey = `${edge.callerId}\0${edge.calleeId}`;
       if (seenPairs.has(pairKey)) continue;
       seenPairs.add(pairKey);
@@ -6598,10 +6820,168 @@ export class CallGraphBuilder {
       if (callee) callee.fanIn++;
     }
 
+    // Pass 3c: interface-contract projection (change: add-contract-node-projection).
+    //
+    // Declared operations become ordinary graph nodes, bound to the handler that serves each and
+    // to the function that calls it. Deliberately AFTER Pass 3: a contract edge is not a call, so
+    // it must not change any function's fan-in or fan-out (the metrics every hub/entry-point/
+    // significance ranking rests on). The nodes still land in `allNodes` before Pass 4 reads it.
+    let contractProjection: ProjectedContracts | undefined;
+    if (projectContractsFor) {
+      try {
+        // Code nodes by file, for the enclosing-function lookup a client call needs.
+        const codeNodesByFile = new Map<string, FunctionNode[]>();
+        for (const n of allNodes.values()) {
+          // A PROJECTED declaration is not code. IaC nodes are already in `allNodes` here (Pass
+          // 2c runs before this), and Bicep exposes a bare symbol name — so a `var getOrder` in
+          // a .bicep file whose header named the specification was bound as a "generated client
+          // function", linking a declaration to a declaration. The pre-existing `resolveCaller`
+          // path was safe only by accident: it is driven by extracted HTTP calls, which come
+          // from code files. The generated-client rule consults this map directly.
+          if (n.isExternal || isProjectedLanguage(n.language)) continue;
+          const at = codeNodesByFile.get(n.filePath);
+          if (at) at.push(n); else codeNodesByFile.set(n.filePath, [n]);
+        }
+        // gRPC server registrations, read only when a `.proto` file is in hand: the scan is a
+        // marker test per file, but a repository with no protobuf schema has nothing to bind.
+        // Test files are skipped — a test server registers a fake, not the implementation.
+        const grpcRegistrations: GrpcRegistration[] = [];
+        if (this.contractFiles.some(f => isProtobufPath(f.path))) {
+          for (const [file, content] of fileContents) {
+            if (isTestFile(file)) continue;
+            for (const r of scanGrpcRegistrations(file, content)) grpcRegistrations.push(r);
+          }
+        }
+        const runtimeLanguages: Record<GrpcRegistration['runtime'], ReadonlySet<string>> = {
+          go: new Set(['Go']), python: new Set(['Python']), node: new Set(['TypeScript', 'JavaScript']),
+        };
+        const projection = projectContracts({
+          grpcRegistrations,
+          // The candidates a registration could mean: for Go and Python, methods of the registered
+          // type; for Node, functions of the name the implementation map gives. The projector
+          // picks among them only where the registration's own scope allows (`pick`).
+          resolveGrpcImplementation: (reg, name) => trie.findBySimpleName(name).filter(n =>
+            !n.isExternal && !isProjectedLanguage(n.language) && !isTestFile(n.filePath) && !isGeneratedGrpcStub(n.filePath)
+            && runtimeLanguages[reg.runtime].has(n.language)
+            && (reg.implType === undefined ? !n.className : n.className === reg.implType)),
+          files: this.contractFiles,
+          filesOmitted: this.contractFilesOmitted,
+          protoFilesOmitted: this.protoFilesOmitted,
+          graphqlFilesOmitted: this.graphqlFilesOmitted,
+          ...(this.contractFilesSkipped.length ? { skippedFiles: this.contractFilesSkipped } : {}),
+          ...(this.projectRoots.length ? { projectRoots: this.projectRoots } : {}),
+          importTargets: (() => {
+            // Built lazily, once: a repository with no imported handler never indexes its files.
+            let resolve: ReturnType<typeof createImportResolver> | undefined;
+            const memo = new Map<string, readonly ImportTarget[]>();
+            return (from: string, spec: string, name: string, runtime: 'node' | 'python') => {
+              const key = `${runtime}\0${from}\0${spec}\0${name}`;
+              let hit = memo.get(key);
+              if (!hit) {
+                resolve ??= createImportResolver([...fileContents.keys()], f => fileContents.get(f), this.pathAliases);
+                hit = resolve(from, spec, name, runtime);
+                memo.set(key, hit);
+              }
+              return hit;
+            };
+          })(),
+          // Resolver maps are read only when a GraphQL file is in hand, and only for the root type
+          // names the schema has (the projector passes them). Test files are skipped.
+          graphqlResolverMaps: roots => {
+            if (!this.contractFiles.some(f => isGraphqlPath(f.path))) return [];
+            const maps: ResolverMap[] = [];
+            // A directory holding an inline schema (`typeDefs.ts`) serves THAT schema: maps beside it
+            // are not bound to the repository's SDL by field name.
+            const dirOf = (f: string) => f.slice(0, f.lastIndexOf('/') + 1);
+            const inlineDirs = new Set<string>();
+            for (const [file, content] of fileContents) if (!isTestFile(file) && hasInlineSdl(content)) inlineDirs.add(dirOf(file));
+            for (const [file, content] of fileContents) {
+              if (isTestFile(file) || inlineDirs.has(dirOf(file))) continue;
+              for (const m of scanResolverMaps(file, content, roots)) maps.push(m);
+            }
+            return maps;
+          },
+          // A function a map names is a top-level function or an object-literal method — never a
+          // CLASS method (`class OrderRepo { getOrder() }`), which a map cannot name bare.
+          resolveGraphqlImplementation: (map, name) => trie.findBySimpleName(name).filter(n =>
+            !n.isExternal && !isProjectedLanguage(n.language) && !isTestFile(n.filePath) && !n.className
+            && (map.runtime === 'python' ? n.language === 'Python' : n.language === 'TypeScript' || n.language === 'JavaScript')),
+          ...(extractionNotAssessed.size ? { extractionNotAssessed: [...extractionNotAssessed] } : {}),
+          routes: httpRoutes,
+          calls: httpCalls,
+          // The same handler rule the http_endpoint edges use: the route's own file first, then a
+          // UNIQUE non-external match elsewhere (a routes file separate from its handlers). A name
+          // colliding across files stays unresolved — never guessed.
+          resolveHandler: route => {
+            const simple = route.handlerName.split('.').pop() ?? route.handlerName;
+            const candidates = trie.findBySimpleName(simple).filter(n => !n.isExternal);
+            return candidates.find(n => n.filePath === route.file)
+              ?? (candidates.length === 1 ? candidates[0] : undefined);
+          },
+          // One header slice per code file per specification. The projector calls this once per
+          // specification, so no memo is needed — an earlier one here never hit.
+          generatedClientFunctions: specPath =>
+            generatedClientFunctionsFor(specPath, codeNodesByFile, f => fileContents.get(f), isTestFile),
+          resolveCaller: call => {
+            const inFile = codeNodesByFile.get(call.file);
+            if (!inFile) return undefined;
+            if (call.offset !== undefined) return findEnclosingFunction(inFile, call.offset);
+            const content = fileContents.get(call.file);
+            if (!content) return undefined;
+            let offset = 0;
+            const lines = content.split('\n');
+            for (let i = 0; i < call.line - 1 && i < lines.length; i++) offset += lines[i].length + 1;
+            return findEnclosingFunction(inFile, offset);
+          },
+        });
+        // Edges first, then nodes: a loop, not a spread — a large repository's edge list exceeds
+        // the engine's argument limit, and a throw mid-spread would leave orphan operation nodes
+        // in the graph with no edges and no disclosure (the same lesson as Pass 7a). Operation ids
+        // are `<spec file>::<METHOD path>`, so a collision with a code node is not reachable; the
+        // filter below keeps the invariant explicit rather than assumed.
+        const projectedIds = new Set(projection.nodes.map(n => n.id));
+        const projected: CallEdge[] = [];
+        for (const e of projection.edges) {
+          // The callee is always a projected declaration. The caller is either CODE (a handler
+          // or a client function, already in `allNodes`) or another projected declaration — a
+          // named schema referencing a named schema. Requiring the caller to pre-exist in
+          // `allNodes` silently dropped every schema → schema edge, since the projected nodes
+          // are added on the next line (change: add-contract-schema-elements).
+          if (!projectedIds.has(e.calleeId)) continue;
+          if (!allNodes.has(e.callerId) && !projectedIds.has(e.callerId)) continue;
+          projected.push(e);
+        }
+        for (const n of projection.nodes) if (!allNodes.has(n.id)) allNodes.set(n.id, n);
+        for (const e of projected) edges.push(e);
+        contractProjection = projection;
+      } catch (err) {
+        // Best-effort: never fail the whole build — but a crash must not read as "this repository
+        // declares no operations", so the failure itself is the disclosure.
+        contractProjection = {
+          ...emptyContractProjection(),
+          notAssessed: [`the contract projection failed: ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`],
+        };
+      }
+    }
+
     // Pass 4 (prep): Mark test-file nodes before tested_by derivation
     const nodes = Array.from(allNodes.values());
+    // Rust's dominant convention is an inline `#[cfg(test)] mod tests`, which no path shows. The
+    // attribute on each test function does, and the source is still in hand here. Split each
+    // Rust file once, not once per function (change: fix-rust-test-detection).
+    const rustLines = new Map<string, string[]>();
     for (const n of nodes) {
       if (!n.isExternal && isTestFile(n.filePath)) n.isTest = true;
+      else if (!n.isExternal && n.language === 'Rust' && n.startLine) {
+        let lines = rustLines.get(n.filePath);
+        if (!lines) {
+          const content = fileContents.get(n.filePath);
+          if (content === undefined) continue;
+          lines = content.split('\n');
+          rustLines.set(n.filePath, lines);
+        }
+        if (hasRustTestAttribute(lines, n.startLine)) n.isTest = true;
+      }
     }
 
     // Pass 3b: Derive tested_by edges — reverse edges from production fn ← test fn
@@ -6636,6 +7016,37 @@ export class CallGraphBuilder {
     const allFilePaths = structuralFiles.map(f => f.path);
     const NAMED_IMPORT_RE = /^\s*import\s+(?:type\s+)?\{([^{}]+)\}\s+from\s+['"](\.[^'"]+)['"]/gm;
     const DEFAULT_IMPORT_RE = /^\s*import\s+(?:type\s+)?(\w+)\s+from\s+['"](\.[^'"]+)['"]/gm;
+    // Members of an imported object literal, per (file, name), computed once.
+    const nodesByFile = new Map<string, FunctionNode[]>();
+    const indexNodesByFile = () => {
+      if (nodesByFile.size > 0) return;
+      for (const n of allNodes.values()) {
+        if (n.isTest || n.isExternal) continue;
+        (nodesByFile.get(n.filePath) ?? nodesByFile.set(n.filePath, []).get(n.filePath)!).push(n);
+      }
+    };
+    const classMembers = (sourceFile: string, name: string): FunctionNode[] => {
+      indexNodesByFile();
+      return (nodesByFile.get(sourceFile) ?? []).filter(n => n.className === name);
+    };
+    const memberCache = new Map<string, FunctionNode[]>();
+    const objectLiteralMembers = (sourceFile: string, name: string): FunctionNode[] => {
+      const key = `${sourceFile}\0${name}`;
+      const cached = memberCache.get(key);
+      if (cached) return cached;
+      let members: FunctionNode[] = [];
+      const content = fileContents.get(sourceFile);
+      // A cheap precheck: most unmatched imports are types and constants, never `name = {`.
+      if (content !== undefined && content.includes(name) && content.includes('{')) {
+        const span = objectLiteralSpan(content, name);
+        if (span) {
+          indexNodesByFile();
+          members = (nodesByFile.get(sourceFile) ?? []).filter(n => n.startIndex > span[0] && n.endIndex <= span[1]);
+        }
+      }
+      memberCache.set(key, members);
+      return members;
+    };
     for (const file of structuralFiles) {
       if (!isTestFile(file.path)) continue;
       if (file.language !== 'TypeScript' && file.language !== 'JavaScript') continue;
@@ -6658,8 +7069,18 @@ export class CallGraphBuilder {
       };
       const testLabel = file.path.split('/').pop()!.replace(/\.[tj]sx?$/, '');
       const emitEdge = (name: string, sourceFile: string) => {
-        const candidates = trie.findBySimpleName(name)
+        let candidates = trie.findBySimpleName(name)
           .filter(n => n.filePath === sourceFile && !n.isTest && !n.isExternal);
+        if (candidates.length === 0) {
+          // An imported class: the test constructs it and calls its methods, often inside anonymous
+          // `it` callbacks that have no node, so no call edge reaches them.
+          candidates = classMembers(sourceFile, name);
+        }
+        if (candidates.length === 0) {
+          // An imported object literal (an adapter, a handler table): its methods are indexed by
+          // method name only, so the import names none of them. They lie inside its span.
+          candidates = objectLiteralMembers(sourceFile, name);
+        }
         for (const callee of candidates) {
           const pairKey = `${callee.id}\0${file.path}`;
           if (testedByPairs.has(pairKey)) continue;
@@ -6679,7 +7100,8 @@ export class CallGraphBuilder {
         const sourceFile = resolveSource(m[2]);
         if (!sourceFile) continue;
         for (const part of m[1].split(',')) {
-          const name = (part.match(/\bas\s+(\w+)/) ?? part.match(/(\w+)/))?.[1]?.trim();
+          // `foo as bar` imports `foo`: the source file defines the name before `as`, not the alias.
+          const name = part.trim().replace(/^type\s+/, '').match(/^(\w+)/)?.[1];
           if (name) emitEdge(name, sourceFile);
         }
       }
@@ -6688,6 +7110,12 @@ export class CallGraphBuilder {
         const sourceFile = resolveSource(m[2]);
         if (!sourceFile) continue;
         emitEdge(m[1], sourceFile);
+      }
+      // Dynamic imports: a test that loads its module after mocks are set up
+      // (`const { f } = await import('./m.js')`) tests `f` just as a static import does.
+      for (const { name, specifier } of dynamicImportNames(file.content)) {
+        const sourceFile = resolveSource(specifier);
+        if (sourceFile) emitEdge(name, sourceFile);
       }
     }
 
@@ -6717,19 +7145,32 @@ export class CallGraphBuilder {
 
     // Pass 4: Derive hub functions, entry points, layer violations
     // External and test nodes are excluded from structural stats
-    const internalNodes = nodes.filter(n => !n.isExternal && !n.isTest);
+    // A projected element is a DECLARATION, not a code unit: it is never a hub, an entry point,
+    // or a term in the average fan-in/fan-out (change: add-contract-node-projection). Scoped to
+    // contract languages only, this missed INFRASTRUCTURE entirely — 48 of this repository's
+    // 1,121 entry points were GitHub Actions jobs, Helm templates, Bicep modules and Serverless
+    // stanzas, and `CODEBASE.md` prints that table under "the natural starting point for any
+    // task".
+    const internalNodes = nodes.filter(n => !n.isExternal && !n.isTest && !isProjectedLanguage(n.language));
 
     const hubFunctions = internalNodes
       .filter(n => n.fanIn >= HUB_THRESHOLD)
       .sort((a, b) => b.fanIn - a.fanIn);
 
-    const calledIds = new Set(edges.map(e => e.calleeId));
+    // A declaration binding does not make a function "called": a `deploys_symbol` edge out of a
+    // manifest cost the deployed handler its entry-point status, leaving the YAML stanza as the
+    // only entry point of the repository. Same exclusion as the degree loop, and as the store's
+    // `recomputeStructuralMetrics`.
+    const calledIds = new Set(edges.filter(e => !isDeclarationEdgeKind(e.kind)).map(e => e.calleeId));
     const entryPoints = internalNodes
       .filter(n => !calledIds.has(n.id))
       .sort((a, b) => b.fanOut - a.fanOut);
 
     const layerViolations = layers
-      ? this.detectLayerViolations(edges, allNodes, layers)
+      // A declaration is not a layer member: a binding edge into a specification file or a
+      // manifest that happens to sit inside a configured layer is not an architecture violation
+      // (change: add-contract-node-projection).
+      ? this.detectLayerViolations(edges.filter(e => !isDeclarationEdgeKind(e.kind)), allNodes, layers)
       : [];
 
     const totalFanIn = internalNodes.reduce((s, n) => s + n.fanIn, 0);
@@ -6883,15 +7324,39 @@ export class CallGraphBuilder {
       }
       const hierarchyNodes = new Map((resolutionNodes ?? []).map(node => [node.id, node]));
       for (const [id, node] of allNodes) hierarchyNodes.set(id, node);
-      edges.push(...synthesizeTypeHierarchyEdges({
-        nodes: hierarchyNodes,
-        classes,
-        inheritanceEdges,
-        rawMethodCalls,
-        fileContents,
-        directCalleeIdsByCaller,
-        importMap: callImportMap,
-      }));
+      // Calibration: CHA is the over-approximating mechanism — with it off, no `overrides`
+      // edges are synthesized and every other edge is left exactly as it was.
+      if (this.resolution.cha) {
+        const cha = synthesizeTypeHierarchyEdges({
+          nodes: hierarchyNodes,
+          classes,
+          inheritanceEdges,
+          rawMethodCalls,
+          fileContents,
+          directCalleeIdsByCaller,
+          importMap: callImportMap,
+        });
+        // A loop, not a spread: a large repository's synthesized set can exceed the engine's
+        // argument limit, and the throw would be swallowed below, silently dropping the pass.
+        for (const edge of cha.edges) edges.push(edge);
+        dropExternalLeavesBoundInRepo(edges, cha.edges, allNodes);
+        // Sites whose name-only fan-out CHA refused because the receiver is statically outside
+        // this repository (change: suppress-false-cha-name-only). Disclosed through the SAME
+        // channel as a refused resolution-ladder binding, so the graph records an unresolved
+        // call there instead of silently losing the (false) edges — and the `find_dead_code`
+        // ambiguity cap keeps naming the in-repo methods the pass declined to wire.
+        for (const site of cha.refusedSites) {
+          ambiguousSites.push({
+            callerId: site.callerId,
+            calleeName: site.method,
+            calleeObject: site.recv,
+            line: site.line,
+            strategy: 'cha_receiver_outside_repo',
+            candidateIds: site.refusedCandidateIds.slice(0, AMBIGUOUS_CANDIDATE_CAP),
+            candidateCount: site.refusedCandidateIds.length,
+          });
+        }
+      }
     } catch {
       // CHA is best-effort; a failure must never abort the build.
     }
@@ -6928,6 +7393,9 @@ export class CallGraphBuilder {
         ? [...grammarUnavailableByLanguage.values()].sort((a, b) => a.language < b.language ? -1 : a.language > b.language ? 1 : 0)
         : undefined,
       ambiguousSites: ambiguousSites.length > 0 ? ambiguousSites : undefined,
+      unresolvedDeployBindings: unresolvedDeployBindings.length > 0 ? unresolvedDeployBindings : undefined,
+      iacNotAssessed: iacFailures.length > 0 ? iacFailures : undefined,
+      ...(contractProjection ? { contracts: contractDisclosure(contractProjection) } : {}),
       extractionLane,
       pass1Cache,
     };
@@ -7001,6 +7469,44 @@ function assignClassStableIds(classes: ClassNode[]): void {
  * lane cannot drift from the serial one. Returns `undefined` for a language with no extractor.
  */
 export async function dispatchFileExtract(
+  file: { path: string; content: string; language: string },
+): Promise<FileExtractResult | undefined> {
+  // The per-file budget starts HERE, not at the parse: it bounds the file's whole extraction
+  // (change: bound-large-literal-extraction). Both lanes — serial and pooled — reach extraction
+  // through this one function, so neither can escape the bound.
+  return runWithExtractionBudget(() => dispatchFileExtractUnbudgeted(file));
+}
+
+/**
+ * A call site CHA bound precisely (`cha-declared-type`: the receiver's declared type resolved to
+ * one in-repo class that has the method) cannot also be an external call. Its `external::recv.m`
+ * leaf from the direct pass — `repo.save` on a `Repo` field — would list an in-repo class as an
+ * external dependency, so it is removed, with the leaf node when nothing else calls it
+ * (ROADMAP P0, #724).
+ */
+export function dropExternalLeavesBoundInRepo(
+  edges: CallEdge[],
+  chaEdges: readonly CallEdge[],
+  nodes: Map<string, FunctionNode>,
+): void {
+  const bound = new Set(chaEdges
+    .filter(e => e.synthesizedBy === 'cha-declared-type')
+    .map(e => `${e.callerId}\0${e.line}\0${e.calleeName}`));
+  if (bound.size === 0) return;
+  const dropped = new Set<string>();
+  for (let i = edges.length - 1; i >= 0; i--) {
+    const e = edges[i];
+    if (!e.calleeId.startsWith('external::') || e.synthesizedBy) continue;
+    if (!bound.has(`${e.callerId}\0${e.line}\0${e.calleeName}`)) continue;
+    dropped.add(e.calleeId);
+    edges.splice(i, 1);
+  }
+  if (dropped.size === 0) return;
+  const stillCalled = new Set(edges.map(e => e.calleeId));
+  for (const id of dropped) if (!stillCalled.has(id)) nodes.delete(id);
+}
+
+async function dispatchFileExtractUnbudgeted(
   file: { path: string; content: string; language: string },
 ): Promise<FileExtractResult | undefined> {
   const container = (SCRIPT_CONTAINER_FORMATS as readonly string[]).includes(file.language)
@@ -7291,6 +7797,15 @@ export function serializeCallGraph(result: CallGraphResult): SerializedCallGraph
     // disclose them (change: harden-call-resolution-ambiguity). Omitted when empty.
     ...(result.ambiguousSites && result.ambiguousSites.length > 0
       ? { ambiguousSites: result.ambiguousSites }
+      : {}),
+    ...(result.contracts ? { contracts: result.contracts } : {}),
+    ...(result.unresolvedDeployBindings && result.unresolvedDeployBindings.length > 0
+      ? { unresolvedDeployBindings: result.unresolvedDeployBindings }
+      : {}),
+    // An ecosystem whose extraction threw: its resources are NOT absent, they were not
+    // assessed. Carried into llm-context.json so serve-time consumers can say which.
+    ...(result.iacNotAssessed && result.iacNotAssessed.length > 0
+      ? { iacNotAssessed: result.iacNotAssessed }
       : {}),
   };
 }

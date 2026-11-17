@@ -5,11 +5,23 @@
  * Outputs repository map, dependency graph, and file significance scores.
  */
 
+import { setPriority } from 'node:os';
+import { noSpecSourceText } from '../../core/spec-sources/state.js';
 import { Command, Option } from 'commander';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
+import {
+  joinCapped,
+  omittedDisclosure,
+  CYCLE_MEMBERS_SHOWN,
+  CYCLE_LINES_SHOWN,
+  CLONE_MEMBERS_SHOWN,
+  INVENTORY_ITEMS_SHOWN,
+} from '../../utils/capped-list.js';
 import { mkdir, readFile, open as openFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
+import { openBuildProgress, reportBuildPhase, reportFileDone } from '../../core/services/build-progress.js';
+import { setPass1ProgressListener } from '../../core/analyzer/extraction-pool.js';
 import { formatDuration, formatAge, getAnalysisAge } from '../../utils/command-helpers.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 import { EdgeStore } from '../../core/services/edge-store.js';
@@ -55,11 +67,15 @@ import {
 } from '../../core/analyzer/analysis-core.js';
 import {
   buildAnalysisIndexes,
+  buildBackgroundLocalVectors,
   buildSpecIndex,
   type IndexReport,
 } from '../../core/analyzer/analysis-indexes.js';
 import { VectorIndexLockContendedError } from '../../core/analyzer/vector-index.js';
 import { readGenerationSnapshot, REQUIRED_ANALYSIS_ARTIFACTS } from '../../core/runtime/analysis-generation.js';
+
+/** Niceness of the detached local-vector pass (POSIX 0–19; mapped to below-normal on Windows). */
+const BACKGROUND_PRIORITY = 10;
 
 // ============================================================================
 // TYPES
@@ -99,6 +115,11 @@ interface ExtendedAnalyzeOptions extends AnalyzeOptions {
    * single-write build.
    */
   partialServing?: boolean;
+  /**
+   * Internal: add local vectors to the published keyword index, and nothing else. Run
+   * detached by background builds (change: enable-local-semantic-search-in-background).
+   */
+  backgroundVectors?: boolean;
 }
 
 interface AnalysisResult {
@@ -174,6 +195,51 @@ export async function readPublishedStoreFault(outputPath: string): Promise<strin
   } finally {
     try { store?.close(); } catch { /* best-effort */ }
   }
+}
+
+/** One cycle as read back out of `refactor-priorities.json`. */
+export interface CycleReport {
+  size?: number;
+  participants?: Array<{ function: string; file: string }>;
+}
+
+/**
+ * Render one `⚠ Cycle:` report line.
+ *
+ * A cycle is a strongly-connected component, so its length is a property of the
+ * analyzed repository: on grpc-go one names 1,347 functions, which joined into
+ * a single 36,445-character console line. The printed chain is capped and the
+ * exact number of withheld names is disclosed; `refactor-priorities.json` keeps
+ * every participant.
+ */
+export function renderCycleLine(cycle: CycleReport): string {
+  const names = joinCapped(
+    (cycle.participants ?? []).map(p => p.function),
+    CYCLE_MEMBERS_SHOWN,
+    ' ↔ ',
+    'symbol',
+  );
+  return `⚠ Cycle: ${safe(names)}`;
+}
+
+/**
+ * Render one clone-group line for the "Top 5 Clone Groups" report.
+ *
+ * A generated-accessor group can hold hundreds of members (182 on grpc-go, an
+ * 8,333-character line). The printed member list is capped with an exact
+ * omitted count; `duplicates.json` keeps every instance.
+ */
+export function renderCloneGroupLine(group: CloneGroup): string {
+  const files = joinCapped(
+    group.instances.map((i: CloneInstance) => {
+      const fileParts = i.file.split('/');
+      return `${fileParts[fileParts.length - 2]}/${fileParts[fileParts.length - 1]}:${i.functionName}`;
+    }),
+    CLONE_MEMBERS_SHOWN,
+    '  ',
+    'member',
+  );
+  return `${safe(group.type).padEnd(10)} (${group.instances.length}x, ${group.lineCount} lines): ${safe(files)}`;
 }
 
 export function formatIndexedFunctionPopulation(result: {
@@ -257,7 +323,7 @@ async function reportCompletedAnalysis(outputPath: string): Promise<void> {
     logger.blank();
     logger.success('Analysis Summary');
     logger.info('Files analyzed', String(repoStructure.statistics.analyzedFiles));
-    logger.info('Domains detected', repoStructure.domains.map(d => d.name).join(', ') || 'None');
+    logger.info('Domains detected', joinCapped(repoStructure.domains.map(d => d.name), INVENTORY_ITEMS_SHOWN, ', ', 'domain') || 'None');
     logger.info('Architecture', repoStructure.architecture.pattern);
   } catch (err) {
     logger.warning(`Analysis completed but its summary could not be read: ${(err as Error).message}`);
@@ -363,6 +429,7 @@ export const analyzeCommand = new Command('analyze')
   // agent wiring itself, so analyze must not also print its agent-onboarding tips.
   .addOption(new Option('--embedded').hideHelp())
   .addOption(new Option('--partial-serving').hideHelp())
+  .addOption(new Option('--background-vectors').hideHelp())
   .addOption(new Option('--fresh-spec-directory').hideHelp())
   .addHelpText(
     'after',
@@ -391,7 +458,7 @@ Output files:
   ├── dependencies.mermaid   Visual dependency diagram
   └── SUMMARY.md             Human-readable analysis summary
 
-After analysis, run 'openlore generate' to create OpenSpec files.
+After analysis, agents query the index (openlore orient, or the MCP server). Spec generation is optional: openlore generate.
 `
   )
   .action(async (options: Partial<ExtendedAnalyzeOptions>) => {
@@ -443,6 +510,17 @@ After analysis, run 'openlore generate' to create OpenSpec files.
         return;
       }
 
+      if (options.backgroundVectors) {
+        // Nobody waits on this pass, so it yields the CPU to whatever the user is doing. Set
+        // before the embedding pool starts: worker threads inherit it.
+        try { setPriority(BACKGROUND_PRIORITY); } catch { /* not permitted here; run as is */ }
+        // Fail-soft and silent: the keyword index keeps serving whatever happens here.
+        try {
+          await buildBackgroundLocalVectors(rootPath, safeJoin(rootPath, OPENLORE_ANALYSIS_REL_PATH), openloreConfig);
+        } catch { /* keyword index unchanged */ }
+        return;
+      }
+
       // The index is ALWAYS built (so orient works); opts.embed only controls
       // whether we attempt semantic embeddings. --no-embed → keyword-only BM25.
       const keywordOnly = options.embed === false;
@@ -472,7 +550,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
           outputPath,
           config: openloreConfig,
           reporter: {
-            report(event): void { console.log(event.status === 'warning' ? formatSpecIndexFailure(event.detail ?? 'unknown error', options.freshSpecDirectory === true) : `    ${event.detail ?? 'Spec index updated'}`); },
+            report(event): void { console.log(event.status === 'warning' ? formatSpecIndexFailure(event.detail ?? 'unknown error', options.freshSpecDirectory === true, defaultSpecsDir(rootPath)) : `    ${event.detail ?? 'Spec index updated'}`); },
           },
         });
         return;
@@ -491,6 +569,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
         opts.exclude,
         opts.maxFiles,
         analysisGeneratedExcludes(rootPath, outputPath, openloreConfig.openspecPath),
+        openloreConfig.filePolicies,
       );
 
       // Skip re-analysis only when the SOURCE is unchanged since the last run — a
@@ -544,7 +623,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
 
             logger.success('Analysis Summary');
             logger.info('Files analyzed', repoStructure.statistics.analyzedFiles);
-            logger.info('Domains detected', repoStructure.domains.map((d: { name: string }) => d.name).join(', ') || 'None');
+            logger.info('Domains detected', joinCapped(repoStructure.domains.map((d: { name: string }) => d.name), INVENTORY_ITEMS_SHOWN, ', ', 'domain') || 'None');
             logger.info('Architecture', repoStructure.architecture.pattern);
             logger.blank();
 
@@ -596,7 +675,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
               }
             }
 
-            if (!options.embedded) logger.info('Next step', "Run 'openlore generate' to create OpenSpec files");
+            if (!options.embedded) logger.info('Next step', 'Ask about the code: openlore orient "<task>" (spec generation is optional: openlore generate)');
             return;
           } catch (readErr) {
             logger.debug(`Could not read existing analysis summary: ${(readErr as Error).message}`);
@@ -643,6 +722,11 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       }
 
       let result;
+      // Build progress for the user's status line (change: hook-reliability, group 9). Removed
+      // on exit, whatever the path; a killed build is read as not building by its dead pid.
+      const closeProgress = openBuildProgress(rootPath);
+      setPass1ProgressListener({ start: total => reportBuildPhase('parsing', total), fileDone: reportFileDone, end: () => reportBuildPhase('linking') });
+      process.once('exit', () => { setPass1ProgressListener(undefined); closeProgress(); });
       try {
         result = await runAnalysis(rootPath, outputPath, {
           maxFiles: opts.maxFiles,
@@ -656,6 +740,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       } finally {
         await ownership.release();
       }
+      reportBuildPhase('writing the index');
 
       // ========================================================================
       // PHASE 4: DISPLAY RESULTS
@@ -778,10 +863,12 @@ After analysis, run 'openlore generate' to create OpenSpec files.
 
           if (rp.cycles?.length > 0) {
             console.log('');
-            for (const c of rp.cycles as Array<{ size: number; participants: Array<{ function: string; file: string }> }>) {
-              const names = c.participants.map(p => p.function).join(' ↔ ');
-              console.log(`    ⚠ Cycle: ${safe(names)}`);
+            const cycles = rp.cycles as CycleReport[];
+            for (const c of cycles.slice(0, CYCLE_LINES_SHOWN)) {
+              console.log(`    ${safe(renderCycleLine(c))}`);
             }
+            const moreCycles = omittedDisclosure(cycles.length, CYCLE_LINES_SHOWN, 'cycle');
+            if (moreCycles) console.log(`      ${safe(moreCycles)}`);
           }
 
           console.log('');
@@ -826,12 +913,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
               .slice(0, 5);
 
             for (const group of topGroups) {
-              const files = group.instances.map((i: CloneInstance) => {
-                const fileParts = i.file.split('/');
-                return `${fileParts[fileParts.length - 2]}/${fileParts[fileParts.length - 1]}:${i.functionName}`;
-              }).join('  ');
-
-              console.log(`    ${safe(group.type).padEnd(10)} (${group.instances.length}x, ${group.lineCount} lines): ${safe(files)}`);
+              console.log(`    ${safe(renderCloneGroupLine(group))}`);
             }
           }
 
@@ -875,7 +957,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
       const digestWritten = await generateCodebaseDigest(
         artifacts.llmContext,
         depGraph,
-        { rootPath, outputDir: outputPath, repoStructure: artifacts.repoStructure },
+        { rootPath, outputDir: outputPath, repoStructure: artifacts.repoStructure, openspecPath: openloreConfig.openspecPath },
       );
 
       // Generate AI tool config files — prompt user to select which assistants
@@ -1009,7 +1091,7 @@ After analysis, run 'openlore generate' to create OpenSpec files.
 
       logger.success('Ready for generation!');
       logger.blank();
-      if (!options.embedded) logger.info('Next step', "Run 'openlore generate' to create OpenSpec files");
+      if (!options.embedded) logger.info('Next step', 'Ask about the code: openlore orient "<task>" (spec generation is optional: openlore generate)');
 
     } catch (error) {
       logger.error(`Analysis failed: ${(error as Error).message}`);
@@ -1046,7 +1128,7 @@ async function runEmbedStep(
     report(event: IndexReport): void {
       const label = event.index === 'function' ? 'Function index' : event.index === 'text' ? 'Text line index' : 'Spec index';
       if (event.index === 'spec' && (event.status === 'warning' || event.status === 'skip')) {
-        console.log(formatSpecIndexFailure(event.detail ?? 'unknown error', freshSpecDirectory));
+        console.log(formatSpecIndexFailure(event.detail ?? 'unknown error', freshSpecDirectory, defaultSpecsDir(rootPath)));
       } else if (event.status === 'warning') console.log(`    ⚠ ${label} skipped: ${safe(event.detail ?? 'unknown error')}`);
       else if (event.status === 'skip') console.log(`    ℹ ${label} skipped${event.detail ? `: ${safe(event.detail)}` : ''}`);
       else if (event.status === 'complete') console.log(`    ✓ ${label} built${event.detail ? ` ${safe(event.detail)}` : ''}`);
@@ -1081,14 +1163,45 @@ async function runEmbedStep(
   }
 }
 
-export function formatSpecIndexFailure(message: string, freshSpecDirectory: boolean): string {
+/**
+ * The specs directory `openlore init` creates, resolved against a repository root.
+ *
+ * An empty directory THERE is OpenLore's own artifact; an empty one at a configured
+ * `openspecPath` is the user's, and worth a warning.
+ */
+export function defaultSpecsDir(rootPath: string): string {
+  return join(rootPath, 'openspec', 'specs');
+}
+
+export function formatSpecIndexFailure(
+  message: string,
+  freshSpecDirectory: boolean,
+  /**
+   * The resolved default specs directory for this repository. Compared as a PATH, not as a
+   * slash pattern over the prose: a regex built from `openspec/specs` never matched a Windows
+   * `C:\repo\openspec\specs`, so the whole distinction was inert there, and it matched any
+   * configured path ending in those two segments — `vendor/openspec/specs`, `docs/openspec/specs`
+   * — which are the user's, not ours (change: fix-spec-skip-path-comparison).
+   */
+  defaultSpecs?: string,
+): string {
   if (message.includes('No OpenSpec specs directory')) {
-    return '    ℹ No OpenSpec specs directory — spec index skipped';
+    return `    ℹ Spec index skipped: ${noSpecSourceText()}`;
   }
-  if (freshSpecDirectory && message.includes('exists but contains no spec.md files')) {
-    // change: align-first-run-ctas-with-repo-shape — install created this
-    // empty directory, so it is expected first-run state rather than a warning.
-    return '    ℹ No specs yet — optional: run "openlore generate" (requires an LLM provider; see "openlore features")';
+  if (message.includes('exists but contains no spec.md files')) {
+    // change: align-first-run-ctas-with-repo-shape — an empty specs directory OpenLore's own
+    // `init` created is expected state, not a warning.
+    //
+    // This used to require `freshSpecDirectory`, which is true only on the run that created the
+    // directory, so every LATER run of a merely-initialized repository warned about a directory
+    // OpenLore had made itself. The honest discriminator is not WHEN the directory appeared but
+    // WHOSE it is: the default `openspec/specs` location is ours, and a configured
+    // `openspecPath` is the user's — an empty one there means their specs are somewhere else,
+    // which is worth a warning (change: fix-self-inflicted-spec-warning).
+    const ours = freshSpecDirectory || (defaultSpecs !== undefined && message.includes(defaultSpecs));
+    if (ours) {
+      return '    ℹ No specs yet — optional: run "openlore generate" (requires an LLM provider; see "openlore features")';
+    }
   }
   return `    ⚠ Spec index skipped: ${message}`;
 }

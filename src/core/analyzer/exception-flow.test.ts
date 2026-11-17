@@ -9,9 +9,11 @@ import {
   DYNAMIC_TYPE,
   ERROR_PROPAGATION_LANGUAGES,
   extractGoErrorFactsFromSource,
+  extractGoErrorFacts,
   resolveCurrentFunctionSpan,
   type TryGuard,
 } from './exception-flow.js';
+import { freshOnEveryRead } from './fixtures/fresh-node-reads.js';
 
 describe('extractExceptionFacts — TypeScript', () => {
   it('parses TSX without regressing TypeScript angle-bracket assertions', async () => {
@@ -586,5 +588,28 @@ describe('guard helpers', () => {
     expect(guardsCatch(enclosingGuards([outer, inner], 60), 'ValueError')).toBe(true);
     // With only the inner typed guard, ValueError is not caught.
     expect(guardsCatch(enclosingGuards([inner], 60), 'ValueError')).toBe(false);
+  });
+});
+
+describe('extractGoErrorFacts — independent of node object identity', () => {
+  it('gives the same facts when every read of a node returns a new object', async () => {
+    const parser = await getExceptionParser('Go');
+    expect(parser).not.toBeNull();
+    for (const source of [
+      'package p\nfunc f() { if false { defer func(){ panic("x") }() } }',
+      'package p\nfunc f() { defer func(){panic("first")}(); defer func(){panic("second")}(); panic("body") }',
+      'package p\nfunc f() { defer func(){ recover() }(); defer func(){ panic("later") }() }',
+      'package p\nfunc f() { defer func(){ panic("last") }(); defer func(){ recover() }(); panic("body") }',
+      'package p\nfunc f() { defer func(){ panic("deferred") }() }',
+      'package p\nfunc f() { defer func(){ recover() }(); panic("x"); _ = g() }',
+      'package p\nfunc f() error { err := g(); if err != nil { return err }; return nil }',
+      'package p\nfunc f() { x := func(){ panic("inner") }; x() }',
+    ]) {
+      const tree = parser!.parse(source);
+      const fn = tree.rootNode.namedChildren.find(c => c.type === 'function_declaration')!;
+      const stable = extractGoErrorFacts(tree.rootNode, fn.startIndex, fn.endIndex);
+      const fresh = extractGoErrorFacts(freshOnEveryRead(tree.rootNode), fn.startIndex, fn.endIndex);
+      expect(fresh, source).toEqual(stable);
+    }
   });
 });

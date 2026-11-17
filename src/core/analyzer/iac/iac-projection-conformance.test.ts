@@ -1,7 +1,7 @@
 /**
  * Per-ecosystem IaC projection CONFORMANCE sweep (change: add-language-capability-conformance).
  *
- * The `iacProjection` capability is claimed for 12 ecosystems (`IAC_LANGUAGES`). This drives the real
+ * The `iacProjection` capability is claimed for every member of `IAC_LANGUAGES`. This drives the real
  * projector (`buildProjectedIac`) against a minimal realistic fixture for every one of them and
  * asserts the projection genuinely fires — resources/jobs/tasks become graph nodes, and where the
  * ecosystem models a cross-reference, a `references`/`depends_on` edge is produced. A coverage guard
@@ -75,6 +75,10 @@ const CASES: EcoCase[] = [
   {
     eco: 'GitHub Actions', minNodes: 2, expectNames: ['.github/workflows/ci.yml::job.build', '.github/workflows/ci.yml::job.test'], expectEdgeKind: 'depends_on',
     files: [{ path: '.github/workflows/ci.yml', language: 'GitHub Actions', content: `name: ci\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n  test:\n    needs: build\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n` }],
+  },
+  {
+    eco: 'Serverless', minNodes: 3, expectNames: ['function.createOrder', 'function.getOrder'], expectEdgeKind: 'depends_on',
+    files: [{ path: 'serverless.yml', language: 'Serverless', content: `service: orders\nprovider:\n  name: aws\n  runtime: nodejs20.x\nfunctions:\n  createOrder:\n    handler: src/orders.create\n  getOrder:\n    handler: src/orders.get\n` }],
   },
   {
     eco: 'Bicep', minNodes: 2, expectNames: ['sa', 'blob'], expectEdgeKind: 'references',

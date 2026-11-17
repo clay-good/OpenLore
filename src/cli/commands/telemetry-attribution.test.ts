@@ -245,7 +245,9 @@ describe('terminal rendering boundary', () => {
     // eslint-disable-next-line no-control-regex -- proving no terminal controls survive rendering
     expect(rendered).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/u);
     expect(rendered).toContain('orientFORGED');
-    expect(rendered).toContain('[bad]0;titleagent]');
+    // The whole escape sequence goes now, payload included: an OSC string no longer leaves
+    // its `]0;title` behind to weld onto the next word.
+    expect(rendered).toContain('[badagent]');
     log.mockRestore();
   });
 });

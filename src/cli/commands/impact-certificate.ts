@@ -28,7 +28,9 @@ import {
   resolveTrustedHookLauncher,
   renderTrustedHookCommand,
   updateHookFile,
+  insertHookBlock,
 } from '../git-hooks.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 
 const HOOK_MARKER = '# openlore-impact-certificate-hook';
 
@@ -62,8 +64,7 @@ export async function installImpactCertificateHook(rootPath: string): Promise<vo
   let alreadyInstalled = false;
   const result = await updateHookFile(hookPath, (existing) => {
     if (existing?.includes(HOOK_MARKER)) { alreadyInstalled = true; const refreshed = existing.replace(/# openlore-impact-certificate-hook[\s\S]*?# end-openlore-impact-certificate-hook/, hookContent.trimEnd()); return refreshed === existing ? null : refreshed; }
-    const stripped = existing?.trimEnd().replace(/\n*\nexit 0\s*$/, '');
-    return stripped ? stripped + '\n\n' + hookContent : '#!/bin/sh\n\n' + hookContent;
+    return insertHookBlock(existing, hookContent);
   });
   if (result.status === 'unavailable') {
     logger.warning(`Cannot install the impact-certificate hook at ${displayHookPath(hookPath)}: ${result.reason}`);
@@ -193,8 +194,9 @@ export async function runImpactCertificateCli(opts: ImpactCertificateCliOptions)
   }
 
   if ('error' in result) {
-    if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error: result.error }, null, 2) + '\n');
-    else logger.warning(`impact-certificate: ${result.error}`);
+    const error = toCliVocabulary(String(result.error));
+    if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error }, null, 2) + '\n');
+    else logger.warning(`impact-certificate: ${error}`);
     // A caller-supplied unresolvable base is a usage error, not infrastructure failure:
     // fail non-zero for a direct invocation so a typo'd ref can't yield a clean-looking
     // certificate. In hook mode allowBaseFallback is on, so this branch is unreachable there.

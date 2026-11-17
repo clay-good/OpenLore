@@ -35,6 +35,7 @@ import {
 } from '../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from './call-graph.js';
 import type { DuplicateDetectionResult } from './duplicate-detector.js';
+import { isProjectedLanguage } from './projected-language.js';
 
 // ============================================================================
 // THRESHOLDS
@@ -282,8 +283,20 @@ export function analyzeForRefactoring(
   mappings?: MappingEntry[],
   duplicates?: DuplicateDetectionResult
 ): RefactorReport {
-  const nodes = callGraph.nodes.filter(n => !n.isExternal);
-  const edges = callGraph.edges;
+  // Every signal in this report is a REFACTORING TARGET in hand-authored code. A projected
+  // declaration is not refactorable from here, and the relations between declarations are not
+  // call structure: two JSON schemas that name each other are an ordinary recursive type, not a
+  // dependency cycle to go and break — and this report is what the generated architecture
+  // document prints.
+  const nodes = callGraph.nodes.filter(n => !n.isExternal && !isProjectedLanguage(n.language));
+  // Only calls. A `tested_by` edge (production fn → test) is the derived reverse of a test's call,
+  // and an `overrides` edge (base → override) is dispatch, not a call: counting them closed a false
+  // cycle between every function and each test that calls it, and between every override that
+  // calls `super.m()` and its base. A `cha-name-only` edge is the resolver's deliberate
+  // over-approximation — every same-named method — so a "cycle" through one is a name collision,
+  // not recursion to refactor (six same-named `ensureCountsAreIntegers` delegates, one cycle).
+  const edges = callGraph.edges.filter(e =>
+    (e.kind === undefined || e.kind === 'calls') && e.synthesizedBy !== 'cha-name-only');
 
   // Build requirement reverse index: functionKey → requirement names
   // Key format: "name@filePath" (partial match — file suffix match)

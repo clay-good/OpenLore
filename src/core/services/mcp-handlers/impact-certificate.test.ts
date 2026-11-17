@@ -251,7 +251,7 @@ describe('contract', () => {
       surfaces: [{ name: 'client', severity: 'critical', resolvedSymbols: 3, unresolvedMembers: [] }],
       newlyOpenedPaths: [{ surface: 'client', surfaceSeverity: 'critical', openingEdge: { from: 'A', to: 'B' }, path: ['A', 'B', 'send'], pathIds: ['a::A', 'b::B', 'b::send'], reaches: 'send' }],
       impact: { highestRiskLevel: 'high', maxAffectedCallers: 4, hubsTouched: [], layersCrossed: [], governingDecisions: [], governingDecisionProvenance: [], topSymbols: [], analyzedSymbolCount: 1 },
-      tests: { count: 2, toRun: [], soundness: {} },
+      tests: { count: 2, toRun: [], files: [], soundness: {} },
       specs: { willGoStale: 1, items: [] },
       lease: { anchors: [{ nodeId: 'src/a.ts::A', filePath: 'src/a.ts', contentHash: 'abc' }] },
       findings: [], highestSurfaceSeverity: 'critical', posture: 'advisory', caveats: [], headline: 'x',
@@ -268,7 +268,7 @@ describe('contract', () => {
       expect(() => assertConclusionShape('change_impact_certificate', result)).not.toThrow();
       expect(result).toHaveProperty('error'); // no analysis → unavailable, advisory
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });
@@ -310,7 +310,7 @@ describe('certificate decay (freshness lease)', () => {
     root = mkdtempSync(join(tmpdir(), 'impactcert-'));
     mkdirSync(join(root, 'src'), { recursive: true });
   });
-  afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+  afterEach(() => { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 
   it('a FILE-level anchor (as built for a new/unindexed file) decays when the file changes', () => {
     // New files have no indexed symbol, so buildLeaseAnchors anchors them at file level.
@@ -411,7 +411,7 @@ describe('certificate decay (freshness lease)', () => {
       expect(stale).toHaveLength(1);
       expect(stale[0].subject).toBe('app:add-x');
     } finally {
-      rmSync(scratch, { recursive: true, force: true });
+      rmSync(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -462,7 +462,7 @@ describe('changed-file plumbing (rename + untracked)', () => {
     git('add', '-A');
     git('commit', '-q', '-m', 'base');
   });
-  afterEach(() => { rmSync(repo, { recursive: true, force: true }); });
+  afterEach(() => { rmSync(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 
   it('a pure rename (calls unchanged) opens NO new path — old content read from oldPath', async () => {
     git('mv', 'src/caller.ts', 'src/caller_renamed.ts');

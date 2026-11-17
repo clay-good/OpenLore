@@ -21,11 +21,14 @@
  *   Elixir/Dart:  foo_test.exs, foo_test.dart
  *   Lua:          spec/unit/foo_spec.lua
  *   Swift:        FooTest.swift, FooTests.swift, Tests/AppTests/Foo.swift
- *   Rust/Bash:    tests/integration.rs, tests/unit/helper.sh
+ *   Rust/Bash:    tests/integration.rs, src/auth/tests.rs, foo_test.rs, tests/unit/helper.sh
  *
- * This remains a path-only predicate. Content-level conventions such as Rust
- * inline `#[cfg(test)]` modules are intentionally outside its observable boundary.
- * (change: fix-test-detection-language-parity)
+ * This remains a path-only predicate. Rust's inline `#[cfg(test)] mod tests` — the language's
+ * DOMINANT convention — is outside what any path can show, so it is detected separately from the
+ * attribute on each test function (`rust-test-attributes.ts`) and applied beside this predicate.
+ * A caller that consults this predicate alone must not describe its answer as complete for Rust;
+ * {@link TEST_DETECTION_CAVEATS} names what it cannot see.
+ * (change: fix-test-detection-language-parity, fix-rust-test-detection)
  */
 interface TestPathRule {
   languages: readonly string[];
@@ -36,7 +39,10 @@ const TEST_PATH_RULES: readonly TestPathRule[] = [
   { languages: ['TypeScript', 'JavaScript'], pattern: /\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/ },
   { languages: ['TypeScript', 'JavaScript'], pattern: /(^|\/)__tests__\// },
   { languages: ['TypeScript', 'JavaScript', 'Python'], pattern: /(^|\/)test_[^/]+\.(ts|js|py)$/ },
-  { languages: ['Python', 'Go', 'C++', 'C', 'Ruby', 'Elixir', 'Dart'], pattern: /[^/]+_test\.(py|go|cpp|cc|cxx|c|rb|exs|dart)$/ },
+  { languages: ['Python', 'Go', 'C++', 'C', 'Ruby', 'Elixir', 'Dart', 'Rust'], pattern: /[^/]+_test\.(py|go|cpp|cc|cxx|c|rb|exs|dart|rs)$/ },
+  // Rust's sibling-file convention: `src/<module>/tests.rs`, declared from the module with
+  // `#[cfg(test)] mod tests;`. A directory rule alone missed it (change: fix-rust-test-detection).
+  { languages: ['Rust'], pattern: /(^|\/)tests\.rs$/ },
   { languages: ['Ruby', 'Lua'], pattern: /[^/]+_spec\.(rb|lua)$/ },
   { languages: ['Ruby'], pattern: /(^|\/)spec\/.*\.rb$/ },
   { languages: ['Python', 'TypeScript', 'JavaScript', 'Ruby', 'PHP', 'C++', 'C', 'Rust', 'Bash'], pattern: /(^|\/)tests?\/.*\.(py|ts|tsx|js|jsx|mjs|cjs|mts|cts|rb|php|cpp|cc|cxx|c|rs|sh)$/ },
@@ -70,6 +76,22 @@ export type TestDetectionDecision = 'supported' | 'unsupported';
 export const TEST_DETECTION_DECISIONS: ReadonlyMap<string, TestDetectionDecision> = new Map([
   ...[...TEST_DETECTION_LANGUAGES].map(language => [language, 'supported'] as const),
   ...[...TEST_DETECTION_UNSUPPORTED_LANGUAGES].map(language => [language, 'unsupported'] as const),
+]);
+
+/**
+ * What a path-only decision cannot see for a language, in the words a disclosure can use.
+ *
+ * `TEST_DETECTION_DECISIONS` reports a language `supported` as soon as ONE path convention
+ * exists, so Rust read as fully covered while 79% of a real workspace's tests — every inline
+ * `#[cfg(test)]` module — were invisible. A consumer that reports a coverage gap must say this
+ * rather than imply the path rules are the whole story.
+ */
+export const TEST_DETECTION_CAVEATS: ReadonlyMap<string, string> = new Map([
+  ['Rust', 'a Rust test in an inline `#[cfg(test)] mod` is recognized from its `#[test]` '
+    + 'attribute, not its path, and an unattributed helper inside such a module is counted as '
+    + 'production code. A call made INSIDE a macro body — `assert_eq!(sha256_hex(x), y)`, the '
+    + 'usual shape of a Rust assertion — is not a call-graph edge, so code exercised only '
+    + 'through an assertion macro still reports no reaching test'],
 ]);
 
 export function isTestFile(filePath: string): boolean {

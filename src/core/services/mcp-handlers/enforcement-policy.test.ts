@@ -21,21 +21,21 @@ const invalidSeverity: GovernanceFinding = { code: 'x', severity: 'warn', source
 void invalidSeverity;
 
 const CORPUS_DEFAULT_CLASSES = {
-  'corpus-reference-unresolved': 'blocking',
-  'corpus-reference-ambiguous': 'blocking',
-  'corpus-self-reference': 'blocking',
-  'corpus-duplicate-identifier': 'blocking',
-  'corpus-edge-unsupported': 'blocking',
-  'corpus-target-type-mismatch': 'blocking',
+  'corpus-reference-unresolved': 'advisory',
+  'corpus-reference-ambiguous': 'advisory',
+  'corpus-self-reference': 'advisory',
+  'corpus-duplicate-identifier': 'advisory',
+  'corpus-edge-unsupported': 'advisory',
+  'corpus-target-type-mismatch': 'advisory',
   'corpus-target-retired': 'advisory',
-  'corpus-supersession-cycle': 'blocking',
+  'corpus-supersession-cycle': 'advisory',
   'corpus-anchor-target-missing': 'advisory',
   'corpus-reference-undeclared': 'advisory',
 } as const;
 
 describe('applyPolicyPrecedence — pure precedence core', () => {
-  // Spec: off > blocking > advisory > source default. Exercises the "source default
-  // is blocking" branch the registry never uses, proving precedence independently.
+  // Spec: off > blocking > advisory > source default. Every registry default is advisory; these
+  // cases pass a `blocking` source default directly to prove the precedence contract on its own.
   it('off wins over a blocking source default (silences a would-block finding)', () => {
     expect(applyPolicyPrecedence('off', 'blocking')).toBe('off');
   });
@@ -83,6 +83,12 @@ describe('FINDING_CODE_REGISTRY', () => {
       expect(spec.description, code).not.toBe('');
       if (!(code in CORPUS_DEFAULT_CLASSES)) expect(spec.defaultClass, code).toBe('advisory');
     }
+  });
+  it('no registry entry defaults to blocking or frozen (only enforcement.policy can block)', () => {
+    const blockingByDefault = Object.entries(FINDING_CODE_REGISTRY)
+      .filter(([, spec]) => spec.defaultClass === 'blocking' || spec.defaultClass === 'frozen')
+      .map(([code]) => code);
+    expect(blockingByDefault).toEqual([]);
   });
   it('registers the stale-decision-reference code and the lowered surface codes', () => {
     for (const code of ['stale-decision-reference', 'surface-info', 'surface-warn', 'surface-critical',

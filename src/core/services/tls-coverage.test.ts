@@ -40,18 +40,20 @@ const SRC = join(REPO_ROOT, 'src');
  * opt in, which is a behaviour change in its own right.
  */
 const EXEMPT: { file: string; line: number; why: string }[] = [
+  { file: 'src/core/configuration/inspect.ts', line: 514, why: 'validated loopback http:// daemon descriptor; observational health only' },
+  { file: 'src/core/configuration/observe.ts', line: 40, why: 'validated loopback http:// daemon descriptor; observational policy health only' },
   { file: 'src/core/services/serve-client.ts', line: 97, why: 'loopback http:// health probe' },
   { file: 'src/core/services/serve-client.ts', line: 194, why: 'loopback http:// daemon call' },
-  { file: 'src/cli/commands/serve.ts', line: 336, why: 'loopback http:// health and compatibility probe' },
-  { file: 'src/cli/commands/serve.ts', line: 408, why: 'loopback http:// authenticated shutdown request' },
-  { file: 'src/cli/commands/serve-descriptor.ts', line: 224, why: 'loopback http:// legacy liveness probe' },
+  { file: 'src/cli/commands/serve.ts', line: 348, why: 'loopback http:// health and compatibility probe' },
+  { file: 'src/cli/commands/serve.ts', line: 420, why: 'loopback http:// authenticated shutdown request' },
+  { file: 'src/cli/commands/serve-descriptor.ts', line: 228, why: 'loopback http:// legacy liveness probe' },
   { file: 'src/api/health.ts', line: 115, why: 'loopback http:// watcher-state probe of an announced daemon' },
-  { file: 'src/pi/extension.ts', line: 673, why: 'loopback http:// health probe' },
-  { file: 'src/pi/extension.ts', line: 866, why: 'loopback http:// daemon call' },
-  { file: 'src/pi/extension.ts', line: 2040, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 776, why: 'loopback http:// health probe' },
+  { file: 'src/pi/extension.ts', line: 1116, why: 'loopback http:// daemon call' },
+  { file: 'src/pi/extension.ts', line: 2572, why: 'loopback http:// health probe' },
   {
     file: 'src/pi/extension.ts',
-    line: 260,
+    line: 345,
     why: 'pre-existing: the Pi host never opts in, so skipSslVerify is not honoured there at all',
   },
 ];

@@ -26,15 +26,15 @@ Edge direction is **dependent → dependency**. So for any resource node:
 
 `FunctionNode.language` carries the ecosystem tag (`Terraform`, `Kubernetes`,
 `Helm`, `CloudFormation`, `Ansible`, `Pulumi`, `CDK`, `CDKTF`, `Dockerfile`,
-`Docker Compose`, `GitHub Actions`, `Bicep`); `className` carries the resource
-type, so clustering and architecture overviews group by type.
+`Docker Compose`, `GitHub Actions`, `Bicep`, `Serverless`); `className` carries
+the resource type, so clustering and architecture overviews group by type.
 
 ## What is extracted, per ecosystem
 
 This is **static** analysis only. OpenLore never runs `terraform plan`, renders
 Helm, executes Ansible, or calls a cloud API. No external CLI is required.
 
-### Terraform / HCL  (`*.tf`, `*.tfvars`, `*.tf.json`)
+### Terraform / HCL  (`*.tf`, `*.tfvars`, `*.tf.json`; OpenTofu `*.tofu`, `*.tofu.json`)
 - **Nodes:** `resource`, `data`, `module`, `variable`, `output`, `locals` (each local), `provider` (external).
 - **Edges:** interpolation and bare references (`type.name.attr`, `var.x`, `local.y`, `module.m.out`, `data.t.n.attr`) and explicit `depends_on`. References to custom resource types without an underscore resolve too — candidates that match no declared resource are dropped, never invented.
 - **Modules:** local `source = "./…"` links the module to the resources declared under that directory; registry/git sources become external module nodes.
@@ -113,9 +113,88 @@ change this?".
 - **File-scoped resolution:** Bicep resolves bare identifiers against a flat **per-file** symbol table (no `var.`/`type.name` prefixes), so the same name (`location`, `vnet`) recurs across files. Addresses are scoped by file (`<file>::<symbol>`) and references resolve **within the declaring file only** — two files each declaring `param location` never cross-link. The single cross-file edge is the local-`module` link above.
 - **Notes:** parsed with a tolerant, hand-rolled scanner (no Bicep compiler, no native dependency). Static only — no `bicep build`, no ARM emit, no Azure/registry access. A multi-line ternary value (`= cond\n ? a\n : b`) resolves only the first line's symbols; the others are dropped rather than guessed.
 
+### Serverless Framework  (`serverless.yml`, `.yaml`, `.json`)
+- **Nodes:** the service, and one resource per `functions.<name>` grouped under it. The file name is the signal; a `service:` key, or `provider:` + `functions:`, corroborates it, so a same-named file is not misclassified.
+- **Edges:** each function → its service (`depends_on`).
+- **Handlers:** `functions.<name>.handler` binds like a Lambda's (below), with the function's own `runtime` overriding the provider's. A function that runs a container `image`, declares no handler, or builds its handler from a `${...}` variable is a disclosed unresolved binding.
+- **Notes:** static only — no plugin execution, no `${...}` resolution, no `sls package`. A manifest's own `resources.Resources` block (CloudFormation written inside a Serverless file) is **not read at all** — dispatch is by language tag, so the CloudFormation extractor never sees a file tagged `Serverless`. Those resources are absent from the graph.
+
+## The code a function resource runs
+
+A Lambda names its code as `<module>.<export>`. A Terraform `aws_lambda_function` with a literal
+top-level `handler`, a CloudFormation/SAM `AWS::Lambda::Function` / `AWS::Serverless::Function`
+with a string `Handler`, or a Serverless `functions.<name>.handler`, gets a `deploys_symbol` edge
+to the one indexed top-level function it names: `src/orders.handler` → `handler` in `src/orders.ts`; `app.lambda_handler` with
+`CodeUri: functions/` → `lambda_handler` in `functions/app.py` (relative to the template).
+
+- **Where the module is looked for:** under the code location only when one is known (SAM
+  `CodeUri`, Terraform `source_dir`); else beside a CloudFormation template; else, for Terraform,
+  at the repository root or beside the `.tf` file, and only for a module path with a directory in it
+  (a bare `index.handler` names a file inside a package built elsewhere). SAM `Globals.Function`
+  applies to `AWS::Serverless::Function` only.
+- **Which files:** the runtime picks them (`nodejs*` → TypeScript/JavaScript, `python*` → `.py`, a
+  Python module path uses `/`); other runtimes (Java, Go, .NET, custom) are not bound.
+- **Built output:** a handler that names the built file (`dist/orders.handler` — the common case
+  once a project compiles) reaches its source through a mapping the **project itself declares**:
+  TypeScript's `compilerOptions.outDir` with `rootDir`, or a package manifest's `main` paired with
+  `source`. Read from the **repository root's** `tsconfig.json` and `package.json` only, and an
+  `extends` chain is not followed — so a monorepo whose mapping lives in `packages/api/tsconfig.json`,
+  or a root config that inherits `rootDir`, has no mapping here, and the unresolved reason says so. A path under a declared `outDir` the project maps to no input stays unresolved and says
+  so: an output path says nothing about where its input lives, and a same-basename file elsewhere
+  would be a similarity match, which this substrate does not make.
+- **Exactly one:** a module that matches more than one file, or a name with no single top-level
+  function in it (class methods do not count), is not bound.
+- `find_dead_code` counts a bound function as deployed (live): `rootKinds.deployed`.
+  `analyze_impact` on the function reaches the resource.
+- Everything else is listed in `unresolvedDeployBindings` (in `find_dead_code`) with the reason,
+  because the code it runs can appear dead: an expression or intrinsic handler, inline code, code in
+  S3, a build-output path (`dist/…`) with no indexed source, an unsupported runtime, an ambiguous
+  module, a handler passed to a Terraform module. Container images are not bound.
+
+## Environment variables set by infrastructure
+
+`analyze_env_impact` names the files that set a variable (`declaredBy`), and `blast_radius` lists
+the files that still set a variable the diff stopped reading (`envDeclarations`). Each site records
+the key, the resource, the file and line, and whether a value is written there literally — never
+the value itself. The scan runs at query time over the working tree.
+
+On the code side, a variable's name is read from the literal at the read site. One idiom hides it —
+the read is in a helper and the name is passed in:
+
+```go
+mustMapEnv(&svc.productCatalogSvcAddr, "PRODUCT_CATALOG_SERVICE_ADDR")   // the name lives here
+func mustMapEnv(target *string, envKey string) { v := os.Getenv(envKey); … }   // the read lives here
+```
+
+That name is followed **exactly one hop**, and only when the binding is provable from literal text:
+the helper is a free function in the **same file**, exactly one parameter position feeds the read,
+that parameter is the whole key with no concatenation, reassignment or shadowing, and the call site
+passes a plain string literal. The read site is reported at the **call site**, where the variable is
+named, with the helper disclosed in `via`. Everything else — a variable argument, a template string,
+a computed key, a parameter with a default, a method, a same-named helper in another file, a helper
+behind another helper — is **not** followed; those reads are counted in `boundaries` with their file,
+line, key expression and the reason each was refused, so the read sites stay a disclosed lower bound
+rather than a silent one. Call sites followed per helper are capped, and the cap is disclosed.
+
+| Ecosystem | Where a variable is set |
+|-----------|-------------------------|
+| Kubernetes | a container's `env` (any `containers`, `initContainers`, `ephemeralContainers` list) |
+| Docker Compose | a service's `environment` (map or `KEY=value` list) |
+| Dockerfile | `ENV KEY=value` and `ENV KEY value` |
+| Terraform / OpenTofu | `environment { variables = { … } }`; the kubernetes provider's `env { name = … }` |
+| Serverless | `provider.environment` (service-wide) and each `functions.<name>.environment` |
+| CloudFormation / SAM | `Environment.Variables` on a resource and in `Globals.Function`; ECS `ContainerDefinitions[].Environment` |
+| GitHub Actions | `env` on the workflow, a job, a job container or service, and a step |
+
+A source whose keys cannot be listed — Kubernetes `envFrom`, compose `env_file`, or an environment
+map built by an expression — is reported in `opaqueEnvSources`: the variable may be set there.
+Helm templates are not rendered, so they are skipped and disclosed. A variable no file sets is
+`undeclared-in-corpus`, which is not "unset": runtime injection, secret stores, and CI variables
+defined outside the repository are not visible.
+
 ## Discovery & disambiguation
 
-`.tf`/`.tfvars`/`.tf.json` map to Terraform by extension; `.bicep` maps to Bicep
+`.tf`/`.tfvars`/`.tf.json` and OpenTofu's `.tofu`/`.tofu.json` map to Terraform by extension; `.bicep` maps to Bicep
 by extension (both via `detectLanguage`). `.yaml`/`.yml`/`.json` are ambiguous, so
 they route through a small pure function, `classifyYaml(path, content)`:
 
@@ -125,6 +204,7 @@ they route through a small pure function, `classifyYaml(path, content)`:
 - top-level `hosts:`/playbook list, or a file under `roles/*/{tasks,handlers,…}/` → **Ansible**
 - a `.github/workflows/*.y?ml` with `on:` + `jobs:`, or an `action.y?ml` with `runs:` → **GitHub Actions**
 - a `docker-compose*.y?ml` / `compose*.y?ml` filename with a top-level `services:` key → **Docker Compose**
+- a `serverless.yml` / `.yaml` / `.json` filename with a `service:` key, or `provider:` + `functions:` (either spelling, YAML or JSON) → **Serverless**
 - otherwise → `null` (left as generic config — app config and other CI systems are never misclassified as IaC)
 
 Dockerfiles have no extension to switch on, so they are recognized by name in the

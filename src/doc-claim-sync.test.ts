@@ -144,7 +144,6 @@ describe('doc-claim sync: package metadata matches the recorded north star', () 
   const pkg = JSON.parse(read('package.json')) as {
     description: string;
     keywords: string[];
-    openspec: { summary: string };
   };
 
   it('the package description is the north-star anchor', () => {
@@ -160,13 +159,6 @@ describe('doc-claim sync: package metadata matches the recorded north star', () 
         `package.json keyword "${retired}" restates the retired "reverse-engineer specs from code" product, contradicting the description and north star (c6d1ad07)`,
       ).toBe(false);
     }
-  });
-
-  it('the openspec.summary describes the substrate positioning, not the retired product', () => {
-    expect(
-      /reverse-engineer/i.test(pkg.openspec.summary),
-      `package.json openspec.summary still restates the retired "reverse-engineer specs" framing: "${pkg.openspec.summary}"`,
-    ).toBe(false);
   });
 });
 

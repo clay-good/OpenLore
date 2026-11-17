@@ -18,7 +18,22 @@
  * non-blocking git hook and opt-in blocking live in `cli/commands/blast-radius.ts`.
  */
 
+import type { ChangedFile } from '../../../types/index.js';
+import { guardDiff, type DiffGuardResult, type GeneratedFileFact } from '../generated-file-guard.js';
+import {
+  checkPhantomReferences, phantomReferenceFacts,
+  type PhantomReferenceFact, type PhantomReferenceResult,
+} from '../phantom-references.js';
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable } from './utils.js';
+import { loadMemoryStore } from '../../decisions/memory-store.js';
+import { loadDecisionStore } from '../../decisions/store.js';
+import { buildRetirementGraph } from './stale-decision-reference.js';
+import { makeFreshnessView } from '../../decisions/anchor-adapter.js';
+import { loadTraversalIndex, messageFreeTraversalIndexFor } from './traversal.js';
+import {
+  hasPushableMemory, hasSpecDomainTrigger, injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW,
+  type InjectedMemory, type StaleTriggeredMemory,
+} from './memory-triggers.js';
 import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
 import {
   carriedCaveat,
@@ -31,7 +46,7 @@ import {
 } from '../symbol-changed-set.js';
 import { handleAnalyzeImpact } from './graph.js';
 import { handleCheckSpecDrift } from './analysis.js';
-import { assembleBoundary, computeStaleness, crossingsFromBasis, type EdgeBasis } from './confidence-boundary.js';
+import { assembleBoundary, computeStaleness, crossingsFromBasis, reconcileCompleteness, type EdgeBasis } from './confidence-boundary.js';
 
 /**
  * A basis's per-rule synthesized-edge counts, or undefined when none. A rule name that is not
@@ -63,7 +78,7 @@ import {
 import type { ConfidenceBoundary } from './confidence-boundary.js';
 import type { SerializedCallGraph } from '../../analyzer/call-graph.js';
 import type { DriftIssue, DriftResult } from '../../../types/index.js';
-import { reviewedFileContentProvenance, type ServedContentProvenance } from '../served-content.js';
+import { specCorpusContentProvenance, type ServedContentProvenance } from '../served-content.js';
 import { withIndexStaleness } from './index-staleness.js';
 
 /** How many of the highest-fan-in changed symbols to run impact analysis on.
@@ -71,6 +86,8 @@ import { withIndexStaleness } from './index-staleness.js';
  * bounding the work keeps a pre-commit hook fast. Truncation is reported, never
  * silent (mcp-quality: no-silent-truncation). */
 const DEFAULT_MAX_SYMBOLS = 12;
+/** Test files listed in `tests.files`; more are counted in `capped`, never dropped silently. */
+const MAX_TEST_FILES = 200;
 
 export interface BlastRadiusInput {
   directory: string;
@@ -166,6 +183,11 @@ export interface BlastRadiusBriefing {
   tests: {
     count: number;
     toRun: Array<{ test: string; file: string; confidence: string }>;
+    /**
+     * Every test file the selection names, most confident first: what to pass to the test runner.
+     * `toRun` lists single tests and is cut at 15; this list is cut only at {@link MAX_TEST_FILES}.
+     */
+    files: string[];
     soundness: unknown;
     /** Unmodified reachability-cap receipt from select_tests. */
     truncatedAtDepth?: number;
@@ -211,6 +233,47 @@ export interface BlastRadiusBriefing {
    * fix-git-derived-signal-honesty; BriefingCapabilityClaimsAreCurrent)
    */
   federation: { evaluated: false; note: string } | ({ evaluated: true } & Record<string, unknown>);
+  /**
+   * Notes whose trigger matches this diff, pushed with their receipts; orphaned ones are listed
+   * apart, never as content (change: add-memory-trigger-predicates). Absent when none fired.
+   */
+  injectedMemories?: InjectedMemory[];
+  staleTriggeredMemories?: StaleTriggeredMemory[];
+  injectedMemoriesNote?: string;
+  /**
+   * Changed files that are generated or vendored, with the rule that matched, their literal source,
+   * and regenerate command (change: add-generated-file-guard). Absent when none are.
+   */
+  generated?: GeneratedFileFact[];
+  /**
+   * References the diff adds that resolve to nothing — a missing module, a name the target does not
+   * export, an undeclared or unpinned package (change: add-phantom-reference-findings). Present
+   * whenever the check RAN, with `referencesChecked` so that `count: 0` reads as "checked, all
+   * resolved" and not as "not checked"; absent only when the check could not run (then a caveat
+   * says why).
+   */
+  phantomReferences?: {
+    count: number;
+    unresolved: PhantomReferenceFact[];
+    notAssessed: number;
+    filesChecked: number;
+    referencesChecked: number;
+  };
+  /** OpenAPI operations served by routes in the changed files (change: add-contract-graph-projection). */
+  contracts?: import('../contract/contract-briefing.js').ContractBriefing;
+  /**
+   * The inverse of `contracts`: the diff changed a SPECIFICATION, so this names the elements it
+   * declares and the code bound to each (change: add-contract-graph-projection).
+   */
+  changedContracts?: import('../contract/contract-briefing.js').ChangedContractBriefing;
+  /**
+   * Env vars the diff stops reading anywhere, each with the infrastructure sites that still set the
+   * old name (change: add-iac-code-binding). Absent when the diff removes no env-var read.
+   */
+  envDeclarations?: {
+    removedReads: string[];
+    stillSet: Array<{ name: string; sites: Array<{ ecosystem: string; resource: string; file: string; line: number }> }>;
+  };
   /** Present only when the requested base did not resolve; names both refs (fix-cli-conclusion-honesty). */
   baseRefFallback?: { requested: string; resolved: string };
   /** Index-staleness disclosure: a risk headline computed over a graph that predates the
@@ -243,6 +306,11 @@ const DECISION_KINDS = new Set<DriftIssue['kind']>(['adr-gap', 'adr-orphaned']);
  */
 export async function computeBlastRadius(
   input: BlastRadiusInput,
+  /** Internal: receives the composed diff checks' results, so verify_change reuses them. */
+  hooks: {
+    guard?: (guard: DiffGuardResult) => void;
+    references?: (refs: PhantomReferenceResult) => void;
+  } = {},
 ): Promise<BlastRadiusBriefing | { error: string }> {
   const absDir = await validateDirectory(input.directory);
   const ctx = await readCachedContext(absDir);
@@ -257,6 +325,7 @@ export async function computeBlastRadius(
   // ── 1. Resolve the diff → changed files → seed production symbols ───────────
   let changedFiles: string[];
   let diffEntries: DiffEntry[];
+  let allDiffEntries: ChangedFile[];
   // Resolve-or-disclose through the one shared helper (fix-cli-conclusion-honesty):
   // an explicit ref that git can't resolve falls back (main → master → HEAD~1) and is
   // disclosed, so the advisory briefing never misrepresents the base it diffed against.
@@ -267,9 +336,12 @@ export async function computeBlastRadius(
     const base = await resolveBaseRefDisclosed(absDir, baseRef);
     resolvedBaseRef = base.resolved;
     baseFellBack = base.fellBack;
-    const diff = await getChangedFiles({ rootPath: absDir, baseRef: resolvedBaseRef, includeUnstaged: true });
-    changedFiles = diff.files.map(f => f.path);
-    diffEntries = diff.files;
+    // Lockfiles are read too (for the generated-file guard), then left out of the code diff as before.
+    const { isSkippableFile } = await import('../../drift/git-diff.js');
+    const diff = await getChangedFiles({ rootPath: absDir, baseRef: resolvedBaseRef, includeUnstaged: true, includeSkippable: true });
+    allDiffEntries = diff.files;
+    diffEntries = diff.files.filter(f => !isSkippableFile(f.path));
+    changedFiles = diffEntries.map(f => f.path);
   } catch (err) {
     return { error: `git diff failed (base ${baseRef}): ${err instanceof Error ? err.message : String(err)}` };
   }
@@ -343,6 +415,7 @@ export async function computeBlastRadius(
   // ── 3. Tests to run (reuse select_tests over the same diff) ─────────────────
   let testCount = 0;
   let testToRun: Array<{ test: string; file: string; confidence: string }> = [];
+  let testFiles: string[] = [];
   let testSoundness: unknown;
   let testsTruncatedAtDepth: number | undefined;
   let testsUnavailable: string | null = null;
@@ -365,6 +438,8 @@ export async function computeBlastRadius(
     const tests = sel.selectedTests ?? [];
     testCount = tests.length;
     testToRun = tests.slice(0, 15);
+    // select_tests ranks by confidence, then file: the first sighting of a file is its best rank.
+    testFiles = [...new Set(tests.map(t => t.file))];
     testSoundness = sel.soundness;
     testsTruncatedAtDepth = sel.truncatedAtDepth;
     federationResult = sel.federation;
@@ -385,7 +460,7 @@ export async function computeBlastRadius(
   const decisionItems: Array<{ kind: string; message: string; domain: string | null; provenance: ServedContentProvenance }> = [];
   const memoryOrphanFindings: Array<{ id: string; filePath: string; message: string }> = [];
   const decisionOrphanFindings: Array<{ id: string; filePath: string; message: string }> = [];
-  const specProvenance = await reviewedFileContentProvenance(absDir, 'openspec');
+  const specProvenance = await specCorpusContentProvenance(absDir);
   let driftUnavailable: string | null = null;
   let driftFilesOmitted = 0;
   let driftRaw: unknown;
@@ -417,11 +492,78 @@ export async function computeBlastRadius(
   const memDrifted = memWillDrift.filter(m => m.kind === 'memory-drifted').length;
   const decisionsOrphaned = decisionItems.filter(d => d.kind === 'adr-orphaned').length;
 
+  // ── 4b. Triggered memories (change: add-memory-trigger-predicates) ──────────
+  // The touched set is the diff: its files, its changed symbols, and the spec domains those files
+  // map to. Pinned notes belong to orient's briefing, not to a diff review.
+  const memoryInjection = await triggeredMemoriesForDiff(absDir, ctx, cg, changedFiles, seeds.filter(s => !narrowed.unchangedSeedIds?.has(s.id)));
+
+  // ── 4c. Generated files in the diff (change: add-generated-file-guard) ──────
+  // Best-effort: a failed classification is a caveat, never a failed briefing.
+  let generated: GeneratedFileFact[] = [];
+  let generatedNote: string | null = null;
+  try {
+    // Its own diff read with lockfiles kept: the main diff above skips them by design.
+    const guard = await guardDiff(absDir, resolvedBaseRef, allDiffEntries);
+    hooks.guard?.(guard);
+    generated = guard.facts;
+    if (guard.boundaries.length) generatedNote = guard.boundaries.join(' ');
+  } catch (err) {
+    generatedNote = `Generated files could not be classified: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  // ── 4d. References the diff adds (change: add-phantom-reference-findings) ───
+  // Best-effort like every composed check: a failure is a caveat, never a failed briefing.
+  let references: PhantomReferenceResult | null = null;
+  let referencesNote: string | null = null;
+  try {
+    references = await checkPhantomReferences(
+      absDir, resolvedBaseRef, allDiffEntries,
+      // The corpus: what the index knows is a file, so a candidate suggestion names a real path.
+      new Set((cg.nodes ?? []).map(n => n.filePath).filter((f): f is string => typeof f === 'string')),
+    );
+    hooks.references?.(references);
+    if (references.boundaries.length) referencesNote = [...new Set(references.boundaries)].join(' ');
+  } catch (err) {
+    referencesNote = `Added references could not be checked: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  // ── 4e. Env vars the diff stops reading, still set by infrastructure (change: add-iac-code-binding) ──
+  let envRenames: import('../env-rename-check.js').EnvRenameCheck | null = null;
+  let envNote: string | null = null;
+  try {
+    const { checkEnvRenames } = await import('../env-rename-check.js');
+    envRenames = await checkEnvRenames(absDir, resolvedBaseRef, diffEntries);
+    if (envRenames.boundaries.length) envNote = [...new Set(envRenames.boundaries)].join(' ');
+  } catch (err) {
+    envNote = `Env-var reads the diff removed could not be checked: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  // ── 4f. OpenAPI operations served by routes in the changed files (change: add-contract-graph-projection) ──
+  let contracts: import('../contract/contract-briefing.js').ContractBriefing | undefined;
+  let changedContracts: import('../contract/contract-briefing.js').ChangedContractBriefing | undefined;
+  try {
+    const { getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
+    const prefix = (await getRepoPrefix(absDir)) ?? '';
+    const files = diffEntries.filter(f => f.status !== 'deleted').map(f => reframeRepoPath(f.path, prefix)).filter((f): f is string => f !== null);
+    const { contractsForFiles, changedContractsForSpecFiles } = await import('../contract/contract-briefing.js');
+    contracts = await contractsForFiles(absDir, files);
+    // The inverse question. A specification is not a call-graph node and declares no handler of
+    // its own, so a diff that only edits `openapi.yaml` produced an empty briefing: no impacted
+    // symbols, no tests, nothing. These are the operations it declares and the code bound to
+    // each — who the change affects.
+    changedContracts = await changedContractsForSpecFiles(absDir, files);
+  } catch { /* additive: the briefing never fails over it */ }
+
   // ── 5. Compose the conclusion-shaped briefing ───────────────────────────────
-  const caveats: string[] = [
+  // The first two are STANDING methodology, true of every blast radius. Everything pushed
+  // after them is a live disclosure about THIS answer's coverage, and only those drive
+  // `confidenceBoundary.complete` (change: never-claim-complete-beside-a-refusal) — a
+  // standing caveat would pin `complete` to false forever and so say nothing.
+  const STANDING_CAVEATS = [
     'Blast radius is an over-approximate structural prioritizer, not a behavioral test outcome.',
     'Impact and test selection can under-select through dynamic dispatch, reflection, and DI.',
   ];
+  const caveats: string[] = [...STANDING_CAVEATS];
   if (baseFellBack) {
     caveats.push(`Requested base ref "${baseRef}" did not resolve; diffed against "${resolvedBaseRef}" instead (main → master → HEAD~1 fallback).`);
   }
@@ -443,6 +585,10 @@ export async function computeBlastRadius(
   if (driftUnavailable) {
     caveats.push(`Spec/memory drift could not be evaluated: ${driftUnavailable}`);
   }
+  if (generatedNote) caveats.push(generatedNote);
+  if (referencesNote) caveats.push(referencesNote);
+  // A failed check, or a limit it hit, is always said; it never reads as a clean check.
+  if (envNote) caveats.push(envNote);
   if (driftFilesOmitted > 0) {
     caveats.push(`Spec/memory drift omitted ${driftFilesOmitted} changed file${driftFilesOmitted === 1 ? '' : 's'} after reaching its analysis limit; absence of a finding does not cover those files.`);
   }
@@ -458,6 +604,7 @@ export async function computeBlastRadius(
   // impact.analyzedSymbolCount) remain authoritative and uncapped.
   const capped: string[] = [];
   if (testToRun.length < testCount) capped.push(`tests.toRun (${testToRun.length}/${testCount})`);
+  if (testFiles.length > MAX_TEST_FILES) capped.push(`tests.files (${MAX_TEST_FILES}/${testFiles.length})`);
   if (memWillDrift.length > 20) capped.push(`memory.willDrift (20/${memWillDrift.length})`);
   if (specItems.length > 20) capped.push(`specs.items (20/${specItems.length})`);
   if (decisionItems.length > 20) capped.push(`decisions.items (20/${decisionItems.length})`);
@@ -470,7 +617,13 @@ export async function computeBlastRadius(
   // Index-staleness disclosure: a risk headline computed from a graph that predates
   // the working tree must say so (fix-cli-conclusion-honesty). Same shared shape the
   // certification commands emit; absent when the index is current.
-  const staleness = await computeStaleness(absDir);
+  // The working tree is diffed against `resolvedBaseRef`. When the index was built at the base or
+  // later on this line of history (base ≤ index commit ≤ HEAD), every file changed since the index
+  // is a file of this diff: the change this briefing is about, not staleness. Telling the agent to
+  // re-analyze would be wrong advice. An index older than the base, or off this history, still is.
+  const indexStaleness = await computeStaleness(absDir);
+  const staleness = indexStaleness && await indexWithinDiff(absDir, indexStaleness.indexCommit, resolvedBaseRef)
+    ? undefined : indexStaleness;
   // Dynamic-boundary sites in the changed files and the caller closure this briefing computed
   // (change: disclose-dynamic-boundary-regions) — the constructs that make the radius a lower bound.
   const dynamicCrossing = dynamicBoundaryCrossing(
@@ -489,6 +642,7 @@ export async function computeBlastRadius(
     staleness,
     integrity: ctx.integrity,
     ...(extraCrossings.length ? { extraCrossings } : {}),
+    disclosures: caveats.slice(STANDING_CAVEATS.length),
   });
 
   // Federation block: forward the composed select_tests result when it ran, otherwise
@@ -536,6 +690,7 @@ export async function computeBlastRadius(
     tests: {
       count: testCount,
       toRun: testToRun,
+      files: testFiles.slice(0, MAX_TEST_FILES),
       soundness: testSoundness,
       ...(testsTruncatedAtDepth !== undefined ? { truncatedAtDepth: testsTruncatedAtDepth } : {}),
       ...(testsUnavailable ? { unavailable: testsUnavailable } : {}),
@@ -550,17 +705,62 @@ export async function computeBlastRadius(
       ...(driftUnavailable ? { unavailable: driftUnavailable } : {}),
     },
     federation,
+    ...memoryInjection,
+    ...(generated.length ? { generated } : {}),
+    // Facts, not findings: an operator's enforcement policy is applied by verify_change, which owns
+    // it, so this briefing never reports a code the policy switched off as if it were live.
+    ...(references
+      ? {
+          phantomReferences: {
+            count: references.findings.length,
+            unresolved: phantomReferenceFacts(references),
+            notAssessed: references.notAssessed.length,
+            ...references.summary,
+          },
+        }
+      : {}),
+    ...(contracts ? { contracts } : {}),
+    ...(changedContracts ? { changedContracts } : {}),
+    ...(envRenames?.removedReads.length
+      ? { envDeclarations: { removedReads: envRenames.removedReads, stillSet: envRenames.stillSet } }
+      : {}),
     headline: '',
     posture: 'advisory',
     caveats,
   };
   briefing.headline = renderHeadline(briefing);
-  return withIndexStaleness(absDir, briefing, ctx);
+  // This briefing omits the boundary when it is complete (no staleness noise on a clean
+  // index), so the dispatch-boundary sweep has nothing to reconcile. Run it here, before
+  // the omission decision, so a disclosure channel the caveats do not mirror still flips
+  // the claim rather than taking the boundary away with it.
+  const reconciled = reconcileCompleteness(briefing) as BlastRadiusBriefing;
+  if (reconciled.confidenceBoundary?.complete) delete reconciled.confidenceBoundary;
+  return withIndexStaleness(absDir, reconciled, ctx);
+}
+
+/** "1 lockfile and 2 generated files": the generated marks counted by kind, in a fixed order. */
+function generatedSummary(marks: readonly GeneratedFileFact[]): string {
+  const nouns: Array<[GeneratedFileFact['kind'], string, string]> = [
+    ['generated', 'generated file', 'generated files'],
+    ['vendored', 'vendored file', 'vendored files'],
+    ['lockfile', 'lockfile', 'lockfiles'],
+  ];
+  const parts = nouns
+    .map(([kind, one, many]) => { const n = marks.filter(m => m.kind === kind).length; return n ? `${n} ${n === 1 ? one : many}` : ''; })
+    .filter(Boolean);
+  return parts.length <= 1 ? (parts[0] ?? '') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
 }
 
 /** One-line conclusion summarizing the briefing. */
 function renderHeadline(b: BlastRadiusBriefing): string {
-  if (b.changed.files === 0) return 'No changes vs ' + b.resolvedBaseRef + ' — nothing to brief.';
+  const refs = b.phantomReferences?.count ?? 0;
+  const gen = generatedSummary(b.generated ?? []);
+  if (b.changed.files === 0) {
+    // A lockfile-only diff has no code change, but it is not "no change".
+    return gen
+      ? `No code changes vs ${b.resolvedBaseRef}; ${gen} changed.`
+      : 'No changes vs ' + b.resolvedBaseRef + ' — nothing to brief.';
+  }
   const parts: string[] = [
     `${b.changed.files} file${b.changed.files === 1 ? '' : 's'} / ${b.changed.symbols} symbol${b.changed.symbols === 1 ? '' : 's'} changed`,
   ];
@@ -579,12 +779,82 @@ function renderHeadline(b: BlastRadiusBriefing): string {
   else if (b.tests.count > 0) parts.push(`${b.tests.count} test${b.tests.count === 1 ? '' : 's'} to run`);
   const willDrift = b.memory.drifted + b.memory.orphaned;
   if (willDrift > 0) parts.push(`${willDrift} anchored memor${willDrift === 1 ? 'y' : 'ies'} will drift/orphan`);
-  if (b.decisions.affected > 0) parts.push(`${b.decisions.affected} decision${b.decisions.affected === 1 ? '' : 's'} affected`);
+  // An orphaned decision names a domain that is gone: an issue. A domain-level gap only says an ADR
+  // names a domain the change touches, which a one-line change in a broad domain hits for most ADRs;
+  // it is counted apart so it never reads as that many decisions broken.
+  if (b.decisions.orphaned > 0) parts.push(`${b.decisions.orphaned} decision${b.decisions.orphaned === 1 ? '' : 's'} name${b.decisions.orphaned === 1 ? 's' : ''} a missing domain`);
+  const domainGaps = b.decisions.affected - b.decisions.orphaned;
+  if (domainGaps > 0) parts.push(`${domainGaps} ADR${domainGaps === 1 ? '' : 's'} name${domainGaps === 1 ? 's' : ''} a touched domain`);
   if (b.specs.willGoStale > 0) parts.push(`${b.specs.willGoStale} spec${b.specs.willGoStale === 1 ? '' : 's'} may go stale`);
+  if (gen) parts.push(`${gen} changed`);
+  if (refs > 0) parts.push(`${refs} added reference${refs === 1 ? '' : 's'} resolve${refs === 1 ? 's' : ''} to nothing`);
+  const pushed = b.injectedMemories?.length ?? 0;
+  if (pushed > 0) parts.push(`${pushed} triggered memor${pushed === 1 ? 'y' : 'ies'} to read`);
   return parts.join('; ') + '.';
+}
+
+/**
+ * Evaluate memory triggers against a diff's touched set. Best-effort like the drift pass: a failure
+ * yields no injection rather than aborting the advisory briefing.
+ */
+async function triggeredMemoriesForDiff(
+  absDir: string,
+  ctx: NonNullable<Awaited<ReturnType<typeof readCachedContext>>>,
+  cg: SerializedCallGraph,
+  changedFiles: string[],
+  seeds: Array<{ id: string; name: string; className?: string }>,
+): Promise<ReturnType<typeof injectionFields>> {
+  try {
+    const { memories } = await loadMemoryStore(absDir);
+    if (!hasPushableMemory(memories)) return {};
+    // git names files from the repository root; globs, anchors and the mapping index are framed
+    // on the analyzed root. Re-frame (a no-op at the root) and drop files outside the analyzed tree.
+    const { getRepoPrefix, reframeRepoPath } = await import('../../drift/git-diff.js');
+    const prefix = (await getRepoPrefix(absDir)) ?? '';
+    const files = changedFiles.map(f => reframeRepoPath(f, prefix)).filter((f): f is string => f !== null);
+    const domains = hasSpecDomainTrigger(memories) ? await specDomainsForFiles(absDir, files) : [];
+    const { decisions } = await loadDecisionStore(absDir);
+    const symbols = seeds.map(s => ({ id: s.id, name: s.name, ...(s.className ? { className: s.className } : {}) }));
+    const view = ctx.edgeStore ? makeFreshnessView(ctx.edgeStore, absDir) : UNVERIFIABLE_VIEW;
+    const hops = maxTriggerHops(memories);
+    const probe = hops > 0
+      ? makeHopProbe(messageFreeTraversalIndexFor(cg, await loadTraversalIndex(absDir, cg)), symbols, hops)
+      : undefined;
+    return injectionFields(selectInjectedMemories(memories, { files, symbols, domains }, view, {
+      includePinned: false, probe, retirement: buildRetirementGraph(decisions), graphUnavailable: !ctx.edgeStore, decisions,
+    }));
+  } catch (err) {
+    return { injectedMemoriesNote: `Triggered memories could not be evaluated: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 /** MCP dispatch entry. Returns the briefing object directly (additive-by-cast). */
 export async function handleBlastRadius(input: BlastRadiusInput): Promise<unknown> {
   return computeBlastRadius(input);
+}
+
+/**
+ * Whether the index commit lies between the base and HEAD (base ≤ index ≤ HEAD), so every change
+ * since the index is inside the diff. False when anything cannot be resolved: then the staleness
+ * marker stays.
+ */
+export async function indexWithinDiff(absDir: string, indexCommit: string, baseRef: string): Promise<boolean> {
+  // The index commit is read from a repository artifact: only a hash is accepted, and no ref may
+  // read as an option.
+  if (!/^[0-9a-f]{4,64}$/i.test(indexCommit) || baseRef.startsWith('-')) return false;
+  try {
+    const { execFileGit } = await import('../../../utils/git-exec.js');
+    const { gitPathArgs } = await import('../../../utils/git-args.js');
+    const isAncestor = async (a: string, b: string) => {
+      try {
+        await execFileGit('git', gitPathArgs('merge-base', '--is-ancestor', `${a}^{commit}`, `${b}^{commit}`), { cwd: absDir });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    return await isAncestor(baseRef, indexCommit) && await isAncestor(indexCommit, 'HEAD');
+  } catch {
+    return false;
+  }
 }

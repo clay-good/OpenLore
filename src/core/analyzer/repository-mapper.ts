@@ -1,3 +1,4 @@
+import type { FilePolicies } from '../configuration/types.js';
 /**
  * Repository Mapper
  *
@@ -137,6 +138,7 @@ export interface RepositoryMap {
  * Options for repository mapping
  */
 export interface RepositoryMapperOptions {
+  filePolicies?: FilePolicies;
   /** Maximum files to process */
   maxFiles?: number;
   /** Patterns to force-include, overriding gitignore and excludePatterns */
@@ -802,6 +804,7 @@ export class RepositoryMapper {
 
     // Walk the directory
     const walkerOptions: FileWalkerOptions = {
+      filePolicies: this.options.filePolicies,
       maxFiles: this.options.maxFiles,
       includePatterns: this.options.includePatterns,
       restrictedIncludePatterns: this.options.restrictedIncludePatterns,

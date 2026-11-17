@@ -28,6 +28,7 @@ import {
   ARTIFACT_PARSE_HEALTH,
   ARTIFACT_DYNAMIC_BOUNDARY,
   MAX_HTML_INLINE_SCRIPT_CHARS,
+  SOURCE_SCAN_MAX_FILE_BYTES,
 } from '../../constants.js';
 import { graphDigest, writeTraversalIndexArtifact } from './condensation.js';
 import { CfgSpill, sweepLeakedCfgSpills } from './cfg-spill.js';
@@ -445,6 +446,8 @@ export class AnalysisArtifactGenerator {
    * the same store handle that rebuilds the graph (change: optimize-hash-keyed-analyze).
    */
   private _pass1Memo?: Pass1MemoWrite;
+  /** SHA-256 of the bytes each analyzed file was read as; written beside the graph. */
+  private _fileHashes?: Map<string, string>;
   /** Off-heap overlay hand-off for this build; drained into `cfg_overlay` after `clearAll()`. */
   private _cfgSpill: CfgSpill | undefined;
   /** Files reused vs. re-extracted on the last build — surfaced by the analyze summary. */
@@ -459,6 +462,19 @@ export class AnalysisArtifactGenerator {
       tokensPerChar: options.tokensPerChar ?? TOKENS_PER_CHAR_DEFAULT,
       reExtract: options.reExtract ?? false,
     };
+  }
+
+  /**
+   * Files an enrichment scan refused for their size, reported by the scan that enforced the cap.
+   * Recorded here so they reach `parse-health.json` — the one artifact every health surface reads
+   * — instead of only a transient progress warning (change:
+   * fix-retrieval-coverage-over-unread-content).
+   */
+  private _enrichmentSizeCapped = new Map<string, string>();
+
+  /** Called by the analysis pipeline before {@link generate}, once the enrichment scans are done. */
+  recordEnrichmentSizeCaps(paths: Iterable<[string, string]>): void {
+    this._enrichmentSizeCapped = new Map(paths);
   }
 
   /**
@@ -695,7 +711,7 @@ export class AnalysisArtifactGenerator {
           const dbPath = join(this.options.outputDir, ARTIFACT_CALL_GRAPH_DB);
           await writeEdgesToSQLite(
             artifacts.llmContext.callGraph, dbPath, this.options.rootDir, artifacts.llmContext.cfgs,
-            this._pass1Memo, this._cfgSpill,
+            this._pass1Memo, this._cfgSpill, this._fileHashes,
           );
         }
       } catch {
@@ -705,6 +721,7 @@ export class AnalysisArtifactGenerator {
         // the whole corpus (tens of MB), and nothing after this point — continuity
         // carry-forward, the dependency-graph write, the fingerprint — has any use for them.
         this._pass1Memo = undefined;
+        this._fileHashes = undefined;
         // The spill has either been drained into the table or abandoned; either way the file is
         // temporary and must not outlive the build.
         await this._cfgSpill?.dispose();
@@ -1481,6 +1498,21 @@ export class AnalysisArtifactGenerator {
     const { detectDuplicates } = await import('./duplicate-detector.js');
     const { analyzeForRefactoring } = await import('./refactor-analyzer.js');
     const { classifyYaml, isDockerfilePath } = await import('./iac/index.js');
+    const { looksLikeOpenApi, MAX_SPEC_BYTES } = await import('./contract/openapi.js');
+    const { MAX_CONTRACT_FILES } = await import('./contract/project.js');
+    const { MAX_PROTO_FILES } = await import('./contract/project-protobuf.js');
+    const { isProtobufPath } = await import('./contract/protobuf.js');
+    const { isGraphqlPath } = await import('./contract/graphql.js');
+    const { isFixtureSchemaPath, isProjectRootMarkerPath, projectRootDirs } = await import('./contract/types.js');
+    const { MAX_GRAPHQL_CANDIDATES } = await import('./contract/project-graphql.js');
+    const { relaySchemaPaths } = await import('./contract/graphql.js');
+    const { readBuildOutputMap } = await import('./iac/build-output.js');
+    const { readPathAliases } = await import('./contract/grpc-registration.js');
+    /** Total specification bytes retained across the walk. */
+    const MAX_CONTRACT_BYTES = 64 * 1024 * 1024;
+    /** tsconfig/jsconfig/package.json texts kept for the alias reader, and the bytes of each. */
+    const MAX_ALIAS_CONFIG_FILES = 200;
+    const MAX_ALIAS_CONFIG_FILE_BYTES = 256 * 1024;
 
     const CALL_GRAPH_LANGS = new Set([
       'Python', 'TypeScript', 'JavaScript', 'Go', 'Rust', 'Ruby', 'Java', 'C++', 'Swift',
@@ -1494,6 +1526,8 @@ export class AnalysisArtifactGenerator {
       'GitHub Actions',
       // Azure IaC DSL (add-bicep-iac-graph).
       'Bicep',
+      // Serverless service manifests (add-iac-deploy-binding-commands).
+      'Serverless',
     ]);
     // Helm charts: every file under a directory containing Chart.yaml is Helm.
     const chartDirs = repoMap.allFiles
@@ -1524,6 +1558,47 @@ export class AnalysisArtifactGenerator {
     };
     const signatures: import('./signature-extractor.js').FileSignatureMap[] = [];
     const callGraphFiles: Array<{ path: string; content: string; language: string }> = [];
+    /** OpenAPI/Swagger candidates, projected onto graph nodes after the call graph is built. */
+    const contractFiles: Array<{ path: string; content: string }> = [];
+    /** The configs that declare where built output comes from (add-iac-deploy-binding-commands). */
+    const buildOutputConfigs = new Map<string, string>();
+    /**
+     * The configs that DECLARE path aliases — a tsconfig/jsconfig `compilerOptions.paths`, a
+     * `package.json` `imports` subpath — so an aliased handler import resolves to the module it
+     * names (change: fix-bind-aliased-grpc-node-handlers). Bounded: a monorepo has many, and only
+     * the text is kept, never a traversal.
+     */
+    const aliasConfigs = new Map<string, string>();
+    /** Candidates past a retention bound: counted so the projection can disclose the cap. */
+    let contractFilesOmitted = 0;
+    /** Retained specification bytes, bounded alongside the file count. */
+    let contractBytes = 0;
+    /** Retained `.proto` files: counted apart, since protobuf schemas come as many small files. */
+    let protoFiles = 0;
+    /** `.proto` files past a bound: counted apart, so a dropped one withholds only protobuf conclusions. */
+    let protoFilesOmitted = 0;
+    /** GraphQL schema files retained and past a bound, counted apart for the same reason. */
+    let graphqlFiles = 0;
+    let graphqlFilesOmitted = 0;
+    /** `package.json` / `relay.config.*` texts: they name the schema a Relay COMPILER reads. */
+    const relayConfigs: Array<{ path: string; content: string }> = [];
+    /**
+     * Paths that mark a project root, so GraphQL schema identity is scoped to a project rather
+     * than to the whole repository (change: scope-graphql-schema-universes). Paths only — never
+     * parsed, so an invalid `package.json` still marks its directory.
+     */
+    const projectRootMarkers: string[] = [];
+    /**
+     * Drop the schema a Relay config names: it is the compiler's copy of a server's schema (often
+     * GitHub's), and read as this repository's contract it would grade the vendor's API.
+     */
+    const skippedContractFiles: Array<{ file: string; reason: string }> = [];
+    const withoutClientSchemas = (files: typeof contractFiles) => {
+      const client = relaySchemaPaths(relayConfigs);
+      if (!client.size) return files;
+      for (const f of files) if (client.has(f.path)) skippedContractFiles.push({ file: f.path, reason: 'the schema a Relay compiler config names: a copy of a server\'s schema, not this repository\'s contract' });
+      return files.filter(f => !client.has(f.path));
+    };
     // Files whose UTF-8 decode was lossy (contained U+FFFD) — a parse-health signal captured at the
     // one central read, since the call-graph extractors never see the raw bytes (change:
     // add-parse-health-boundary-disclosure).
@@ -1533,12 +1608,20 @@ export class AnalysisArtifactGenerator {
     // fix-analyze-native-abort-and-file-cost-budget).
     const sizeCapped: Array<{ path: string; language: string }> = [];
     const scriptContainerFiles: import('./sfc-script-extractor.js').ScriptContainerFileRecord[] = [];
+    // The baseline the read path compares a cited file against. Without it, freshness fell back
+    // to comparing mtimes, so a checkout, pull or new worktree that rewrote unchanged files made
+    // the whole index read as "behind the working tree" until a rebuild.
+    const fileHashes = new Map<string, string>();
+    const hashOf = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex');
 
     for (const file of repoMap.allFiles) {
       try {
         // Read raw bytes so an encoding fallback (invalid UTF-8) is detectable at the byte level —
         // a decoded string alone can't distinguish a lossy decode from a legit U+FFFD in the source.
         const bytes = await readFile(file.absolutePath);
+        // Above the freshness scan cap the read path will not hash a file, so a recorded hash
+        // could never be confirmed; such files keep the mtime fallback instead.
+        if (bytes.length <= SOURCE_SCAN_MAX_FILE_BYTES) fileHashes.set(file.path, hashOf(bytes));
         const content = bytes.toString('utf-8');
         const isTest = isTestFile(file.path);
         const scriptContainer = extractScriptContainer(file.path, content);
@@ -1550,6 +1633,80 @@ export class AnalysisArtifactGenerator {
             extractedScriptBlockCount: scriptContainer.extractedScriptBlockCount,
           });
         }
+
+        // Interface specifications (change: add-contract-node-projection): an OpenAPI/Swagger
+        // document is not source code — no grammar parses it and it never enters Pass 1 — so it
+        // rides beside the call-graph files. A document past the reader's byte cap is carried
+        // TRUNCATED rather than dropped, so the reader reports its size as the reason it is
+        // unread instead of the file reading as absent.
+        if (/\.(ya?ml|json)$/i.test(file.path) && looksLikeOpenApi(content)) {
+          // `looksLikeOpenApi` matches an `openapi`/`swagger` key ANYWHERE, so a dependency entry
+          // named `swagger` matches too. `readOpenApi` settles it by reading the top-level key —
+          // except past its byte cap, where it answers "too large" without ever looking. So an
+          // OVERSIZED candidate is retained only when the key is written at the top level (a
+          // nested one is indented further), or a big lockfile would be reported to the user as a
+          // specification OpenLore could not read.
+          const oversized = content.length > MAX_SPEC_BYTES;
+          const retainable = !oversized || /(?:^|\n)[ \t]{0,2}["']?(?:openapi|swagger)["']?[ \t]*:/.test(content.slice(0, 1 << 16));
+          // A specification past the reader's byte cap is carried truncated and REPORTED unread
+          // by the contract tools — and said nothing to the retrieval surfaces, which went on
+          // claiming full coverage over a document they had not read (change:
+          // fix-retrieval-coverage-over-unread-content).
+          if (oversized && retainable) sizeCapped.push({ path: file.path, language: 'OpenAPI' });
+          // Two bounds, not one: a count (50) and a total (64 MB). One specification can be 4 MB,
+          // so a count alone let a specification-heavy monorepo hold ~200 MB of strings from the
+          // walk until the build returned.
+          const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
+          if (retainable && contractFiles.length - protoFiles - graphqlFiles < MAX_CONTRACT_FILES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
+            contractBytes += retained;
+            contractFiles.push({ path: file.path, content: oversized ? content.slice(0, MAX_SPEC_BYTES + 1) : content });
+          } else if (retainable) {
+            // Past a bound nothing more is retained, but the count travels, so the projection
+            // discloses the cap instead of reading as "this repository declares no operations".
+            contractFilesOmitted++;
+          }
+        }
+
+        // Protobuf definitions (change: add-contract-graph-projection): every `.proto` file is a
+        // schema, so no sniff is needed. Same byte bound as above; a file past the reader's cap is
+        // carried truncated so it is reported unread for its size rather than absent.
+        // A schema under a test or fixture path describes a fake service: read as the contract, it
+        // makes the real root types ambiguous and silently unbinds every resolver.
+        const fixtureSchema = isGraphqlPath(file.path) && isFixtureSchemaPath(file.path);
+        if (fixtureSchema) {
+          // Named, not dropped: discovery scope stays visible.
+          skippedContractFiles.push({ file: file.path, reason: 'a schema under a test or fixture path, not this repository\'s contract' });
+        }
+        if (isProtobufPath(file.path)) {
+          const oversized = content.length > MAX_SPEC_BYTES;
+          const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
+          if (oversized) sizeCapped.push({ path: file.path, language: 'Protobuf' });
+          if (protoFiles < MAX_PROTO_FILES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
+            protoFiles++;
+            contractBytes += retained;
+            contractFiles.push({ path: file.path, content: oversized ? content.slice(0, MAX_SPEC_BYTES + 1) : content });
+          } else protoFilesOmitted++;
+        }
+        // GraphQL SDL (change: add-contract-graph-projection): every `.graphql` / `.graphqls` /
+        // `.gql` file is a candidate; the reader tells a schema from a client document.
+        if (isGraphqlPath(file.path) && !fixtureSchema) {
+          const oversized = content.length > MAX_SPEC_BYTES;
+          const retained = oversized ? MAX_SPEC_BYTES + 1 : content.length;
+          if (oversized) sizeCapped.push({ path: file.path, language: 'GraphQL' });
+          if (graphqlFiles < MAX_GRAPHQL_CANDIDATES && contractBytes + retained <= MAX_CONTRACT_BYTES) {
+            graphqlFiles++;
+            contractBytes += retained;
+            contractFiles.push({ path: file.path, content: oversized ? content.slice(0, MAX_SPEC_BYTES + 1) : content });
+          } else graphqlFilesOmitted++;
+        }
+
+        // The project's own build-output mapping, for binding a deployed `dist/…` handler to its
+        // source (change: add-iac-deploy-binding-commands).
+        if (file.path === 'tsconfig.json' || file.path === 'package.json') buildOutputConfigs.set(file.path, content);
+        if (aliasConfigs.size < MAX_ALIAS_CONFIG_FILES && /(?:^|\/)(?:[jt]sconfig(?:\.[\w.-]+)?\.json|package\.json)$/.test(file.path)
+          && content.length <= MAX_ALIAS_CONFIG_FILE_BYTES) aliasConfigs.set(file.path, content);
+        if (/(?:^|\/)(?:package\.json|relay\.config\.(?:[cm]?js|json|ts))$/.test(file.path)) relayConfigs.push({ path: file.path, content });
+        if (isProjectRootMarkerPath(file.path)) projectRootMarkers.push(file.path);
 
         // Signatures: exclude test files
         if (!isTest) {
@@ -1628,6 +1785,14 @@ export class AnalysisArtifactGenerator {
       const builder = new CallGraphBuilder({
         ...(memo ? { pass1Cache: memo.cache } : {}),
         ...(this._cfgSpill ? { cfgSpill: this._cfgSpill } : {}),
+        ...(contractFiles.length ? { contractFiles: withoutClientSchemas(contractFiles) } : {}),
+        ...(skippedContractFiles.length ? { contractFilesSkipped: skippedContractFiles } : {}),
+        ...(projectRootMarkers.length ? { projectRoots: projectRootDirs(projectRootMarkers) } : {}),
+        ...(contractFilesOmitted ? { contractFilesOmitted } : {}),
+        ...(protoFilesOmitted ? { protoFilesOmitted } : {}),
+        ...(graphqlFilesOmitted ? { graphqlFilesOmitted } : {}),
+        ...(buildOutputConfigs.size ? { buildOutput: readBuildOutputMap(buildOutputConfigs) } : {}),
+        ...(aliasConfigs.size ? { pathAliases: readPathAliases(aliasConfigs) } : {}),
       });
       // Tier 1 of the degradation ladder: when the overlay is shed, the decision is bound for the
       // WHOLE build via a build-scoped async-context store, and forwarded to each extraction worker
@@ -1642,6 +1807,7 @@ export class AnalysisArtifactGenerator {
     } finally {
       memo?.close();
     }
+    this._fileHashes = fileHashes;
     this._pass1Memo = memo
       ? { ...memo.cache.take(), analyzedPaths: callGraphFiles.map(f => f.path) }
       : undefined;
@@ -1678,6 +1844,13 @@ export class AnalysisArtifactGenerator {
       const existing = parseHealthRecords.get(path);
       if (existing) existing.encodingFallback = true;
       else parseHealthRecords.set(path, { filePath: path, language, errorCount: 0, missingCount: 0, errorLines: [], encodingFallback: true });
+    }
+    // Files an enrichment scan refused for their size (SOURCE_SCAN_MAX_FILE_BYTES, whose contract
+    // comment says "a file excluded here is disclosed by analyze, never silently dropped"). It was
+    // disclosed only as a live progress warning, so nothing persisted it and `doctor`, `orient`
+    // and `search_code` all read the repository as fully read.
+    for (const [path, language] of this._enrichmentSizeCapped) {
+      sizeCapped.push({ path, language });
     }
     for (const { path, language } of sizeCapped) {
       parseHealthRecords.set(path, {
@@ -1868,6 +2041,7 @@ export async function writeEdgesToSQLite(
   cfgs?: Array<{ functionId: string; filePath: string; cfg: import('./cfg.js').FunctionCfg }>,
   pass1Memo?: Pass1MemoWrite,
   cfgSpill?: CfgSpill,
+  fileHashes?: ReadonlyMap<string, string>,
 ): Promise<void> {
   const { EdgeStore } = await import('../services/edge-store.js');
   // Analyze/write path: this is the one site allowed to drop-and-rebuild on a
@@ -1911,6 +2085,8 @@ export async function writeEdgesToSQLite(
     // (change: harden-analyze-rebuild-atomicity).
     await store.transactionAsync(async () => {
       store.clearAll();
+      // In the same transaction as the graph, so the hashes always describe the bytes it was built from.
+      if (fileHashes) store.setFileHashes([...fileHashes].map(([path, hash]) => [norm(path), hash]));
       store.insertNodes(prodNodes, hubIds, entryIds);
       store.insertEdges(prodEdges);
       store.insertInheritanceEdges(inheritanceEdges);

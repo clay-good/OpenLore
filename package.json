@@ -1,6 +1,6 @@
 {
   "name": "openlore",
-  "version": "3.3.1",
+  "version": "3.7.0",
   "description": "Persistent architectural memory and structural cognition for AI coding agents.",
   "type": "module",
   "main": "dist/api/index.js",
@@ -16,13 +16,17 @@
     },
     "./cli": {
       "import": "./dist/cli/index.js"
+    },
+    "./configuration": {
+      "import": "./dist/api/configuration.js",
+      "types": "./dist/api/configuration.d.ts"
     }
   },
   "bin": {
     "openlore": "dist/cli/index.js"
   },
   "engines": {
-    "node": "^22.19.0 || >=23.5.0"
+    "node": "^22.22.0 || >=23.5.0"
   },
   "scripts": {
     "dev": "tsx watch src/cli/index.ts",
@@ -32,24 +36,29 @@
     "bench": "tsx scripts/bench.ts",
     "bench:mcp": "tsx scripts/bench-mcp.ts",
     "bench:watch": "tsx scripts/bench-watch.ts",
+    "bench:hooks": "tsx scripts/bench-hooks.ts",
+    "bench:briefing": "tsx scripts/bench-briefing.ts",
+    "bench:select-tests": "tsx scripts/bench-select-tests.ts",
     "bench:agent": "tsx scripts/bench-agent.ts",
     "bench:surface": "tsx scripts/bench-preset-surface.ts",
     "bench:selection": "tsx scripts/bench-preset-selection.ts",
     "bench:completion": "tsx scripts/bench-preset-completion.ts",
     "bench:protocol": "node --import tsx bench/run.ts",
+    "bench:retrieval": "node --import tsx bench/retrieval/run.ts",
     "measure:certified-scale": "tsx scripts/measure-certified-scale.ts",
     "test": "vitest",
     "test:run": "vitest run",
-    "test:unit": "vitest run --exclude src/core/analyzer/extractor-redos.test.ts --exclude src/core/analyzer/derived-artifact-equivalence.test.ts --exclude src/core/analyzer/hash-keyed-analyze.test.ts --exclude src/core/analyzer/pass1-fact-cache.test.ts --exclude src/core/analyzer/extraction-pool.test.ts --exclude src/core/analyzer/extraction-pool-threads.test.ts --exclude src/core/analyzer/condensation.test.ts --exclude src/core/analyzer/index-bundle.test.ts --exclude src/core/analyzer/bm25-corpus-persistence.test.ts --exclude src/core/analyzer/vector-index.test.ts --exclude src/core/analyzer/spec-vector-index.test.ts --exclude src/core/services/mcp-handlers/traversal.test.ts --exclude src/core/services/mcp-watcher-parity.test.ts --exclude src/core/services/mcp-watcher-incremental.test.ts",
-    "test:budgets": "vitest run --no-file-parallelism src/core/analyzer/extractor-redos.test.ts",
+    "test:unit": "vitest run --exclude src/core/analyzer/extractor-redos.test.ts --exclude src/cli/commands/hook-latency.test.ts --exclude src/core/analyzer/derived-artifact-equivalence.test.ts --exclude src/core/analyzer/hash-keyed-analyze.test.ts --exclude src/core/analyzer/pass1-fact-cache.test.ts --exclude src/core/analyzer/extraction-pool.test.ts --exclude src/core/analyzer/extraction-pool-threads.test.ts --exclude src/core/analyzer/condensation.test.ts --exclude src/core/analyzer/index-bundle.test.ts --exclude src/core/analyzer/bm25-corpus-persistence.test.ts --exclude src/core/analyzer/vector-index.test.ts --exclude src/core/analyzer/spec-vector-index.test.ts --exclude src/core/services/mcp-handlers/traversal.test.ts --exclude src/core/services/mcp-watcher-parity.test.ts --exclude src/core/services/mcp-watcher-incremental.test.ts",
+    "test:budgets": "vitest run --no-file-parallelism src/core/analyzer/extractor-redos.test.ts src/cli/commands/hook-latency.test.ts",
     "test:equivalence": "vitest run src/core/analyzer/derived-artifact-equivalence.test.ts src/core/analyzer/hash-keyed-analyze.test.ts src/core/analyzer/pass1-fact-cache.test.ts src/core/analyzer/extraction-pool.test.ts src/core/analyzer/extraction-pool-threads.test.ts src/core/analyzer/condensation.test.ts src/core/analyzer/index-bundle.test.ts src/core/analyzer/bm25-corpus-persistence.test.ts src/core/analyzer/vector-index.test.ts src/core/analyzer/spec-vector-index.test.ts src/core/services/mcp-handlers/traversal.test.ts src/core/services/mcp-watcher-parity.test.ts src/core/services/mcp-watcher-incremental.test.ts",
     "fuzz": "vitest run src/fuzz",
     "test:coverage": "vitest run --coverage",
     "test:openspec-compat": "vitest run --grep 'openspec' || echo 'No OpenSpec compat tests yet'",
     "test:e2e": "vitest run --config vitest.integration.config.ts --reporter=verbose",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:integration:ci": "vitest run --config vitest.integration.config.ts src/api/analyze-parity.integration.test.ts src/api/generate.integration.test.ts src/api/run-dry-run.integration.test.ts src/api/verify.e2e.integration.test.ts src/cli/commands/analyze.integration.test.ts src/core/analyzer/html-asset-edges.integration.test.ts src/core/analyzer/html-inline-script.e2e.integration.test.ts src/core/services/mcp-watcher.integration.test.ts src/cli/commands/watch-auto.integration.test.ts src/core/services/mcp-handlers/spec-reconciliation-workflow.e2e.integration.test.ts src/core/verifier/verification-engine.e2e.integration.test.ts",
+    "test:integration:ci": "vitest run --config vitest.integration.ci.config.ts",
     "test:api-consumer": "npm run build && node scripts/api-consumer-smoke.mjs",
+    "test:configuration-agent": "tsx scripts/configuration-agent/live.ts",
     "test:live": "vitest run --config vitest.integration.config.ts live-data --reporter=verbose",
     "build:watch": "tsc --watch",
     "homebrew:formula": "node scripts/update-homebrew-formula.mjs",
@@ -86,63 +95,6 @@
     ],
     "skills": [
       "./skills"
-    ]
-  },
-  "openspec": {
-    "manifestVersion": 1,
-    "id": "openlore",
-    "namespace": "lore",
-    "displayName": "OpenLore",
-    "summary": "Persistent architectural memory and deterministic structural context for AI coding agents, computed locally from your code.",
-    "bin": "openlore",
-    "binArgs": [
-      "npx",
-      "--yes",
-      "openlore"
-    ],
-    "openspecCompat": ">=0.1.0",
-    "commands": [
-      {
-        "name": "generate",
-        "summary": "Reverse-engineer OpenSpec specs from existing code"
-      },
-      {
-        "name": "drift",
-        "summary": "Detect code/spec drift"
-      },
-      {
-        "name": "verify",
-        "summary": "Verify specs against the codebase"
-      },
-      {
-        "name": "analyze",
-        "summary": "Build the structural analysis graph (no API key)"
-      },
-      {
-        "name": "orient",
-        "summary": "One-shot structural orientation for a task"
-      },
-      {
-        "name": "digest",
-        "summary": "Emit the compact codebase digest"
-      },
-      {
-        "name": "decisions",
-        "summary": "Manage architectural decision records"
-      },
-      {
-        "name": "change-status",
-        "summary": "Compute OpenSpec change status from documented evidence"
-      }
-    ],
-    "skills": [
-      {
-        "dir": "openlore-orient",
-        "source": "skills/openlore-orient"
-      }
-    ],
-    "ownsConfigKeys": [
-      "openlore"
     ]
   },
   "author": "Clay Good",
@@ -184,19 +136,19 @@
     "@inquirer/prompts": "^8.7.1",
     "@repomix/tree-sitter-wasms": "0.1.17",
     "chalk": "^6.0.0",
-    "chokidar": "^5.0.0",
+    "chokidar": "^6.0.0",
     "commander": "^15.0.0",
-    "glob": "^13.0.6",
+    "glob": "^14.0.2",
     "ignore": "^7.0.8",
     "jsonc-parser": "^3.3.1",
-    "minimatch": "^10.2.6",
-    "ora": "^9.4.1",
-    "web-tree-sitter": "0.27.1",
+    "minimatch": "^11.0.1",
+    "ora": "^10.0.0",
+    "web-tree-sitter": "0.27.2",
     "yaml": "^2.6.1"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "^4.2.0",
-    "@lancedb/lancedb": "0.40.0",
+    "@lancedb/lancedb": "0.41.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@tree-sitter-grammars/tree-sitter-lua": "^0.4.1",
     "@vitejs/plugin-react": "^6.1.1",
@@ -228,15 +180,16 @@
       "protobufjs": "^7.6.5"
     },
     "ws": "^8.21.0",
-    "undici": "^8.9.0",
+    "undici": "^8.12.2",
     "js-yaml": "^4.3.0",
     "hono": "^4.12.34",
     "@hono/node-server": "^2.0.5",
     "sharp": "^0.35.5",
     "adm-zip": "^0.6.1",
-    "fast-uri": "^3.1.8",
+    "fast-uri": "^3.1.9",
     "nanoid": "^3.3.17",
     "brace-expansion": "^5.0.12",
+    "minimatch": "^11.0.1",
     "onnxruntime-web": {
       "protobufjs": "^7.6.5"
     },
@@ -245,7 +198,7 @@
         "protobufjs": "^7.6.5"
       },
       "ws": "^8.21.0",
-      "undici": "^8.9.0"
+      "undici": "^8.12.2"
     }
   },
   "devDependencies": {
@@ -253,7 +206,7 @@
     "@earendil-works/pi-coding-agent": "^1.0.1",
     "@earendil-works/pi-tui": "^1.0.1",
     "@eslint/js": "^10.0.1",
-    "@fission-ai/openspec": "1.14.1",
+    "@fission-ai/openspec": "2.0.0",
     "@types/node": "^26.4.0",
     "@vitest/coverage-v8": "^5.0.0",
     "eslint": "^10.9.1",
@@ -261,7 +214,7 @@
     "globals": "^17.7.0",
     "memfs": "^4.71.0",
     "tsx": "^4.19.2",
-    "typebox": "1.3.36",
+    "typebox": "1.4.7",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.19.1",
     "vitest": "^5.0.0"

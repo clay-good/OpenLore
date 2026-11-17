@@ -742,22 +742,30 @@ function makeMemoryStalenessIssue(
   domain: string | null,
 ): DriftIssue {
   const kind: DriftIssueKind = freshness === 'orphaned' ? 'memory-orphaned' : 'memory-drifted';
-  const offending = verdicts.find((v) => v.freshness === freshness)?.anchor as StructuralAnchor | undefined;
+  const offendingVerdict = verdicts.find((v) => v.freshness === freshness);
+  const offending = offendingVerdict?.anchor as StructuralAnchor | undefined;
   const label = text.length > 60 ? `${text.slice(0, 57)}…` : text;
   const subject = offending?.symbolName ?? offending?.filePath ?? 'its anchored code';
+  // An orphaned span anchor whose symbol still exists: the span is ambiguous, not
+  // the symbol deleted (add-memory-anchor-verdicts).
+  const spanLines = offendingVerdict?.spanCandidates?.lines;
   return {
     id: `${kind}:${memKind}:${id}`,
     kind,
     severity: freshness === 'orphaned' ? 'warning' : 'info',
     message:
-      freshness === 'orphaned'
+      freshness === 'orphaned' && spanLines
+        ? `${memKind === 'decision' ? 'Decision' : 'Memory'} "${label}" is anchored to a span in ${subject} that now occurs more than once (lines ${spanLines.join(', ')}${offendingVerdict?.spanCandidates?.truncated ? ', …' : ''}).`
+        : freshness === 'orphaned'
         ? `${memKind === 'decision' ? 'Decision' : 'Memory'} "${label}" is anchored to ${subject}, which no longer exists.`
         : `${memKind === 'decision' ? 'Decision' : 'Memory'} "${label}" is anchored to ${subject}, which changed since it was recorded.`,
     filePath: offending?.filePath ?? '',
     domain,
     specPath: null,
     suggestion:
-      freshness === 'orphaned'
+      freshness === 'orphaned' && spanLines
+        ? `Re-record this ${memKind} with a span that occurs once in ${subject}, or supersede it.`
+        : freshness === 'orphaned'
         ? `Re-record this ${memKind} against current code, or reject it — its subject was renamed, moved, or deleted.`
         : `Verify this ${memKind} still holds and re-record it; the code it describes was modified.`,
   };

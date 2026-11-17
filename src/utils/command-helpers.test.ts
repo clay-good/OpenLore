@@ -50,19 +50,19 @@ describe('formatAge', () => {
   });
 
   it('returns minutes when 1 min ≤ age < 1 hour', () => {
-    expect(formatAge(60_000)).toBe('1 minutes ago');
+    expect(formatAge(60_000)).toBe('1 minute ago');
     expect(formatAge(300_000)).toBe('5 minutes ago');
     expect(formatAge(3_599_999)).toBe('59 minutes ago');
   });
 
   it('returns hours when 1 hour ≤ age < 1 day', () => {
-    expect(formatAge(3_600_000)).toBe('1 hours ago');
+    expect(formatAge(3_600_000)).toBe('1 hour ago');
     expect(formatAge(7_200_000)).toBe('2 hours ago');
     expect(formatAge(86_399_999)).toBe('23 hours ago');
   });
 
   it('returns days when ≥ 1 day', () => {
-    expect(formatAge(86_400_000)).toBe('1 days ago');
+    expect(formatAge(86_400_000)).toBe('1 day ago');
     expect(formatAge(172_800_000)).toBe('2 days ago');
   });
 });

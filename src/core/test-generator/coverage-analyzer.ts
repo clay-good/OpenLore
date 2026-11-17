@@ -17,7 +17,8 @@ import { readFile, readdir } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
 import { isTestFile } from '../analyzer/test-file.js';
-import { parseScenarios } from './scenario-parser.js';
+import { hasSpecFiles, parseScenarios } from './scenario-parser.js';
+import { NO_SPEC_SOURCE, SPEC_SOURCES_LOOKED_FOR, noSpecSourceText } from '../spec-sources/state.js';
 import type {
   ParsedScenario,
   TestCoverageReport,
@@ -367,12 +368,17 @@ export async function analyzeTestCoverage(opts: {
   const coveredScenarios = allCovered.length;
   const taggedScenarios = allCovered.filter((c) => c.discoveredBy === 'tag').length;
   const discoveredScenarios = allCovered.filter((c) => c.discoveredBy === 'semantic').length;
+  // No spec source: nothing to cover, so the percentage is not computed (never a 0% that reads as
+  // "untested"), and no threshold can be failed.
+  const noSource = totalScenarios === 0 && !(await hasSpecFiles(rootPath));
   const coveragePercent =
-    totalScenarios === 0
-      ? 0
-      : Math.round((coveredScenarios / totalScenarios) * 1000) / 10;
+    noSource
+      ? null
+      : totalScenarios === 0
+        ? 0
+        : Math.round((coveredScenarios / totalScenarios) * 1000) / 10;
   const belowThreshold =
-    minCoverage !== undefined && coveragePercent < minCoverage;
+    minCoverage !== undefined && coveragePercent !== null && coveragePercent < minCoverage;
 
   return {
     timestamp: new Date().toISOString(),
@@ -381,6 +387,7 @@ export async function analyzeTestCoverage(opts: {
     discoveredScenarios,
     coveredScenarios,
     coveragePercent,
+    ...(noSource ? { reason: NO_SPEC_SOURCE, lookedFor: [...SPEC_SOURCES_LOOKED_FOR], note: noSpecSourceText() } : {}),
     byDomain,
     covered: allCovered,
     uncovered,

@@ -130,6 +130,7 @@ export interface EpistemicTracker {
 // ============================================================================
 
 const TOOL_WEIGHTS: Record<string, number> = {
+  configure_openlore: 0,
   // Resets tracker — not counted
   orient: 0,
   analyze_codebase: 0,
@@ -196,6 +197,8 @@ const TOOL_WEIGHTS: Record<string, number> = {
   working_set_context: 3,         // ← get_minimal_context (3) — budgeted structural briefing
   structural_diff: 3,             // ← detect_changes (3) — diff-scoped structural read
   briefing_since: 3,              // ← detect_changes (3) — changed-symbols-since-ref read
+  get_handoff_briefing: 3,        // ← briefing_since (3) — in-flight-change briefing read
+  certify_service_contract: 3,    // ← certify_public_surface (3) — contract verdict
   certify_public_surface: 3,      // ← detect_changes (3) — diff-scoped export verdict
 
   // Graph traversal / cross-module
@@ -207,11 +210,17 @@ const TOOL_WEIGHTS: Record<string, number> = {
   generate_tests: 4,
   get_low_risk_refactor_candidates: 4,
   blast_radius: 5,              // ← analyze_impact (5) — callers/layers/tests briefing over the graph
+  verify_change: 5,            // ← blast_radius (5) — diff-scoped composed verification receipt
+
   select_tests: 5,             // ← analyze_impact (5) — backward reachability over the graph
   report_coverage_gaps: 5,     // ← analyze_impact (5) — whole-graph reachability (inverse of select_tests)
   find_dead_code: 5,           // ← analyze_impact (5) — whole-graph reachability sweep
   change_impact_certificate: 5,// ← generate_change_proposal (5) — diff-scoped multi-source certificate
+  certify_provenance: 5,       // ← change_impact_certificate (5) — reproducible provenance over the same diff
   plan_parallel_work: 5,       // ← analyze_impact (5) — footprint + hazard graph over task seeds
+  certify_merge: 5,            // ← plan_parallel_work (5) — cross-branch graph join at landing
+  declare_footprint: 5,        // ← plan_parallel_work (5) — footprint hazards vs live peers
+  fleet_status: 5,             // ← map_in_flight_conflicts (5) — composes the coordination arc + drift memory
   map_in_flight_conflicts: 5,  // ← plan_parallel_work (5) — same hazard classifier, harvested inputs
 
   // Deep architectural tracing
@@ -276,9 +285,13 @@ interface PanicProvenanceItem {
 
 export function updatePanic(
   tracker: EpistemicTracker,
-  opts: { density: number; oscillation: number; weight: number; staleDepth: number; directory?: string; tool?: string },
+  opts: {
+    density: number; oscillation: number; weight: number; staleDepth: number; directory?: string; tool?: string;
+    /** Symbols that newly returned to an earlier version for the second time (session ledger). */
+    editOscillation?: number;
+  },
 ): void {
-  const { density, oscillation, staleDepth, directory = '', tool = '' } = opts;
+  const { density, oscillation, staleDepth, directory = '', tool = '', editOscillation = 0 } = opts;
   const now = _clock();
   const inRefractory = tracker.panicRecoverySuppressionUntil > now;
 
@@ -324,6 +337,13 @@ export function updatePanic(
       const d = PANIC_OSCILLATION_DELTA;
       delta += d;
       provenance.push({ name: 'oscillation_spike', delta: d, evidence: { oscillation } });
+    }
+    // Edit oscillation (change: add-session-structural-ledger): the same observed loop as tool-call
+    // oscillation, seen in edits instead of tool calls, so it carries the same delta.
+    if (editOscillation > 0) {
+      const d = PANIC_OSCILLATION_DELTA;
+      delta += d;
+      provenance.push({ name: 'edit_oscillation', delta: d, evidence: { symbols: editOscillation } });
     }
     // stale_depth_3 signal gated by localityConfidence: a stale agent doing focused local
     // work (high confidence) is much less risky than a stale agent in behavioral drift.

@@ -1,61 +1,65 @@
-# A richer spec↔code link-status vocabulary: name "Unwanted", "Predated", and shallow-vs-deep coverage, from OpenFastTrace
+# Requirement links say more: unwanted, predated, and shallow or deep coverage
 
-> Status: PROPOSED (2026-07-03, e2e audit pass 4, enhancement). OpenLore's spec-anchoring tools
-> (`check_spec_drift`, `audit_spec_coverage`, `verify_claim`, the freshness lease) express a
-> coarse fresh / drifted / orphaned vocabulary. OpenFastTrace — the mature deterministic
-> requirements-tracing tool — has a strictly richer typed link-status vocabulary that names states
-> OpenLore currently can't: **Unwanted** (code/anchor coverage nobody's spec requires), **Predated**
-> (a citation to a spec/decision revision newer than the store knows), and **shallow vs deep
-> coverage** (a requirement linked to an implementation vs one whose whole transitive chain — down
-> to a reaching test — is covered). These map cleanly onto OpenLore's existing graph + coverage
-> tools and become stable finding codes, no new subsystem.
+> Priority: P2 · Not built
+> Reaches the agent through: `verify_change` and `blast_radius` (drift findings), plus the existing `get_mapping` and `check_spec_drift` output and one `verify_claim` reason
+> Why it helps the agent: it sees when its change touches code that a requirement covers but no test reaches, or that no requirement asks for any more.
 
-## The gap
+## Problem
 
-- **(a) "Unwanted" has no name.** An anchored memory/decision or a spec-linked symbol that no
-  requirement actually asks for is invisible today — coverage tools report what IS covered, never
-  what's covered-but-unrequested. OFT flags this as `Unwanted`; it's the signal that a spec was
-  deleted or narrowed but its implementation lingers.
-- **(b) "Predated" has no name.** `verify_claim`'s `decision-current` kind catches a *superseded*
-  citation, but a citation to a revision *newer* than the store knows (a spec/decision id bumped
-  in a branch the index hasn't seen) is not distinguished from a valid one. OFT's `Predated`
-  status names exactly this.
-- **(c) Coverage is single-depth.** `audit_spec_coverage` reports a requirement as covered when an
-  implementation links to it, but a requirement whose implementation no test reaches is only
-  *shallow*-covered. `report_coverage_gaps` already computes the "no reaching test" half; composing
-  the two would yield OFT's shallow-vs-deep distinction as one honest verdict — "covered, but
-  shallowly: no test reaches the implementing code."
+The spec link index (`src/core/generator/spec-link-index.ts`) gives each requirement one state:
+`linked`, `ambiguous`, `unmapped`, `stale`, or `not-assessed`. Three real situations have no name:
+
+- A decision or memory still points at a requirement that was deleted. Nothing reports it at the
+  requirement level (`adr-orphaned` covers only a whole missing domain).
+- A citation names a decision or requirement that is on disk but not yet in the index. Today it
+  looks the same as a mistyped id.
+- A requirement is `linked` to code, but no test reaches that code. It is reported the same as a
+  requirement whose code is tested.
 
 ## What changes
 
-1. **Add the two missing link states as finding codes** in the finding registry:
-   `spec-coverage-unwanted` (an anchor/spec-link no requirement requires) and
-   `spec-citation-predated` (a citation to a revision newer than the indexed store). Both are
-   deterministic graph/store lookups, emitted in the unified `GovernanceFinding` shape, advisory by
-   default (blocking opt-in via `enforcement.policy`).
-2. **Shallow-vs-deep coverage in `audit_spec_coverage`.** For each covered requirement, compose the
-   existing reachability from `report_coverage_gaps` to label coverage `deep` (implementation is
-   reached by a test) or `shallow` (implementation exists but no test reaches it) — reusing the
-   sound-direction coverage-gap machinery, no new analysis.
-3. **`verify_claim` distinguishes Predated.** The `decision-current` / spec-citation paths return a
-   `predated` verdict (cite the revision the store actually has) separate from `refuted`
-   (superseded) and `unverifiable`.
+The new words apply to any requirement source the spec link index reads. OpenSpec is the only
+source today; other formats arrive with the separate change `spec-framework-neutrality` and get
+the same words with no further work here.
 
-## Why this is in scope
+- **`coverageDepth` on each linked requirement** in `get_mapping` output: `deep` (a test reaches
+  the linked symbol), `shallow` (none does), or `not-assessed`. It reuses the test reachability in
+  `src/core/services/mcp-handlers/coverage-gaps.ts`.
+- **Three advisory finding codes**, registered in `FINDING_CODE_REGISTRY`
+  (`src/core/services/mcp-handlers/enforcement-policy.ts`):
+  - `spec-coverage-unwanted`: a decision or memory cites a requirement that no requirement source
+    contains.
+  - `spec-citation-predated`: a cited decision or requirement exists on disk but not in the index.
+  - `spec-coverage-shallow`: the diff changes a symbol linked to a requirement that no test
+    reaches.
+- **Where they surface.** `check_spec_drift` emits them. `blast_radius` already composes
+  `check_spec_drift`, and `verify_change` composes `blast_radius`, so both carry them with the
+  proof: requirement name, source file, linked symbol, and the citing record.
+- **`verify_claim`.** For `decision-current`, an id that is on disk but not indexed stays
+  `unverifiable` and gains the reason `predated`, which tells the agent to re-index, not to doubt
+  the id.
 
-Spec anchoring and drift are core capabilities; OFT is the deterministic prior art that proves this
-exact vocabulary is what users of requirements-tracing need, and every added state is a lookup over
-graph + store data OpenLore already holds. No LLM, no new store — richer honest verdicts from
-existing evidence.
+## What does not change
 
-## Impact
+- No new MCP tool, CLI command, or preset. The five existing link states keep their names and
+  meaning. `verify_claim` keeps its three verdicts.
+- Findings are advisory. They block only if `enforcement.policy` names the code.
+- Local only, no LLM. A repository with no spec framework has no requirements, so it gets no
+  findings and no errors.
+- `shallow` and `unwanted` are reported only for what the diff touches, so a quiet change stays
+  quiet. `get_mapping` shows the whole picture on request.
 
-- Files: `src/core/services/mcp-handlers/enforcement-policy.ts` (two new finding codes), the
-  `audit_spec_coverage` handler (shallow/deep via the coverage-gap reachability), the `verify_claim`
-  spec-citation path (`claim-verification.ts` — add `predated`).
-- Specs: `drift` — 1 ADDED (SpecLinkStatusNamesUnwantedAndPredated); `verifier` — 1 ADDED
-  (CoverageDistinguishesShallowFromDeep).
-- No new tool. Risk: low — additive verdicts/codes; the `predated` path needs the store's revision
-  cursor (already tracked for supersession). Verify: an anchor for a deleted requirement surfaces
-  `unwanted`; a citation to a not-yet-indexed revision surfaces `predated`; a requirement covered by
-  test-unreached code reports `shallow`.
+## Limits we disclose
+
+- `deep` means a test reaches the code. It does not mean the test checks the requirement.
+- Depth is `not-assessed` when the linked symbol is in a language without test detection or call
+  graph support, or when the index is stale.
+- Requirements and decisions have no revision numbers. `predated` therefore means only "on disk,
+  not in the index".
+- `unwanted` covers citations OpenLore stores (decisions, memories). It does not find code that
+  nobody asked for.
+
+## Depends on
+
+Shipped code only: the spec link index, `check_spec_drift`, and the coverage-gap reachability.
+`spec-framework-neutrality` adds more sources later; this change does not wait for it.

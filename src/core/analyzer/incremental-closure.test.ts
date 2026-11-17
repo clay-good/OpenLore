@@ -90,7 +90,8 @@ describe('stale-region composition', () => {
     expect(composition).toMatchObject({ fileCount: 2, symbolCount: 3, hubCount: 2, chokepointCount: 1 });
     expect(composition.topSymbol?.name).toContain('\u001b');
     expect(formatStaleRegionComposition(composition)).toBe(
-      '2 files, 2 hubs, 1 chokepoint, top [2Jforgeline (src/a.ts)',
+      // The CSI payload goes with its ESC now, so no `[2J` is left welded to the symbol name.
+      '2 files, 2 hubs, 1 chokepoint, top forgeline (src/a.ts)',
     );
   });
 });

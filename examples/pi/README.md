@@ -10,21 +10,26 @@ fresh while you edit.
 
 ## What you get
 
-- **Context injection** (no tool call needed): each session starts grounded with
-  the architecture digest (`CODEBASE.md`), the spec-domain index, and a
-  task-specific `orient` on your first message.
+- **On-demand structural context**: the default prompt does not repeat the repository
+  architecture digest or spec-domain index. The agent calls `openlore_orient` when it has a task.
+  Set `"pi": { "contextMode": "full" }` to restore the digest and spec index on every turn.
 - **Native tools**: a session starts with the same lean set Claude Code gets
   by default (the `substrate` preset) — `openlore_orient`,
   `openlore_search_code`, `openlore_get_subgraph`, `openlore_analyze_impact`,
   `openlore_recall`, `openlore_verify_claim`, `openlore_blast_radius`, and more.
   The agent calls `openlore_activate_tools` to turn on a group when a task needs
-  it: `specs`, `memory`, `review`, `quality`, or `inspect`. Set
+  it: `specs` (including `openlore_prepare_spec_generation` and
+  `openlore_prepare_spec_repair`), `memory`, `review`, `quality`, or `inspect`. Set
   `"pi": { "toolSurface": "all" }` in `.openlore/config.json` to keep every tool
-  active.
+  active. If Pi's native `tool_search` is enabled before OpenLore loads, OpenLore
+  automatically keeps only `openlore_orient` and `openlore_search_code` visible;
+  use Pi's `tool_search` to discover and load specialist tools. OpenLore does not
+  enable or modify `tool_search` settings. `toolSurface: "all"` still takes precedence.
 - **Config wizard**: opt-in setup via `/openlore configure`
   slash command or `openlore_configure` tool.
 - **Footer status**: an `openlore:` entry in Pi's status bar says whether the
-  tools can work right now. See [Status line](#status-line).
+  tools can work right now. It uses Pi's theme colors to distinguish ready,
+  in-progress, warning, and error states. See [Status line](#status-line).
 
 ## Prerequisites
 
@@ -101,7 +106,7 @@ For example, a global file can contain:
 ```json
 {
   "generation": { "provider": "openai", "model": "your-model" },
-  "pi": { "toolSurface": "lean" },
+  "pi": { "contextMode": "on-demand" },
   "contextInjection": { "mode": "task-scoped" }
 }
 ```
@@ -133,7 +138,7 @@ shutdown. Print (`-p`) and JSON modes show no status.
 | `openlore: no index (run openlore analyze)` | The repository has no analysis yet. |
 | `openlore: analyzing…` | An analysis owns the repository and no usable index exists yet. |
 | `openlore: index degraded` | An analysis artifact is missing or corrupt. Run `openlore analyze`. |
-| `openlore: daemon incompatible` | A daemon from an older or different release runs for this tree. Run `openlore serve --stop`, then retry. |
+| `openlore: daemon incompatible` | A daemon from an older release or with an outdated tool surface runs for this tree. Pi automatically replaces a verified older-version daemon when the project is opened, reusing its preset. A current-version preset missing Pi tools remains in place and shows an explicit full-preset recovery command. |
 | `openlore: daemon not started (spawn disabled)` | `OPENLORE_PI_NO_SPAWN` or `"pi": { "spawnDaemon": false }` is set and no daemon is running. |
 | `openlore: daemon unavailable` | The daemon could not start or stopped answering. See `.openlore/serve.log`. |
 | `openlore: status unknown` | The readiness read failed. Tools still report their own errors. |
@@ -152,10 +157,31 @@ The daemon:
 - re-analyzes the call graph (debounced) after each edit burst — so what the
   model sees never silently diverges from the code.
 
-The extension never kills a daemon it didn't start; it may be serving other
-clients (another Pi session, an editor). If a healthy daemon is already running
-with a narrower preset, Pi reports the incompatibility and asks you to run
-`openlore serve --stop`; it does not weaken that daemon's operator-selected boundary.
+After an update, detached daemons from the previous release can survive
+restarting Pi or pi-outpost. When a project is opened, Pi automatically replaces
+an authenticated daemon whose reported version is older than the installed extension,
+reusing the preset reported by its authenticated health response. The newly installed
+release applies that preset's updated tool definition. If a current-version preset still
+lacks tools Pi needs, Pi reports the incompatibility without repeatedly restarting it;
+`/openlore restart` explicitly switches to Pi's full preset. The
+stop uses the packaged CLI, so `openlore` need not be installed globally or on
+`PATH`. It verifies the daemon's repository,
+PID, protocol, and authentication and waits for graceful teardown; it never sends
+a signal to a PID from `serve.json`. If shutdown is refused or incomplete, no
+replacement is launched. An unverified or legacy daemon must be stopped by its owner.
+
+For an explicit retry, run **`/openlore restart`** in Pi or pi-outpost while the
+agent is idle. This can interrupt other clients sharing the project daemon.
+
+When `OPENLORE_PI_NO_SPAWN` or `pi.spawnDaemon: false` is set, automatic recovery
+and the explicit restart command refuse both stopping and starting: use the
+supervising host's restart mechanism instead.
+
+The spawn opt-out is the **only** signal that protects a host-supervised daemon.
+A daemon's health response does not say who supervises it, so a host that runs
+its own OpenLore daemon (for example in-process through the API) without setting
+the opt-out can have that daemon stopped by automatic recovery. Such a host must
+set `OPENLORE_PI_NO_SPAWN` or `pi.spawnDaemon: false`.
 
 ## Verify
 
@@ -168,5 +194,6 @@ curl -XPOST 127.0.0.1:$(jq .port .openlore/serve.json)/tool/orient \
   -d '{"args":{"task":"add rate limiting"}}'
 ```
 
-Then run Pi in the project and confirm the session opens with openlore context
-and that `openlore_orient` is callable.
+Then run Pi in the project and confirm `openlore_orient` is callable. For recognized OpenSpec
+proposal commands, the extension adds a short instruction to summarize the conversation and orient
+on the resulting brief.

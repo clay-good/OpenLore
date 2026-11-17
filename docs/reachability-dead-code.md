@@ -19,7 +19,8 @@ Static reachability **cannot see** dynamic entry points, framework magic (routes
 registries), reflection, or public API consumed *outside* the repo. All of these produce false
 "dead" positives. So `find_dead_code`:
 
-- treats **tests, imported symbols, route handlers, `main`, and files a config invokes** as roots,
+- treats **tests, imported symbols, route handlers (including every framework route in the route
+  inventory), `main`, and files a config invokes** as roots,
 - returns **confidence-tagged candidates with a reason**, never a verdict,
 - and **never auto-deletes**.
 
@@ -62,9 +63,65 @@ containing no dynamic dispatch.
 
 ## How roots and confidence work
 
-A node is a **root** (assumed live) if it is a test, is imported by name from another file, is a
-detected HTTP route handler, is `main`-like, or lives in a file a config invokes. Reachability is a
+A node is a **root** (assumed live) if it is a test, is imported by name from another file, serves a
+declared interface element (an HTTP route, a gRPC RPC, or a GraphQL field), is deployed by an
+infrastructure resource, is `main`-like, or lives in a file a config invokes. Reachability is a
 forward BFS from those roots.
+
+A node is a **root** (assumed live) if it is a test, is imported by name from another file, is a
+detected HTTP route handler, is a handler the **route inventory** pins to it, is `main`-like, or
+lives in a file a config invokes. Reachability is a forward BFS from those roots.
+### Route-inventory roots
+Edge-derived roots alone are not enough. `http_endpoint`, `deploys_symbol`, `implements_endpoint`
+and synthesized `route-handler` edges all need something to bind to — a cross-language call site, a
+deploy resource, a declared OpenAPI operation, a statically-paired registration. A
+framework-decorator route with no declared contract (`contractSource: "none"`) produces **none** of
+them, so a `@Get('broadcast')` method that only Nest invokes used to read as high-confidence dead
+while `get_route_inventory` listed it as a route — two contradictory answers from one build.
+`route-inventory.json` is already written by `analyze`, so this is a **join, not new analysis**
+(change: `root-framework-routes`). Each inventoried route is resolved to a graph node by **file +
+handler name**, and a handler is rooted **only when it pins to exactly one declaration in that
+file**:
+| Outcome | What happens |
+|---|---|
+| exactly one declaration | liveness root, counted in `rootKinds.httpHandlers`, receipt in `routeInventoryRoots` |
+| several declarations (`ambiguous`) | **not rooted**; every candidate of that name is capped `low` and told the inventory names it |
+| none in that file (`handler-not-in-file`) | not rooted, counted |
+| file not in the index (`file-not-indexed`) | not rooted, counted |
+| no handler name, or one over 256 chars (`handler-not-named`) | not rooted, counted |
+| an absolute path or one escaping the root (`outside-repository`) | not rooted, counted |
+| past 50,000 routes (`over-cap`) | not rooted, counted |
+Nothing is guessed — there is deliberately no basename or path-suffix fallback. **A root attributed
+to the wrong node is worse than a disclosed unresolved handler, because it makes real dead code look
+live.** Every refusal is counted by reason in `routeRootsNotAssessed` (with up to 10 routes listed)
+and summarised as a caveat, exactly the way `contractRootsNotAssessed` discloses an unresolved
+contract binding.
+The join is O(routes + nodes): the file → name → ids index is built once and each route is a
+constant-time lookup. The artifact is read through the bounded untrusted-artifact reader; an absent,
+oversized, truncated, or non-JSON inventory degrades to the edge-only roots **with** a
+`routeInventoryRoots.boundary`, never a crash and never a silent "no routes". Because an inventoried
+route is a decorator literally above the declaration rather than a synthesized edge, these roots
+apply in `directResolvedOnly` mode too.
+Every framework the inventory names is an HTTP routing framework (nestjs, express, fastify,
+nextjs-app, fastapi, flask, django, starlette, spring, jaxrs, …), so all of these roots count under
+`rootKinds.httpHandlers`; `routeInventoryRoots.byFramework` breaks them down. No finer root label is
+clearly true from that field alone.
+### Declarations and generated files are not code that can be dead
+Two whole categories used to be rated `high` where the verdict is a category error, not a false
+negative:
+- **TypeScript ambient declarations.** Every function-shaped symbol in a `.d.ts` / `.d.mts` /
+  `.d.cts` is bodyless (`public static create(properties?: ITrace): Trace;`). There is no code there
+  to be dead, so such a symbol is **not a candidate at any confidence** — excluded from the dead set
+  that `find_dead_code`, `report_coverage_gaps`, `get_landmarks` and `verify_claim` all share, and
+  counted in `declarationsExcluded`. For the exported contract's *shape*, use
+  `certify_public_surface`.
+- **Generated files.** A `*.pb.go` file's `Descriptor` / `ProtoMessage` / `ProtoReflect` /
+  `GetXxx`, and an `UnimplementedFooServer.mustEmbedUnimplementedFooServer` that exists *only* to be
+  embedded, are driven by protobuf reflection and Go embedding — never by a direct in-repo call. Each
+  candidate's file is classified through the [generated-file guard](../src/core/services/generated-file-guard.ts)
+  and a candidate in a generated, vendored, or lockfile file is **capped at `low`** with the guard's
+  rule, match and certainty named in the reason. They stay candidates (nothing here proves a caller);
+  they are just never *asserted*.
 
 ### Config-wired roots
 
@@ -74,6 +131,7 @@ Code that only configuration invokes has no importer, so without evidence it rea
 | Config | What counts as wiring |
 |---|---|
 | root `package.json` | `bin`, `main`, `module`, `exports` targets; files run by `scripts`; `jest` setup files |
+| declared workspace manifests | the same keys, in the `package.json` of every member the root `workspaces` field (array or `{ packages: [...] }`) or `pnpm-workspace.yaml` `packages:` declares; each reference resolves against that manifest's own directory and is receipted with its own path |
 | `tsconfig.json` | `files`; `outDir` → `rootDir` maps a build output (`dist/cli/index.js`) back to its source |
 | `vitest`/`vite`/`jest` config | literal `setupFiles` / `globalSetup` values |
 | `.github/workflows/*.yml` | files run by `run:` steps, relative to the step's `working-directory` |
@@ -93,22 +151,94 @@ counted in a caveat, never guessed: `dynamic-reference` (a variable, `${{ }}` ex
 `unsupported-form` (a module run by name, a path after a `cd`, or a config with too many references),
 `target-not-found`, `build-output-unmapped` (a build output tsconfig does not map to a source),
 `outside-repository`, `unreadable-config` (a link, a non-regular file, or one over 1 MB), and
-`unparsed-config`. Workspace-member manifests,
-framework routing conventions, and other config formats are not read, and only POSIX shell
-workflow steps are tokenized (a PowerShell or cmd step is an `unsupported-form` boundary). On this
+`unparsed-config`. Only the DECLARED workspace set is read — the tree is never searched for
+manifests — so a `package.json` outside it contributes nothing; a repository that declares workspaces
+carries that limit as a standing `externalWiring.boundaries` entry, together with any pattern that
+leaves the repository (`outside-repository`), a brace list / character class / extglob pattern, and an
+exact count of members left unread past the cap of 256. A member manifest's own `workspaces` field is
+not followed. Framework routing conventions and other config formats are not read, and only POSIX
+shell workflow steps are tokenized (a PowerShell or cmd step is an `unsupported-form` boundary). On this
 repository, 36 of 1,018 entry points are in config-wired files.
+
+### A root is labelled by the protocol it serves
+
+A function that serves a *declared* interface element is a root: whoever calls that element invokes
+it, in this repository or outside it. That binding is one edge kind (`implements_endpoint`) with
+three producers, so the count names the protocol rather than assuming HTTP:
+
+| Count | Where the root comes from |
+|-------|---------------------------|
+| `rootKinds.grpcHandlers` | a gRPC RPC — a method a protobuf `service` RPC is bound to through a server registration |
+| `rootKinds.graphqlResolvers` | a GraphQL field — a resolver a literal resolver map names for a schema field |
+| `rootKinds.httpHandlers` | an HTTP route — an OpenAPI/Swagger operation a route registration serves, a cross-language `http_endpoint` edge, or a synthesized framework route handler (the last only outside strict `directResolvedOnly` mode) |
+
+A gRPC or GraphQL binding is identified POSITIVELY, by the bound contract node's own format tag
+(`Protobuf` / `GraphQL`) — never inferred from the absence of the other protocols. The three are made disjoint by
+precedence (gRPC → GraphQL → HTTP), as `deployed` already takes precedence over all of them: a
+function that serves both a proto RPC and a GraphQL field is counted once, under `grpcHandlers`.
+`httpHandlers` is the fallback lane as well as the HTTP lane — a binding whose contract node carries
+no readable format tag is counted there, so read it as "an HTTP route, or a contract binding whose
+format could not be read".
+
+`rootKinds` is not a partition, and this split does not make it one — `externallyWired` carries no
+exclusions at all, so a jest setup file's functions are counted under both `tests` and
+`externallyWired`, and an imported route handler under both `imported` and `httpHandlers`. The split
+only stops a non-HTTP binding being labelled HTTP.
 
 Confidence is deliberately conservative — the bias is toward **false-live over false-dead**:
 
 | Confidence | When |
 |------------|------|
-| `high` | static language · no internal caller · not imported by name · **and its module is not imported anywhere** |
-| `medium` | reachable only from other dead code, or no dependency-graph signal available |
-| `low` | dynamic language (Python/Ruby/PHP/…), **or its module is imported elsewhere** (namespace/default/re-export usage the named-import scan can't resolve), **or a dynamic-boundary site can name it** |
+| `high` | static language whose imports the dependency graph extracts (TypeScript/JavaScript/Java/Kotlin) · no internal caller · not imported by name · **and its module is not imported anywhere** |
+| `medium` | reachable only from other dead code, or no dependency-graph signal available, **or a language whose imports are not extracted** (Go, Rust, C#, …: "not imported by name" is not evidence there) |
+| `low` | dynamic language (Python/Ruby/PHP/…), **or its module is imported elsewhere** (namespace/default/re-export usage the named-import scan can't resolve), **or a dynamic-boundary site can name it**, **or contract wiring names it and the binding was refused**, **or the route inventory names it as a handler it could not pin**, **or its file is classified generated/vendored**, **or its nearest `package.json` was not read for wiring** (neither the root's nor a declared workspace member's) |
+| *(not a candidate)* | a bodyless declaration in a `.d.ts` / `.d.mts` / `.d.cts` file — counted in `declarationsExcluded` |
 
 That last rule matters: on a real repo it cut high-confidence candidates from ~470 to ~35 — a
 symbol living in a module something else imports is never flagged `high`, because the specific
 usage may be a namespace or default import this static scan doesn't resolve.
+
+### Contract wiring the projection refused to bind
+
+A handler bound to a declared operation is a liveness root. A binding the contract projection
+**refused** roots nothing — so a gRPC `RegisterOrderServiceServer` call or a GraphQL resolver map can
+name a function literally while that function reaches no root and looks dead. Each refusal is
+disclosed as precisely as it can be, and a candidate it names is capped at `low` with the reason;
+`contractRootsNotAssessed` names the registration site.
+
+| The refusal names | Capped |
+|---|---|
+| a function (a grpc-js map entry, a resolver entry) | every candidate of that name |
+| an implementation class (a Go/Python servicer type) | the candidates of that class — in one directory where the projection's scope rule proves it (Go, unqualified type), by name alone otherwise |
+| no function at all — `server.addService(Echo.service, serviceImplementation)` hands over a variable | every candidate in the file that declares the registration |
+
+File scope is the honest granularity for the third row: the registration does not contain the
+handler names at all, and such an object is written where it is registered. A refusal that names no
+function and whose implementation *was* readable — an inline handler, or an unknown field or service
+with an all-inline map — caps **nothing**: it left no named symbol unrooted, so capping would print
+a reason that is false about the repository.
+
+**The cap reads the complete refusal list, not the 20-item reader slice.** `cg.contracts` carries
+`unboundHandlerNames` — deduplicated symbol, class and file names over every refusal — because a
+display cap must not decide a correctness question (grpc-go discloses 43 refusals, so an items-only
+rule would give up that repository's entire `high` tier). An index written before that field
+existed, or one past the field's own 2,000-name cap, cannot name every refusal; then and only then
+the whole repository gives up `high`, stated once in `contractRootsNotAssessed.refusalsNotNamed` and
+in `soundness.caveats`, not only on a row that happened to reach the `high` branch.
+
+### What this cap does NOT cover
+
+It is a lower bound, and `soundness.caveats` says so in the response:
+
+- an implementation object assembled in **another module** than the registration;
+- a registration style the scan does not read at all — its RPC is listed in `unboundRpcs`, and its
+  handler can still be rated `high`;
+- a GraphQL resolver-plumbing key (`__resolveType`), which produces no refusal row;
+- OpenAPI `unresolvedBindings`, which name no symbol (a route's `handlerName` falls back to the
+  placeholders `handler` / `unknown` when extraction fails, so it cannot ground a match).
+
+Where the refusal names only a file, unrelated candidates in that file are capped too — precision
+lost, never soundness.
 
 ### Re-export / barrel resolution raises recall (fewer false-dead)
 
@@ -120,7 +250,7 @@ to the real target (labelled `re_export`) instead of stalling at the barrel and 
 ambiguous first-same-named-candidate (`name_only`). Concretely, dogfooding this repo moved **29 symbols
 off the false-dead / false-entry-point list** — e.g. `EdgeStore.open` went from a reported *zero
 callers* to its real 22 — because a method/static call through an imported receiver now binds to its
-definition. See [openspec/changes/add-call-resolution-recall/](../openspec/changes/add-call-resolution-recall/).
+definition. See [openspec/changes/archive/add-call-resolution-recall/](../openspec/changes/archive/add-call-resolution-recall/).
 
 ## Tool contract
 
@@ -137,7 +267,16 @@ Report output:
 ```jsonc
 {
   "stats": { "analyzed": 1455, "roots": 399, "reachable": 790, "candidateDead": 665 },
+  "rootKinds": { "tests": 0, "imported": 393, "grpcHandlers": 0, "graphqlResolvers": 0, "httpHandlers": 0, "externallyWired": 4, "deployed": 0 },
+
   "rootKinds": { "tests": 0, "imported": 393, "httpHandlers": 0, "externallyWired": 4 },
+  "routeInventoryRoots": { "routesRead": 494, "rooted": 486, "byFramework": { "nestjs": 483, "express": 2, "fastify": 1 } },
+  "routeRootsNotAssessed": {
+    "total": 8, "byReason": { "ambiguous": 5, "handler-not-in-file": 3 },
+    "items": [{ "method": "GET", "path": "/x", "framework": "nestjs", "file": "src/a.controller.ts", "handler": "get", "reason": "ambiguous" }],
+    "note": "An inventoried route whose handler pins to exactly one declaration is a liveness root. …"
+  },
+  "declarationsExcluded": { "count": 912, "files": ["packages/proto/generated/cjs/protobuf.d.ts"], "note": "…" },
   "externalWiring": {
     "files": [{ "file": "src/cli/index.ts", "receipts": [{ "config": "package.json", "key": "bin.openlore" }], "roots": 4 }],
     "boundaries": [{ "config": "package.json", "key": "scripts.run", "reference": "$SCRIPT", "reason": "dynamic-reference" }]
@@ -171,7 +310,8 @@ Pure read over the existing graph — **no schema change**:
 - **Reachability** — forward BFS over [`buildAdjacency`](../src/core/services/mcp-handlers/graph.ts)'s
   forward map from the root set; candidate-dead = code nodes not reached. External and
   infrastructure (IaC) nodes are excluded.
-- **Liveness signals** — tests + HTTP route handlers + `main` + config-wired files, plus the dependency graph's
+- **Liveness signals** — tests + HTTP route handlers (edge-derived *and* joined from
+  `route-inventory.json`, see [`route-inventory-roots.ts`](../src/core/services/mcp-handlers/route-inventory-roots.ts)) + `main` + config-wired files, plus the dependency graph's
   imported names (symbol-level) and imported files (module-level) for the cross-language
   "used elsewhere" signal.
 - **Delete-impact** — recompute reachability with the target removed from both seeds and the
@@ -180,7 +320,10 @@ Pure read over the existing graph — **no schema change**:
 Implementation: [`reachability.ts`](../src/core/services/mcp-handlers/reachability.ts). Tested over
 a two-language fixture with known live regions, a dead orphan, a dead cluster, and a
 delete-impact diff in
-[`reachability.test.ts`](../src/core/services/mcp-handlers/reachability.test.ts).
+[`reachability.test.ts`](../src/core/services/mcp-handlers/reachability.test.ts). The
+route-inventory roots, the declaration and generated-file rules, and the cross-tool invariant
+*"no symbol is both in `get_route_inventory` and a `high` dead candidate"* are pinned in
+[`reachability-routes.test.ts`](../src/core/services/mcp-handlers/reachability-routes.test.ts).
 
 > Accuracy depends on a current `analyze_codebase` that includes tests and produces the dependency
 > graph. Without test nodes as roots, test-only code is flagged; without the dependency graph,

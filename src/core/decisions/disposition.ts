@@ -51,6 +51,11 @@ export const DECISION_DISPOSITION_REASONS: Record<
     description:
       'Consolidation kept this decision but re-derived its wording from the diff; your original text is preserved as authorStatement.',
   },
+  'auto-accepted-on-record': {
+    disposition: 'promoted',
+    description: 'Decision autopilot accepted this decision as recorded, with no gate and no LLM. Its status shows any later human review.',
+    nextAction: 'Review auto-accepted decisions with `openlore decisions review`.',
+  },
   'merged-into-consolidated': {
     disposition: 'merged-into',
     description: 'This draft was absorbed into another consolidated decision.',

@@ -7,6 +7,7 @@
  */
 
 import { readFile, readdir } from 'node:fs/promises';
+import { readSpecDomainEntries } from '../spec-sources/openspec.js';
 import { join, relative } from 'node:path';
 import { toRepositoryPath } from '../analyzer/file-walker.js';
 import { isConfinedPath } from '../../utils/path-confinement.js';
@@ -111,7 +112,7 @@ export function parseSpecReferences(content: string): {
   }
 
   // Extract requirement names: ### Requirement: Name
-  const reqMatches = content.matchAll(/^###\s+Requirement:\s*(.+)/gm);
+  const reqMatches = content.matchAll(/^###\s+Requirement:[ \t]*(.+)/gm);
   for (const match of reqMatches) {
     requirements.push(match[1].trim());
   }
@@ -305,7 +306,7 @@ export async function buildSpecMap(options: SpecMapperOptions): Promise<SpecMap>
   // Read all spec domain directories
   let entries;
   try {
-    entries = await readdir(specsDir, { withFileTypes: true });
+    entries = await readSpecDomainEntries(specsDir);
   } catch {
     logger.debug('No specs directory found');
     return { byDomain, byFile, domainCount: 0, totalMappedFiles: 0 };
@@ -316,11 +317,7 @@ export async function buildSpecMap(options: SpecMapperOptions): Promise<SpecMap>
   // because many projects legitimately have an api domain with source files.
   const skipDomains = new Set(['overview', 'architecture']);
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-
-    const domain = String(entry.name);
-    const specPath = join(specsDir, domain, 'spec.md');
+  for (const { domain, specPath } of entries) {
     // The mapping produced here becomes a WRITE target in the decision syncer, so a
     // committed `spec.md -> ~/.zshrc` must be dropped at the source rather than
     // mapped and later appended to.
@@ -486,16 +483,20 @@ export interface ADRMap {
 /**
  * Parse the ## Related section from an ADR file to extract domains and layers.
  */
+/**
+ * The `**Domains**:` and `**Layers**:` lists of an ADR. The list must be on the same line: an empty
+ * `**Domains**:` line names no domain (before, the next line, such as `## Context`, was read as one).
+ */
 export function parseADRRelated(content: string): { domains: string[]; layers: string[] } {
   const domains: string[] = [];
   const layers: string[] = [];
 
-  const domainsMatch = content.match(/\*\*Domains\*\*:\s*(.+)/);
+  const domainsMatch = content.match(/\*\*Domains\*\*:[ \t]*(.+)/);
   if (domainsMatch) {
     domains.push(...domainsMatch[1].split(',').map(d => d.trim()).filter(Boolean));
   }
 
-  const layersMatch = content.match(/\*\*Layers\*\*:\s*(.+)/);
+  const layersMatch = content.match(/\*\*Layers\*\*:[ \t]*(.+)/);
   if (layersMatch) {
     layers.push(...layersMatch[1].split(',').map(l => l.trim()).filter(Boolean));
   }
@@ -512,7 +513,7 @@ function parseADRHeader(content: string): { id: string; title: string; status: s
   let status = 'accepted';
 
   // Parse title: # ADR-001: Some Title
-  const titleMatch = content.match(/^#\s+(ADR-\d+):\s*(.+)/m);
+  const titleMatch = content.match(/^#\s+(ADR-\d+):[ \t]*(.+)/m);
   if (titleMatch) {
     id = titleMatch[1];
     title = titleMatch[2].trim();

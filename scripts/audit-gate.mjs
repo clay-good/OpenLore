@@ -17,23 +17,13 @@ import { execFileSync } from 'node:child_process';
 
 /** Advisories with no applicable fix. Each needs a reason and a clearing condition. */
 const ALLOWLIST = {
-  'GHSA-vfj7-8cjw-p6xm': {
-    package: 'braces',
-    reason:
-      'No patched release exists (every version <=3.0.3 is affected). Reached only through ' +
-      'the dev dependency @fission-ai/openspec -> fast-glob -> micromatch -> braces; nothing ' +
-      'in the runtime tree depends on it, it is absent from the published `files` list, and ' +
-      'it only ever sees developer-authored glob input.',
-    clearsWhen: 'braces publishes a fix, or @fission-ai/openspec stops depending on fast-glob 3.x.',
-  },
   'GHSA-fc5q-39xc-vjpf': {
     package: 'picomatch',
     reason:
       'No patched release exists (every version <=4.0.7, the latest, is affected). Reached only ' +
-      'through vite (optional, the `openlore view` dev server), vitest and ' +
-      '@fission-ai/openspec -> fast-glob -> micromatch (dev); none of OpenLore\'s own code ' +
-      'imports it. The ReDoS needs an attacker-chosen glob PATTERN, and these paths only ' +
-      'compile developer-authored config globs.',
+      'through vite and tinyglobby (optional, the `openlore view` dev server), vitest and ' +
+      "@fission-ai/openspec (dev); none of OpenLore's own code imports it. The ReDoS needs an " +
+      'attacker-chosen glob PATTERN, and these paths only compile developer-authored globs.',
     clearsWhen: 'picomatch publishes a fix (then bump it via vite/vitest or an override).',
   },
 };

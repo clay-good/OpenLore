@@ -13,12 +13,12 @@
  * for the Windows question (change: harden-windows-hook-quoting).
  */
 
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { formatPlatformCommand, windowsQuotingHazard } from './platform-command.js';
+import { formatGuardedHookCommand, formatPlatformCommand, windowsQuotingHazard } from './platform-command.js';
 
 const NODE_EXE = 'C:\\Program Files\\nodejs\\node.exe';
 /** The reporter's own path: an nvm-windows install, which has no space anywhere. */
@@ -200,5 +200,38 @@ describe('the emitted Windows command survives a real POSIX shell', () => {
     shellArgv(`"${escaping}"`);
     expect(readdirSync(SANDBOX)).toContain('escaped-here.txt');
     expect(existsSync(join(process.cwd(), 'escaped-here.txt'))).toBe(false);
+  });
+});
+
+describe('the guarded hook command exits 0 silently when its runtime is gone (hook-reliability 8.1)', () => {
+  /** A fake install: `<dir>/openlore/dist/cli/index.js` that prints its arguments. */
+  function fakeInstall(): { entry: string; dir: string } {
+    const dir = mkdtempSync(join(SANDBOX, 'guard-'));
+    const entry = join(dir, 'openlore', 'dist', 'cli', 'index.js');
+    mkdirSync(join(dir, 'openlore', 'dist', 'cli'), { recursive: true });
+    writeFileSync(entry, "process.stdout.write('ran ' + process.argv.slice(2).join(' '));\n");
+    return { entry, dir };
+  }
+  function runGuarded(node: string, entry: string): { status: number | null; stdout: string; stderr: string } {
+    const command = formatGuardedHookCommand({ command: node, args: [entry, 'hook', 'before-edit'] }, process.platform);
+    const r = spawnSync('bash', ['-c', command], { cwd: SANDBOX, encoding: 'utf8' });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+  }
+
+  withBash('runs the hook when the runtime exists', () => {
+    const { entry } = fakeInstall();
+    expect(runGuarded(process.execPath, entry)).toEqual({ status: 0, stdout: 'ran hook before-edit', stderr: '' });
+  });
+
+  withBash('exits 0 with no output when the entry file was deleted', () => {
+    const { entry } = fakeInstall();
+    rmSync(entry);
+    expect(runGuarded(process.execPath, entry)).toEqual({ status: 0, stdout: '', stderr: '' });
+  });
+
+  withBash('exits 0 with no output when the Node binary is gone', () => {
+    const { entry, dir } = fakeInstall();
+    const node = join(dir, process.platform === 'win32' ? 'node.exe' : 'node');
+    expect(runGuarded(node, entry)).toEqual({ status: 0, stdout: '', stderr: '' });
   });
 });

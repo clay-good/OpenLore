@@ -18,8 +18,8 @@ tool-surface rules owned by the `mcp-quality` domain.
 The system SHALL expose a two-tier map of the call graph: a region tier where each community is a
 single super-node with aggregated inter-region super-edges, and a function tier reached by drilling
 into one region. The region tier SHALL be derivable without reading any function body, and drilling
-in SHALL reuse the existing community-membership view. The region tier SHALL ship in the opt-in
-`navigation` preset, not the minimal default surface.
+in SHALL reuse the existing community-membership view. The region tier SHALL ship in the default
+`substrate` surface and in the `navigation` preset; it SHALL NOT be in the `minimal` preset.
 
 #### Scenario: Region view returns super-nodes and super-edges only
 
@@ -49,7 +49,8 @@ The system SHALL provide a `find_path` tool that accepts `from` and `to` endpoin
 names or as selectors (`landmark:<id>`, `role:entrypoint|hub|sink`, `file:<path>`), resolves them to
 concrete functions, and returns the single cheapest call path between them with a bounded set of
 alternates and a stated reason. Path cost SHALL use call-distance when available and hop-count
-otherwise. The tool SHALL ship in the opt-in `navigation` preset, not the minimal default.
+otherwise. The tool SHALL ship in the default `substrate` surface and in the `navigation` preset; it
+SHALL NOT be in the `minimal` preset.
 
 Each `role` selector SHALL resolve through an existing deterministic classifier and SHALL NOT
 introduce a new threshold: `entrypoint` = the graph's entry points; `hub` = the existing critical-hub
@@ -464,6 +465,17 @@ edge `confidence`/`synthesizedBy` provenance already present (decision `08e71184
 - **THEN** the `confidenceBoundary` names the synthesized crossing as known-unknowable, breaks down the
   synthesized edges by rule, and reports `complete: false`
 
+#### Scenario: `complete` is derived, and names its causes
+
+- **GIVEN** any response carrying a `confidenceBoundary`
+- **WHEN** it is dispatched
+- **THEN** `complete` is derived at the dispatch boundary from the boundary's own parts AND from the
+  registered disclosure channels on the response (`verdict: "unverifiable"`, `notAssessed`,
+  `truncated`, `baseRefFallback`, `changeGranularity.reasons`, `filePatternMatch`, `noPath`,
+  `ambiguousCallSites`, `partialIndex.partial`, …), never asserted by the handler
+- **AND** when it is `false`, `incompleteBecause` carries one reason per cause, each naming the field
+  that holds the detail (requirement `NoCompleteBesideADisclosure`, mcp-quality)
+
 ### Requirement: StalenessBoundary
 
 When graph-relevant source files have changed since the index's build commit, every conclusion SHALL
@@ -522,7 +534,7 @@ This domain SHALL conform to the canonical statement of decision `c6e36101`, whi
 ### Requirement: StructuralClaimVerification
 
 The system SHALL provide a `verify_claim` capability that accepts a structured claim
-(`{ kind: 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current', subject, object? }`)
+(`{ kind: 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current' | 'decision-governed' | 'endpoint-implemented' | 'endpoint-consumed' | 'lease-current', subject, object? }`)
 and returns
 a deterministic `{ verdict: 'confirmed' | 'refuted' | 'unverifiable', reason, receipt?, confidenceBoundary }`.
 The verdict SHALL be computed by the existing deterministic analysis for that claim kind (call-graph
@@ -534,7 +546,9 @@ to a human. A claim whose answer rests on a dispatch blind spot (a symbol reache
 synthesized dynamic-dispatch edges, or an unresolved/ambiguous symbol) SHALL return `unverifiable` with
 the boundary named (reusing the confidence-boundary disclosure), never a fabricated `confirmed`/`refuted`.
 The capability SHALL be conclusion-shaped (verdict + bounded receipt, never a graph to traverse) and
-registered only in an opt-in preset (`verify`), never in the minimal or first-run default surface.
+SHALL be registered in the default `substrate` surface and in the `verify` preset; it SHALL NOT be in
+the `minimal` or `navigation` presets. The last four kinds are specified in
+`ClaimKindsCoverContractsAndDecisions` and `LeaseTokensAreVerifiableClaims`.
 
 The `decision-current` kind extends the same verdict contract from the call graph to the recorded
 decision store (change: add-decision-reference-claim-verification), so an agent about to cite a decision
@@ -571,6 +585,11 @@ SHALL NOT load or contort the structural call-graph verifier.
 - **WHEN** the claim is verified
 - **THEN** the verdict is `unverifiable` (hedge or read the source), never a fabricated `confirmed`
 
+#### Scenario: The default surface offers claim verification
+
+- **WHEN** a client starts the MCP server without a preset selector
+- **THEN** `verify_claim` is in the listed tools
+
 ### Requirement: ProactiveIntentBriefing
 
 `orient` SHALL, for the symbols and files in a task's scope, proactively surface relevant prior
@@ -578,13 +597,29 @@ decisions and `remember` notes as part of orientation — without the agent havi
 it is unaware of. Surfaced intent SHALL include records authored by any agent or human (not only the
 current session) and SHALL carry a freshness verdict per the authoritative-recall invariant: orphaned
 intent is withheld from the authoritative set (segregated as stale), drifted intent is flagged to
-verify. (Realized by orient's `pendingDecisions` / `staleDecisions` / `unreconciledMemories` briefing.)
+verify. In addition to anchor-scope overlap, a note whose deterministic trigger predicate matches
+the task's touched set, and any note marked `pinned`, SHALL be pushed into the briefing as content
+(not only as a contradiction or reversal signal); `blast_radius` and `working_set_context` SHALL
+evaluate the same predicates against their own touched sets. Every briefing that injected memories
+SHALL carry an accessed-knowledge receipt naming each injected memory, the predicate that fired
+(or `pinned`), and its freshness verdict. Pinned and triggered items participate in the briefing's
+existing token budget and bounded-with-disclosure discipline; injection SHALL never add an
+unbounded or undisclosed section. (Realized by orient's `pendingDecisions` / `staleDecisions` /
+`unreconciledMemories` briefing plus the `injectedMemories` push-and-receipt surface.)
 
 #### Scenario: Orientation surfaces an in-scope constraint with its verdict
 
 - **GIVEN** a decision anchored to a function in the task's scope
 - **WHEN** `orient` runs for that task
 - **THEN** the decision is surfaced in the briefing with its freshness verdict
+
+#### Scenario: A triggered gotcha reaches an agent that never asked
+
+- **GIVEN** a note recorded with trigger `fileGlob: "src/routes/**"` and a task touching a file
+  under `src/routes/`
+- **WHEN** `orient` runs for that task
+- **THEN** the note's content appears in the briefing and the receipt names the note id and the
+  fileGlob predicate that fired
 
 ### Requirement: ReversalAwareness
 
@@ -697,7 +732,8 @@ binding that reports, per declared target, whether it resolves, whether its inde
 whether its index is fresh relative to its working tree; per declared reference, whether it is present;
 the presence of the store's own path; and any malformed-binding problems. Each finding SHALL carry a
 stable code (`no-binding`, `binding-invalid`, `registry-unreadable`, `store-path-missing`,
-`target-unresolved`, `target-missing`, `index-missing`, `index-stale`, `reference-missing`) and a
+`target-unresolved`, `target-missing`, `index-missing`, `index-stale`, `index-unbaselined`,
+`reference-missing`, `certificate-stale`) and a
 pasteable remediation. The check SHALL NOT block, SHALL be sound when it carries no error-severity
 finding, and SHALL degrade infrastructure failures (no federation, not a repository, **a corrupt
 federation registry**) to a finding rather than throwing — on every surface, including the MCP dispatch
@@ -712,10 +748,11 @@ path, not only the CLI. The check SHALL compose existing analyses only, with no 
 
 #### Scenario: A stale target index is surfaced
 
-- **GIVEN** a binding whose target index is older than that target's working tree
+- **GIVEN** a binding whose target's index fingerprint differs from the baseline recorded when it was
+  registered
 - **WHEN** the health check runs
-- **THEN** it returns exactly one finding with the stable code `index-stale` and a remediation, and does
-  not block
+- **THEN** it returns exactly one finding with the stable code `index-stale` and a remediation that
+  clears it (re-registering the target, which records the new baseline), and does not block
 
 #### Scenario: A corrupt federation registry degrades to a finding, never a throw
 
@@ -875,16 +912,16 @@ for a task SHALL be the same conclusion the agent would obtain by calling `orien
 presented in a bounded, injection-shaped form. The orientation algorithm, ranking, and result schema
 SHALL be unchanged; injection is a presentation-and-gating wrapper over existing output.
 
-> Implemented by `add-task-scoped-context-injection` (2026-06-22). `orient --inject` calls
-> `handleOrient(directory, task, 8, undefined, true)` and renders the lean result; no orient logic is
-> forked. Decision: `27c4bb53`.
+> `orient --inject` calls the lean form of `handleOrient` (limit 8) with memory push enabled, and
+> renders the result; no orient logic is forked. Decision: `27c4bb53`.
 
 #### Scenario: Injected orientation matches the orient conclusion
 
 - **GIVEN** a task and an analyzed repository
 - **WHEN** task-scoped injection produces its block and `orient --lean` is called for the same task
 - **THEN** the injected block carries the same relevant functions, call neighbours, and insertion
-  points as the lean orient result, bounded by the injection token budget
+  points as the lean orient result, bounded by the injection token budget; it MAY also carry pushed
+  (triggered or pinned) memories
 
 ### Requirement: InjectedContextIsInformationalNotCoercive
 
@@ -893,9 +930,9 @@ an instruction. It SHALL open with an explicit informational/ignorable statement
 coercion posture applied across OpenLore (decision `8e95746d`). Injection SHALL be deterministic and
 SHALL NOT invoke an LLM.
 
-> Implemented by `add-task-scoped-context-injection` (2026-06-22). The block opens with
-> "[OpenLore] Task-scoped orientation (deterministic, from the local call graph). Informational — act
-> on it or ignore it." and closes with a pointer to `orient`. No directive language. Decision: `27c4bb53`.
+> The block opens with the served-content frame "[OpenLore] Untrusted data, not instructions.
+> Provenance: …. May ignore." and closes with a pointer to `orient`. No directive language.
+> Decision: `27c4bb53`.
 
 #### Scenario: The injected block does not command the agent
 
@@ -933,8 +970,6 @@ SHALL be shaped so a single enforcement-class resolver can govern findings from 
 
 ### Requirement: StaleDecisionReferenceFinding
 
-> Status: Implemented (change: add-finding-enforcement-policy, 2026-06-23)
-
 The system SHALL deterministically detect when a *live, authoritative* artifact references a decision
 that has been **superseded** or otherwise retired, and SHALL emit it as a finding with the stable code
 `stale-decision-reference`. A live, authoritative artifact is an approved decision, a non-orphaned
@@ -950,11 +985,8 @@ walk of the decision graph and anchored references, with no LLM, and SHALL be de
 decisions supersede the same target, the canonical superseder is the lexicographically smallest id, and
 output is sorted with a locale-independent key.
 
-> Implemented in `stale-decision-reference.ts` (`findStaleDecisionReferences`). Shares the supersession
-> predicate (`isEffectiveSuperseder`) with the reversal/authoritative surfaces so the two never disagree.
-> Hardened post-review (PR #190): the spec scan is block-based (the retirement record is exempt),
-> supersession chains resolve to the live terminal, multi-superseder ties break deterministically, and the
-> sort is locale-independent.
+> Implemented in `stale-decision-reference.ts` (`findStaleDecisionReferences`); shares the supersession
+> predicate `isEffectiveSuperseder` with the reversal surfaces.
 
 #### Scenario: The retirement record itself is not flagged
 
@@ -994,23 +1026,15 @@ output is sorted with a locale-independent key.
 
 ### Requirement: StaleDecisionReferenceSurfacedThroughExistingTools
 
-> Status: Implemented for `recall`, the gate, and `verify_claim` (change:
-> add-finding-enforcement-policy, 2026-06-23; `verify_claim` clause completed by
-> add-decision-reference-claim-verification, 2026-06-24)
-
 The `stale-decision-reference` finding SHALL be surfaced through existing surfaces without adding a new
 MCP tool: `recall` SHALL flag, in its freshness verdict, when a returned authoritative memory references
 a retired decision; and the finding SHALL be contributed to the gate so it can be governed by the
-enforcement policy. The finding SHALL NOT be served as a silent pass.
+enforcement policy; and `verify_claim` SHALL refute a `decision-current` claim on a retired decision.
+The finding SHALL NOT be served as a silent pass.
 
-> `recall` attaches a `staleDecisionRef` signal to an authoritative memory whose content cites a retired
-> decision and suppresses the clean `verifiedCurrent` claim; `openlore enforce` contributes the finding
-> to the unified gate. The original proposal also named `verify_claim`; that clause was initially deferred
-> because the structural-only claim model had no decision-reference claim to rest on. It is now closed by
-> the `decision-current` claim kind (see `StructuralClaimVerification` above), which verifies the same
-> retirement graph through a cleanly separated decision-store path that does not contort the structural
-> verifier — so an agent can affirmatively check a decision it is *about to cite* is still authoritative,
-> complementing `recall`'s passive flag on memory it happens to surface.
+> `recall` attaches a `staleDecisionRef` signal and suppresses `verifiedCurrent`; `openlore enforce`
+> contributes the finding to the gate; `verify_claim` kind `decision-current` checks the same retirement
+> graph.
 
 #### Scenario: Recall flags an authoritative memory resting on a retired decision
 
@@ -1113,7 +1137,7 @@ SHALL be disclosed rather than silently swallowed.
 ### Requirement: TraversalToolsShareOnePrecomputedRepresentation
 
 All reachability-answering handlers (`select_tests`, `report_coverage_gaps`, `find_dead_code`,
-`blast_radius`/`change_footprint`, `find_path`, `trace_execution_path`, `analyze_env_impact`, and
+`blast_radius` (and its change-footprint projection), `find_path`, `trace_execution_path`, `analyze_env_impact`, and
 `verify_claim`'s reach kinds) SHALL traverse a single condensation/adjacency structure built or
 loaded once per artifact generation, rather than rebuilding per-call adjacency. An unfiltered
 whole-graph reach SHALL run as a topological sweep of the condensation DAG; a reach restricted to
@@ -1495,6 +1519,17 @@ generalized cold-start bootstrap: non-blocking, never-throw, opt-out via
 its trigger SHALL disclose and stop, never loop. Detection and disclosure are unchanged;
 repair is additive.
 
+Age alone SHALL NOT make an index stale. An analysis past the age threshold SHALL first be
+compared with its source by content fingerprint; when the source is unchanged, the index is
+current — no repair starts and no answer is disclosed as served from a stale index — and that
+verification SHALL hold for one age window. A full analysis SHALL record the content hash of
+every file it read, so the content-hash-first freshness check has a baseline and a file whose
+mtime changed without its bytes changing (a checkout, pull or new worktree) is not reported
+behind the working tree. A file larger than the freshness scan reads SHALL keep the mtime
+fallback rather than a hash the read path can never confirm. The content check SHALL run only
+where a repair could follow it, SHALL record a changed result as well as an unchanged one, and
+SHALL use the same fingerprint configuration that `analyze` records.
+
 #### Scenario: A stale index heals itself behind an honest answer
 
 - **GIVEN** a repo whose index attestation reconciles to `mismatched`
@@ -1503,16 +1538,19 @@ repair is additive.
   "background refresh started" note, exactly one background `analyze` starts, and a later
   call after it completes serves fresh results with no verdict
 
+#### Scenario: An old index over unchanged code is current
+
+- **GIVEN** an analysis older than the age threshold whose source files are byte-identical to
+  what it was built from, though their mtimes are newer
+- **WHEN** any graph-dependent tool is called
+- **THEN** the response carries no repair marker and no stale-file note, and no rebuild starts
+
 #### Scenario: Repair never blocks or lies
 
 - **GIVEN** a background repair in flight
 - **WHEN** further tool calls arrive
 - **THEN** each returns without waiting on the rebuild and none presents the in-repair
   index as fresh
-
-> Note: the next requirement was originally a MODIFIED block. Its base requirement was
-> authored in `refine-happy-path-and-defaults`, which shipped without spec deltas, so the
-> full statement is recorded here as an addition.
 
 ### Requirement: ReadyOrHonestFirstUse
 
@@ -1607,6 +1645,92 @@ demote its own surprise tier.
 - **GIVEN** a caller of the change-coupling miner that supplies no start ref
 - **WHEN** churn is mined
 - **THEN** the result is identical to the pre-change behavior
+
+### Requirement: SurpriseIsWithheldPerFileWhenAFileHasNoBefore
+
+The `surprising-change` tier asserts "a hub whose file rarely changed before". The system SHALL
+withhold that label from any symbol whose file is reported ADDED (or renamed into its path) in the
+briefed range and carries no pre-base churn at that path: such a file did not exist before, so the
+premise is vacuous rather than true, and its zero prior churn SHALL NOT be read as stability. The
+symbol SHALL still be briefed, one tier lower, on its structural labels alone, and the withholding
+SHALL be stated on the entry and counted in a `withholding` receipt.
+
+#### Scenario: A high-fan-in symbol in a brand-new file is not surprising
+
+- **GIVEN** a changed file git reports as added since the base ref, with no pre-base churn
+- **AND** a high-fan-in symbol in it
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** the symbol is not tiered `surprising-change`
+- **AND** it is still briefed at its structural tier with the withheld label and its reason
+
+#### Scenario: A long-lived, rarely-changed file keeps the label
+
+- **GIVEN** a hub in a file present at the base ref with low pre-base churn
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** the symbol is tiered `surprising-change` with no withheld label
+
+#### Scenario: Absent from the churn window is not absent from history
+
+- **GIVEN** a modified file with no entry in the scanned churn window
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** the label is kept, because the file existed and was simply never touched
+
+#### Scenario: A re-added path with real pre-base history keeps the label
+
+- **GIVEN** a file added in the briefed range whose path carries pre-base churn
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** the label is kept, because its "before" is real
+
+### Requirement: HubTiersAreWithheldFromFunctionLocalHelpers
+
+The `surprising-change`, `hub-change` and `chokepoint-change` tiers all assert the symbol is a
+repository hub. The system SHALL withhold them from a changed symbol that is lexically nested
+inside another indexed function in the same file and every one of whose callers lies inside that
+enclosing function: its fan-in is internal to one body, so the significance belongs to the
+enclosing symbol. The symbol SHALL rank `ordinary-change`, SHALL retain its graph labels and
+fan-in as disclosed evidence, and the withholding SHALL name the enclosing symbol. A nested
+function with any caller outside its enclosing function, or with no caller, SHALL be unaffected.
+
+#### Scenario: A one-line nested helper is not the headline
+
+- **GIVEN** a nested arrow function with high fan-in, called only from its enclosing parser
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** it is tiered `ordinary-change` with its hub label and fan-in reported as evidence
+- **AND** the withheld tier names the enclosing function
+
+#### Scenario: A nested function called from outside keeps its tier
+
+- **GIVEN** a nested function with a caller outside its enclosing function
+- **WHEN** `briefing_since` ranks the change set
+- **THEN** its hub-derived tier is assigned unchanged
+
+### Requirement: BriefingSinceDoesNotComputeTheCoOccurrenceMap
+
+`briefing_since` reads only the change-coupling miner's per-file churn and scan stats. It SHALL
+request the miner's churn-only mode so the O(files²)-per-commit co-occurrence pass is not computed
+and discarded. The miner SHALL keep the co-occurrence map as its default so the analyze-time
+snapshot that `get_change_coupling` serves is unchanged, SHALL return byte-identical churn and scan
+stats in either mode, and SHALL report which mode ran rather than letting an opted-out empty map
+read as an absence of co-change.
+
+#### Scenario: The cheap path performs no pair operations
+
+- **GIVEN** a history whose commits each touch many files
+- **WHEN** the miner is called in churn-only mode
+- **THEN** its co-occurrence pair operation count is zero and the coupling map is empty
+- **AND** the mode is reported so the emptiness is not read as evidence
+
+#### Scenario: The default still computes the map
+
+- **GIVEN** the same history
+- **WHEN** the miner is called with no mode option
+- **THEN** the co-occurrence map is computed as before
+
+#### Scenario: The opt-out changes no answer
+
+- **GIVEN** the same history mined in both modes
+- **WHEN** the churn maps and scan stats are compared
+- **THEN** they are identical
 
 ### Requirement: BriefingCapabilityClaimsAreCurrent
 
@@ -3061,6 +3185,68 @@ output, subject to the same dispatch-time shape enforcement as the rest of the c
 - **WHEN** the conclusion shape is enforced at dispatch
 - **THEN** the omission is reported as a contract violation
 
+### Requirement: RetrievalCannotClaimCoverageOverUnreadContent
+
+`orient` and `search_code` are the first tools an agent calls, so a confident empty answer there is
+the most expensive possible failure: the agent stops looking. Both SHALL account for material in
+scope that the index could not read, and SHALL NOT render "I found nothing" and "I could not read
+it" identically.
+
+A verdict of `covered` SHALL be unsayable when material in scope was unparseable, contributed no
+usable tree, exceeded a size cap, was abandoned at the parse budget, decoded lossily, lost its
+grammar, had analysis breadth shed under memory pressure, or whose readability record is itself
+present and unreadable. In each of those cases the verdict SHALL be `partial`, the cause SHALL be
+named in the coverage conclusion's `unreadable` field and in the `parseHealth` boundary, and the
+verdict the evidence alone would have produced SHALL travel as `evidenceVerdict`. `uncovered` is
+equally unsayable there: a repository with one bad file is not uncovered, and a repository where two
+of three files never parsed has not established that nothing matched.
+
+The readability signal SHALL be repository-wide, not scoped to the files the result set surfaced: a
+file that produced zero symbols never surfaces, and its silence is exactly what a confident empty
+answer rests on. It SHALL be read from the persisted parse-health artifact, never recomputed, so the
+disclosure adds no measurable cost to the hot path, and an absent artifact SHALL continue to mean a
+clean repository.
+
+An index that exists and cannot be vouched for SHALL be refused with the same `notReady` conclusion
+the graph-dependent tools already return, rather than served as ranked results. An absent index, or
+an index whose graph is unavailable, SHALL continue to be answered as before — and so SHALL an index
+whose context matches its published generation but could not be read into a graph context, since its
+bytes are attested and its staleness disclosure and background repair are what answer that state.
+
+#### Scenario: A file that produced zero symbols is still disclosed
+
+- **GIVEN** a repository holding a source file the grammar could not parse into any symbol
+- **WHEN** `orient` or `search_code` answers a query that surfaces only the readable files
+- **THEN** the verdict is `partial` and the boundary names the unparsed file, even though no result
+  set could ever surface it
+
+#### Scenario: Nothing matched over unread material is not an abstention
+
+- **GIVEN** a repository with unparseable files and a query that matches no indexed symbol
+- **WHEN** `search_code` answers
+- **THEN** the verdict is `partial` with `evidenceVerdict: "uncovered"`, not a bare `uncovered`
+
+#### Scenario: An unattested index is refused, not served
+
+- **GIVEN** an analysis whose artifacts no longer hash to their published generation
+- **WHEN** `orient` or `search_code` is called
+- **THEN** it returns the shared `notReady` refusal with its reason and remedy, and no ranked results
+
+#### Scenario: An attested but unreadable context keeps its staleness answer
+
+- **GIVEN** an analysis whose context matches its generation but holds no usable graph, and a source
+  file newer than it
+- **WHEN** `orient` answers
+- **THEN** it serves the ranked results with `indexStaleness` naming the newer file, and schedules the
+  background repair, rather than refusing
+
+#### Scenario: A clean repository is unchanged
+
+- **GIVEN** a repository with no parse-health artifact and an attested index
+- **WHEN** `orient` or `search_code` answers
+- **THEN** the verdict and the response are exactly as before this requirement, with no boundary and
+  no readability field
+
 ### Requirement: InsertionPointsWithholdRecommendationWithoutStrongEvidence
 
 `suggest_insertion_points` SHALL NOT recommend a location when the retrieval that produced its
@@ -3223,7 +3409,7 @@ A `record_decision` call whose content and anchors match an already-decided draf
 
 #### Scenario: Re-recording a rejected draft returns the verdict
 
-- **GIVEN** a draft already rejected with reason `not-architectural`
+- **GIVEN** a draft already rejected with reason `not-in-consolidated-set`
 - **WHEN** the same content and anchors are recorded again
 - **THEN** the response reports the existing disposition and reason rather than creating a new pending draft
 
@@ -3343,7 +3529,7 @@ When no analyzed domain backs the request at all, the behavior state SHALL be `u
 
 This is an observation, never a decision: the system MUST NOT declare such a domain illegitimate, and MUST NOT author or withhold a specification on its own. Canonical agent skills SHALL key their stop on the emitted follow-up rather than on the behavior state alone — a bare `unavailable` without that follow-up is not a stop — and SHALL then ask the human whether the domain should be specified at all. They MUST NOT paraphrase documentation into requirement statements.
 
-- **Implementation**: `domainBehaviorOf::src/core/services/spec-workflow.ts`
+- **Implementation**: `prepareSpecGeneration::src/core/services/spec-workflow.ts`
 
 #### Scenario: A behavior-free domain raises a stop, not a spec
 - **GIVEN** a resolved domain every one of whose defining files is documentation
@@ -3446,3 +3632,1553 @@ The audit CLI and MCP response contracts SHALL present an unavailable mapping-co
 - **WHEN** the mapping-coverage state is not `available`
 - **THEN** the response includes the state and reason needed to refresh or regenerate the artifact
 - **AND** the agent can distinguish unavailable coverage evidence from a codebase with no gaps
+
+### Requirement: MemoryTriggerPredicates
+
+`remember` SHALL accept one optional trigger — file glob, symbol pattern, spec domain, or
+anchor within N call hops of a touched symbol — and an optional `pinned` flag (pushed, within the bound, into
+orient's full briefing). Evaluation SHALL be deterministic set membership and depth-capped
+reachability, with no LLM. A pushed memory SHALL carry its freshness verdict; an orphaned one SHALL
+never be pushed as authoritative. A malformed trigger SHALL be rejected at record time.
+
+#### Scenario: A malformed trigger is rejected, not stored
+
+- **GIVEN** a `remember` call whose trigger names two predicates, or none from the closed union
+- **WHEN** the memory is recorded
+- **THEN** the call returns an error naming the closed union and nothing is stored
+
+#### Scenario: A call-hop trigger fires on structural proximity
+
+- **GIVEN** a note anchored to `EdgeStore.open` with trigger `withinHops: 2`
+- **WHEN** a briefing tool runs for a task touching a function that reaches `EdgeStore.open` in
+  two call hops
+- **THEN** the note is pushed with its verdict and a receipt citing the withinHops predicate
+
+#### Scenario: A trigger never launders a stale memory
+
+- **GIVEN** an orphaned note whose trigger matches the current task
+- **WHEN** the briefing is assembled
+- **THEN** the note is not injected as authoritative; at most it appears segregated as stale,
+  exactly as recall would serve it
+
+#### Scenario: Pinned stays budgeted and disclosed
+
+- **GIVEN** more pinned notes than the briefing budget accommodates
+- **WHEN** `orient` runs
+- **THEN** the included subset is deterministic, the omitted count is disclosed, and each
+  included item carries a `pinned` receipt
+
+### Requirement: SubSymbolSpanAnchors
+
+`remember` SHALL optionally anchor a memory to an exact text span WITHIN a symbol, in addition to
+the symbol- and file-level anchors. A span anchor keeps the symbol's identity fields and records
+a span-level content baseline. Freshness SHALL re-locate the span by exact-text match within the
+symbol's current body: a unique match (at the same or a new position) is `fresh`; no match is
+`drifted`; multiple matches are ambiguous and the anchor SHALL orphan with candidate locations,
+never be silently re-attached to a guess. After a continuity carry-forward re-points the symbol,
+the span SHALL be re-located inside the new body by the same exact-text rule. Span matching SHALL
+use no similarity score, threshold, or model. A span that cannot be located at record time SHALL
+be recorded at symbol level with disclosure, never silently span-less.
+
+- **Implementation**: `anchorFreshness::src/core/decisions/anchor.ts`
+
+#### Scenario: An unrelated edit no longer drifts a line-specific memory
+
+- **GIVEN** a memory span-anchored to one statement inside a large function
+- **WHEN** a comment elsewhere in that function is edited and the index updates
+- **THEN** the span re-locates exactly and the memory stays `fresh`, where a whole-symbol anchor
+  would have reported `drifted`
+
+#### Scenario: An ambiguous span orphans with candidates
+
+- **GIVEN** an edit that duplicates the anchored text so it appears twice in the symbol's body
+- **WHEN** freshness is computed
+- **THEN** the anchor is `orphaned` with both candidate locations disclosed, and the memory is
+  withheld from the authoritative set
+
+### Requirement: AnchorLossIsAnActionableWorkItem
+
+Recall's per-anchor verdicts SHALL carry an additive tri-state outcome label mapped from existing
+freshness states: `silently-carried` (anchor byte-identical or exact-relocated),
+`re-pointed-with-provenance` (carried across a rename/move with `carriedAcross` provenance), and
+`needs-human-reselection` (anchor lost or ambiguous). The third state SHALL be emitted as a
+registered `memory-anchor-lost` governance finding (advisory by default; blocking only via
+`enforcement.policy`) in the unified GovernanceFinding shape, so `openlore enforce` and CI can
+track lost anchors as a burndown. Authoritative filtering SHALL be unchanged: a
+needs-human-reselection memory is never served as authoritative. A continuity gap the adjacent-
+states matcher cannot bridge (e.g. a rename that occurred across multiple unindexed states) SHALL
+land in `needs-human-reselection` with that reason disclosed, never in a guessed re-attachment.
+
+- **Implementation**: `anchorOutcome::src/core/decisions/anchor.ts`
+
+#### Scenario: A lost anchor becomes a trackable finding
+
+- **GIVEN** a memory whose anchored symbol was deleted with no unambiguous successor
+- **WHEN** recall or `openlore enforce` evaluates the store
+- **THEN** the memory is labeled `needs-human-reselection` and a `memory-anchor-lost` finding is
+  emitted with the memory id as subject — advisory, not blocking, by default
+
+#### Scenario: A clean rename is work-free and says why
+
+- **GIVEN** a memory whose anchor was carried across an unambiguous rename
+- **WHEN** recall evaluates it
+- **THEN** its outcome is `re-pointed-with-provenance` citing the carry, no finding is emitted,
+  and the memory remains authoritative
+
+### Requirement: MemoriesCarryReVerifiableClaims
+
+The `remember` tool SHALL accept at most 10 optional structural claims expressed in the closed
+`verify_claim` grammar, SHALL verify each claim at write time against the current graph with the
+`verify_claim` evaluator itself, and SHALL refuse to store the memory when any claim does not verify
+`confirmed`, returning every claim's verdict and receipt. The `recall` tool SHALL check each stored
+claim of a returned, non-orphaned, non-invalidated note against the current graph and attach a
+per-claim verdict of `evidence-holds`, `evidence-refuted`, or `evidence-unverifiable`, each with
+the `verify_claim` reason and receipt. A memory with any `evidence-refuted` claim SHALL be served in
+an `evidenceRefuted` lane, and otherwise a memory with any `evidence-unverifiable` claim in an
+`evidenceUnverifiable` lane; neither lane is authoritative, neither carries `verifiedCurrent`, and
+both are distinct from anchor `drifted` and `orphaned`. Claim verification SHALL be deterministic
+graph lookup only — no LLM. One recall SHALL check a claim shared by several memories once. Under
+`asOf` or `changedSince` claims SHALL NOT be checked, and the response SHALL say so. The schema
+addition SHALL be additive: memories without claims behave exactly as before.
+
+#### Scenario: A false-at-write claim is refused with a receipt
+
+- **GIVEN** a `remember` call carrying the claim `{ kind: "dead", subject: "handler" }`
+- **WHEN** the current graph has a caller of `handler`
+- **THEN** the memory is not stored and the response carries each claim's verdict, with the
+  reason and receipt `verify_claim` would return
+
+#### Scenario: Content rot is caught while the anchor stays fresh
+
+- **GIVEN** a stored memory claiming `orphan` is dead, anchored to an unchanged symbol
+- **WHEN** the graph gains a caller of `orphan` and `recall` runs
+- **THEN** the memory's anchor freshness is `fresh` but the claim verdict is `evidence-refuted`
+- **AND** the memory is served in `evidenceRefuted`, not in `authoritative`
+
+#### Scenario: An unresolvable claim subject is unverifiable, not silently held
+
+- **GIVEN** a stored claim whose subject symbol no longer resolves in the index
+- **WHEN** `recall` runs
+- **THEN** that claim's verdict is `evidence-unverifiable` with the non-resolution disclosed
+- **AND** the memory is served in `evidenceUnverifiable`, not in `authoritative`
+
+#### Scenario: Claimless memories are unaffected
+
+- **GIVEN** a memory recorded before this change, with no claims
+- **WHEN** `recall` runs
+- **THEN** it is served under the existing anchor-freshness verdicts only, with no claim lane
+
+### Requirement: DeprecatedSymbolUseIsAnAdvisoryFinding
+
+`structural_diff` SHALL report each call edge the diff adds whose target carries a deprecation
+marker, with caller, caller file and line, target, target file, the target's hint, and how the
+target was resolved — no new tool. The target SHALL be resolved only from a symbol in the re-parsed
+changed files, from the analyzed index's edge for the same caller and callee name when it names
+exactly one internal symbol, or, for a plain call with no receiver, from the only internal symbol
+with that name; anything else SHALL NOT be checked, and the response SHALL say which calls are
+checked. A call already present before the diff SHALL NOT be reported. Each reported call SHALL be a
+`deprecated-symbol-use` finding registered in `FINDING_CODE_REGISTRY`, advisory by default and
+blocking only through an operator's `enforcement.policy`.
+
+#### Scenario: A diff adding a call into a deprecated symbol is flagged, advisory
+
+- **GIVEN** a working-tree diff that adds a call to a function marked deprecated
+- **WHEN** `structural_diff` runs on the diff
+- **THEN** the new call is reported with caller, target, location, hint, and resolution
+- **AND** a `deprecated-symbol-use` finding is returned with advisory class by default
+
+#### Scenario: Pre-existing deprecated calls do not fire the finding
+
+- **GIVEN** a call into a deprecated symbol that existed before the diff
+- **WHEN** `structural_diff` runs on a diff that does not add it
+- **THEN** no deprecated call and no `deprecated-symbol-use` finding is reported
+
+#### Scenario: An ambiguous name is not guessed
+
+- **GIVEN** a new plain call whose name matches two internal symbols, one of them deprecated
+- **WHEN** `structural_diff` runs
+- **THEN** the call is not reported
+
+### Requirement: GeneratedFilesAreMarkedWithTheirSource
+
+The system SHALL classify a file by a closed, ordered rule set (lockfile name, header marker,
+`.gitattributes` linguist attribute, excluded-path pattern) and record the matching rule. It SHALL
+record `generatedFrom` and `regenerateWith` only when a header or config entry names them
+literally, and `unknown` otherwise.
+
+- **Implementation**: `classifyGeneratedFiles::src/core/services/generated-file-guard.ts`
+
+#### Scenario: A go:generate directive names the source and command
+
+- **GIVEN** `gen/order_pb.go` with a `Code generated by protoc-gen-go. DO NOT EDIT.` header and a
+  `go:generate` directive that runs protoc on `proto/order.proto` into `gen/`
+- **WHEN** the file is classified
+- **THEN** it is marked `header-marker` with `generatedFrom` `proto/order.proto` and the directive's
+  command as `regenerateWith`
+
+#### Scenario: An unknown source is not guessed
+
+- **GIVEN** a file with an `@generated` header and no config entry naming its input
+- **WHEN** the file is classified
+- **THEN** it is marked generated with `generatedFrom: unknown`
+
+### Requirement: OrientAndBlastRadiusMarkGeneratedFiles
+
+`orient` (full mode) SHALL mark the generated files among the files it returns in `generatedFiles`,
+and `blast_radius` SHALL mark the generated files the diff changed in `generated`. Repository text
+in a mark SHALL be bounded, credential-redacted, and withheld when it reads like an instruction.
+
+- **Implementation**: `guardDiff::src/core/services/generated-file-guard.ts`
+
+#### Scenario: A changed lockfile is marked
+
+- **GIVEN** a diff that changes `package-lock.json`
+- **WHEN** `blast_radius` runs
+- **THEN** `generated` holds the file with rule `lockfile` and its manifest `package.json`
+
+### Requirement: VerifyChangeReportsGeneratedFileEdits
+
+`verify_change` SHALL report `generated-file-edited` (registered, advisory, classified by the
+enforcement policy) when a diff modifies a generated file without also changing its known source or
+the config entry that regenerates it, or modifies a lockfile without a manifest at or below its
+directory. A newly added generated file SHALL NOT fire it.
+
+- **Implementation**: `generatedFileEditedFindings::src/core/services/generated-file-guard.ts`
+
+#### Scenario: A hand edit to generated code names its source
+
+- **GIVEN** the `gen/order_pb.go` setup above
+- **WHEN** a diff edits only `gen/order_pb.go` and `verify_change` runs
+- **THEN** a `generated-file-edited` finding names `proto/order.proto` as the source and the
+  directive's command as the way to regenerate
+
+#### Scenario: Editing the source with the output does not fire
+
+- **GIVEN** the same setup
+- **WHEN** a diff edits both `gen/order_pb.go` and `proto/order.proto`
+- **THEN** no `generated-file-edited` finding is reported
+
+### Requirement: CheckWeakeningIsReportedAgainstAFixedBaseline
+
+`verify_change` and `structural_diff` SHALL report, as registered advisory governance findings,
+each diff shape from a closed table that weakens a check: `test-removed`, `test-disabled`,
+`assertions-reduced`, `expected-value-changed`, `suppression-added`, `error-swallowed`, and
+`check-config-relaxed`. Shapes SHALL be computed against the baseline text at the resolved merge-base,
+never against the agent's most recent commit. Each test finding SHALL name the production symbols the affected test file reaches in the index at its last analysis, and a test file with no recorded reach SHALL be disclosed.
+`expected-value-changed` SHALL fire only when no production symbol reached by that test changed.
+Messages SHALL state the fact neutrally. A file in a language or framework outside the table SHALL
+be reported `not-assessed`, never as free of weakening.
+
+#### Scenario: A skipped test names what it was guarding
+
+- **GIVEN** a diff that changes `parseConfig` and adds `.skip` to the only test reaching it
+- **WHEN** `verify_change` runs
+- **THEN** a `test-disabled` finding names the test and `parseConfig` as the symbol it reached
+
+#### Scenario: A weakening split across commits is still found
+
+- **GIVEN** a branch whose first commit removes two assertions and whose second commit edits code
+- **WHEN** `verify_change` runs against the merge-base
+- **THEN** an `assertions-reduced` finding is reported for the test
+
+#### Scenario: An expected value updated with the code is not reported
+
+- **GIVEN** a diff that changes both an assertion's expected literal and the production function the
+  test reaches
+- **WHEN** the shapes are computed
+- **THEN** no `expected-value-changed` finding is reported for that assertion
+
+### Requirement: AddedReferencesResolveOrAreReported
+
+For each import and named import a diff adds, `verify_change` SHALL resolve the reference against
+the working tree, the target module's current exports, and the manifests in scope, and SHALL report
+each miss as a registered advisory finding: `unresolved-internal-import`,
+`unresolved-internal-symbol`, `undeclared-dependency`, or `unpinned-dependency`. The check SHALL
+make no network request.
+
+- **Implementation**: `checkPhantomReferences::src/core/services/phantom-references.ts`
+
+#### Scenario: An invented internal export is reported with the names the target has
+
+- **GIVEN** a diff that imports `formatDate` from a module exporting only `formatTime` and
+  `formatDuration`
+- **WHEN** `verify_change` runs
+- **THEN** an `unresolved-internal-symbol` finding names the import with its file and line, and
+  offers at most three names from the target that share a prefix with it
+
+#### Scenario: An undeclared external package is reported and the standard library is not
+
+- **GIVEN** a diff that adds `import pad from 'left-padx'`, which no manifest in scope declares, and
+  `import { readFile } from 'node:fs'`
+- **WHEN** `verify_change` runs
+- **THEN** an `undeclared-dependency` finding names `left-padx`, and the `node:fs` import yields no
+  finding
+
+#### Scenario: A declared dependency the lockfile does not pin is reported
+
+- **GIVEN** a diff that adds a dependency to a manifest and imports it, while the lockfile beside
+  that manifest does not pin it
+- **WHEN** `verify_change` runs
+- **THEN** an `unpinned-dependency` finding names the package and the lockfile
+
+### Requirement: UnjudgeableReferencesAreDisclosed
+
+The reference check SHALL NOT present a reference it cannot judge as resolving: each such reference
+SHALL be disclosed with its reason, and the number of references checked SHALL be reported.
+
+- **Implementation**: `checkPhantomReferences::src/core/services/phantom-references.ts`
+
+#### Scenario: Each kind of unjudgeable reference is disclosed
+
+- **GIVEN** a diff with a path alias, a target that re-exports from an unfollowable module, an
+  ecosystem with no manifest in scope, an unparseable manifest or lockfile, and a dynamic import
+  with a computed specifier
+- **WHEN** `verify_change` runs
+- **THEN** each is disclosed with its reason and none is reported as a finding
+
+#### Scenario: An unreadable language is not called clean
+
+- **GIVEN** a diff that changes a file in a language whose imports the check cannot read
+- **WHEN** `verify_change` runs
+- **THEN** the file is listed as not assessed with that reason, and no finding is reported for it
+
+#### Scenario: A path alias is disclosed rather than reported
+
+- **GIVEN** a diff that adds an import matching a `tsconfig` `paths` pattern
+- **WHEN** `verify_change` runs
+- **THEN** no finding is reported and the skipped alias is disclosed
+
+### Requirement: ExportsAreReadFromCurrentContent
+
+The reference check SHALL resolve a named import against the target module's current content, not
+against the index, so that an export added by the same diff resolves; and it SHALL follow a
+re-exporting module to the module that exports the name.
+
+- **Implementation**: `checkPhantomReferences::src/core/services/phantom-references.ts`
+
+#### Scenario: An export added by the same diff resolves
+
+- **GIVEN** a diff that adds `export function brandNew()` to a module and imports `brandNew` from it
+- **WHEN** `verify_change` runs
+- **THEN** no `unresolved-internal-symbol` finding is reported
+
+### Requirement: LeaseNamesBackgroundChangesToServedSymbols
+
+A session SHALL be one MCP server process. Hook commands, which run as separate processes, SHALL
+read the ledger of the single live server for their worktree and SHALL withhold ledger facts, with
+the reason in `openlore status`, when there is no such server or more than one.
+
+The system SHALL record, per MCP server session, the address and normalized content hash of each
+symbol it serves through `orient`, `get_function_skeleton`, `get_subgraph`, and the top hits of
+`search_code`, and of each spec file a briefing names. An edit SHALL count as the agent's own when
+the harness's after-edit hook reported its file to the worktree's agent-edit log after the symbol
+was served. When a served symbol's current content hash differs from its served hash and the change
+is not the agent's own, the next tool response SHALL carry a neutral factual note naming at most
+three such symbols (address, file, and the time it was served) and counting the rest, each change
+stated once. The note SHALL follow the existing lease placement and neutral-wording rules and SHALL
+NOT block or instruct the agent. When no after-edit hook has reported an edit in the session, the
+agent's own edits cannot be told apart, so the note SHALL be withheld and `openlore status` SHALL
+state the reason. A symbol that cannot be hashed SHALL be counted as untracked, never reported as
+unchanged. Only addresses and hashes SHALL be stored, never file contents.
+
+#### Scenario: Another process edits a symbol the agent read
+
+- **GIVEN** a session that was served `parseConfig` by `orient`, and a second process that then
+  changes `parseConfig`'s body
+- **WHEN** the agent makes its next tool call
+- **THEN** the response carries a factual note naming `parseConfig`, its file, and when it was served
+
+#### Scenario: The agent's own edit is not reported as background
+
+- **GIVEN** a session that was served `parseConfig` and then edited it, with the after-edit hook
+  reporting the edited file
+- **WHEN** the agent makes its next tool call
+- **THEN** no background-change note names `parseConfig`
+
+#### Scenario: A reformat is not a change
+
+- **GIVEN** a served symbol whose file is only re-indented by another process
+- **WHEN** the agent makes its next tool call
+- **THEN** no note names the symbol
+
+### Requirement: EditOscillationIsObservedFromContentHashes
+
+The system SHALL keep, per session, the sequence of normalized content hashes each symbol takes
+in files the watcher re-indexes (or, when the watcher runs in another process, at each tool call,
+disclosed as sampled), and SHALL report an edit oscillation when a symbol takes, for the
+second time in the session, a hash it already had earlier in that session (A → B → A → B is two
+returns and is reported; A → B → A is one and is not). The report SHALL name
+the symbols and the hash cycle, SHALL be stated as a neutral fact in the freshness note, SHALL be
+an input to the panic layer, and SHALL be exposed as data in `openlore status --json` and the
+`panic-check` hook output. No weighted score SHALL be introduced, and only the existing opt-in
+blocking mode may act on the signal.
+
+#### Scenario: A modify-revert loop is reported
+
+- **GIVEN** a symbol edited from version A to B, back to A, and to B again in one session
+- **WHEN** the watcher records the last edit
+- **THEN** the freshness note states the symbol returned to an earlier version twice, and the
+  status output lists it with its hash cycle
+
+#### Scenario: Forward progress is not a loop
+
+- **GIVEN** a symbol edited A → B → C → D
+- **WHEN** the watcher records each edit
+- **THEN** no oscillation is reported
+
+### Requirement: HandoffBriefingComposesExistingConclusions
+
+`get_handoff_briefing` SHALL compose the in-flight state from existing substrate lookups into
+one token-budgeted briefing: touched symbols with callers from the working-tree diff; fresh
+in-scope anchored memories and decisions (orphaned withheld, drifted flagged, per the recall
+discipline); drifted specs and open change directories referencing touched paths with their
+unchecked task lines; reaching tests for the touched set; and unfinished-signal receipts
+(uncommitted files, staged/unstaged split, the index lease). Every truncated or
+summarized element SHALL carry a re-fetch identifier naming the tool call that expands it, and
+budget truncation SHALL be peripheral-first with per-section omission receipts. The tool SHALL
+be a `conclusion` in family `change`, available only in the `full` preset, cross-referencing
+`blast_radius` (diff for review), `briefing_since` (catch-up), and `orient` (session start) as
+adjacent siblings.
+
+#### Scenario: A successor resumes from the briefing alone
+
+- **GIVEN** a session that edited a hub function, left a task unchecked in an open change, and
+  drifted a spec
+- **WHEN** `get_handoff_briefing` runs in a fresh session
+- **THEN** the briefing names the touched symbol with callers, quotes the unchecked task,
+  flags the drifted spec, lists the reaching tests, and each element carries its re-fetch
+  identifier
+
+#### Scenario: Freshness discipline survives succession
+
+- **GIVEN** an anchored memory in scope whose anchor was orphaned by the in-flight edits
+- **WHEN** the briefing is composed
+- **THEN** the orphaned memory is withheld from the authoritative section per the recall
+  discipline, and the withholding is disclosed
+
+### Requirement: HandoffBriefingSurvivesCompaction
+
+When the session ledger is present, `get_handoff_briefing` SHALL include in its touched set the
+symbols the session edited and already committed, in addition to the working-tree diff, and SHALL
+list the ledger's open facts. When the peer footprint board is present, it SHALL include the
+session's declared footprint. The after-compact hook moment SHALL print this briefing unless the
+repository disables that moment.
+
+#### Scenario: Committed work survives compaction
+
+- **GIVEN** a session that edited and committed `parseConfig`, then was compacted with a clean
+  working tree
+- **WHEN** the after-compact hook prints the briefing
+- **THEN** the briefing names `parseConfig` as touched this session, rather than "nothing in flight"
+
+### Requirement: ContractSchemasAreReadIntoANormalizedModel
+
+`certify_service_contract` SHALL discover OpenAPI 3.x and Swagger 2.0 documents (YAML or JSON) in
+the working tree and at the base revision through git, and read each into one normalized model of
+operations, parameters, request-body properties, and success-response properties. Only local
+`$ref`s SHALL be followed, a bounded number of hops; external `$ref`s, `callbacks`, and `webhooks`
+SHALL be listed as outside the model. A document that looks like a specification but cannot be
+parsed SHALL be listed as not assessed with the reason, never treated as empty or unchanged.
+
+#### Scenario: Parse failure is not assessed, not empty
+
+- **GIVEN** an OpenAPI document with a YAML syntax error in the working tree
+- **WHEN** `certify_service_contract` runs with a base ref
+- **THEN** the file is listed under `notAssessed` with the reason, and none of its operations is
+  reported as removed
+
+### Requirement: SchemaDiscoveryExclusionsAndProvenanceAreDisclosed
+
+No discovered schema SHALL become silently absent from `certify_service_contract`, and nothing
+SHALL be dropped on a guess.
+
+A directory-name rule (`node_modules/`, `vendor/`, `dist/`, `build/`, `.git/`) SHALL apply to
+UNTRACKED files only, because a tracked file is part of the repository by definition;
+`node_modules/` SHALL be the one named exception applied to tracked files too, since a committed
+dependency tree is another project's contract. Every file the rule excludes SHALL be named in one
+`boundaries` line with the count and the first few paths, and the same rule SHALL be applied to
+the working tree and to the base revision, so an exclusion never reads as an addition or a removal.
+
+Each graded schema SHALL carry its provenance when it looks generated or vendored — `kind`, the
+rule that `matched`, and a `certainty` of `declared` (a generator header the file itself carries,
+read from a bounded head) or `path-pattern` (a path guess, never reported as `declared`). A
+client-toolchain config (Relay, Apollo, graphql-config, `.graphqlrc*`, GraphQL Code Generator)
+naming a schema SHALL produce one `boundaries` line naming that config, and SHALL NEVER cause a
+schema to be dropped, downgraded or excluded from grading. A config SHALL NOT be read as naming a
+schema outside the config's own directory. Every list cut at a cap SHALL carry its omitted count.
+
+#### Scenario: A tracked schema under build/ is graded; an untracked one under dist/ is named
+
+- **GIVEN** a tracked `google/devtools/build/v1/build_events.proto` and an untracked `dist/y.proto`
+- **WHEN** `certify_service_contract` runs
+- **THEN** the tracked file is read and graded, and the untracked one is named in a `boundaries`
+  line with the count, rather than vanishing from the result
+
+#### Scenario: A generated copy is graded with its provenance
+
+- **GIVEN** `src/__generated__/schema.graphql` with a root field removed since the base revision
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** its `specs` entry carries `provenance` of `kind: generated`, `matched: __generated__/`,
+  `certainty: path-pattern`, and the removal is still graded `operation-removed` with a major bump
+
+#### Scenario: A config names a schema but never drops one
+
+- **GIVEN** an `apollo.config.js` naming `./schema.graphql`, and a `web/graphql.config.yml` naming
+  `../schema.graphql`
+- **WHEN** `certify_service_contract` runs with a base ref
+- **THEN** one `boundaries` line names the Apollo config and the schema it named, the second
+  config is not read as naming that schema at all, and the schema is graded either way
+
+#### Scenario: A cap carries its omitted count
+
+- **GIVEN** a schema whose surface holds more operations than `maxResults`
+- **WHEN** `certify_service_contract` runs
+- **THEN** `surfaceOmitted` carries the number past the cap, and a repository holding GraphQL
+  client documents and no schema still discloses them under `notAssessed`
+
+### Requirement: GraphqlChangesAreGradedByVariance
+
+`certify_service_contract` SHALL grade GraphQL schema changes against the base revision with
+GraphQL rows in the same closed rule table, matching operations by root kind and field name and
+types by name. An output SHALL be allowed to become stricter (non-null) and never looser; an
+argument or input field SHALL be allowed to become looser (optional) and never stricter. A directive
+other than `@deprecated` that changed SHALL be `potentially-breaking`, and because client operations
+are not read, a GraphQL finding SHALL say its consumers are not assessed.
+
+Schema identity SHALL be scoped to the schema's own project (its nearest enclosing project root),
+so two unrelated projects in one repository do not void each other's types; a collision INSIDE one
+project SHALL stay unassessed. Both revisions SHALL be partitioned with the SAME project roots — a
+root present at only one revision SHALL be honored on both when the other revision has no schema under
+it, and otherwise at neither, disclosed — and the partition used SHALL be stated in `boundaries`.
+A duplicate field, enum value or argument SHALL withhold THAT type under `notAssessed` with its reason
+while the rest of the document is graded, and a change to the repeated declaration SHALL still be
+reported `schema-unassessed`. In an `extend`, only the duplicated element SHALL be set aside; the
+extension's other declarations SHALL never read as removed. Every bounded
+list of what was not assessed SHALL carry the count it omitted.
+
+#### Scenario: A root type each project declares is graded per project
+
+- **GIVEN** two packages, each with a `package.json` and a schema declaring `type Query`, and a
+  required argument added plus an output loosened in ONE of them
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** both changes are graded `breaking`, neither root type is `schema-unassessed`, and the
+  partition is named in `boundaries`
+
+#### Scenario: A project root that appeared is honored at neither revision
+
+- **GIVEN** a `package.json` added at head beside a schema, with another schema elsewhere declaring
+  the same root type
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** both revisions are partitioned without that root, the one-sided root is disclosed, and
+  nothing is reported added or removed because of it
+
+#### Scenario: A package added with its own schema is honored
+
+- **GIVEN** a root schema that loses an operation, and a new package with a `package.json` and its
+  own `type Query` added at head
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** the removal is graded `breaking`, the new package's operation is `operation-added`, and
+  nothing is reported ambiguous because of it
+
+#### Scenario: A duplicate field withholds its type, and the omitted count is given
+
+- **GIVEN** a schema in which one type declares a field twice and other types changed
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** the other types' changes are graded, the duplicated type is listed under `notAssessed`
+  with the duplicate named, and a `notAssessed` list cut by the result cap reports
+  `notAssessedOmitted`
+
+#### Scenario: Nullability follows variance
+
+- **GIVEN** `Order.total: Float` made `Float!`, and `Query.orders` given a new argument `status: Status!`
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** the first is `output-field-made-non-null` (`non-breaking`) and the second
+  `required-param-added` (`breaking`), and the bump is major
+
+#### Scenario: A renamed root type is not a change
+
+- **GIVEN** `schema { query: RootQuery }` replacing `type Query` with the same fields
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** no operation is reported removed or added
+
+### Requirement: ProtobufChangesAreGradedByWireIdentity
+
+`certify_service_contract` SHALL grade `.proto` changes against the base revision with protobuf
+rows in the same closed rule table, matching fields by NUMBER (their wire identity) and messages,
+enums and RPCs by full name across files. A change the table cannot prove compatible SHALL be
+`potentially-breaking`, and because gRPC client call sites are not read, a protobuf finding SHALL
+say its consumers are not assessed.
+
+#### Scenario: A removed field without a reservation
+
+- **GIVEN** a base revision whose `Order` declares `int64 total = 2`, and a working tree that
+  removes it without `reserved 2`
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** it reports `field-removed` as `breaking` with a `contract-breaking` finding saying gRPC
+  consumers are not assessed, and suggests a major bump
+
+#### Scenario: A removed field whose number is reserved
+
+- **GIVEN** the same removal with `reserved 2` added
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** it reports `field-removed-reserved` as `dangerous`; reusing number 2 later is
+  `reserved-number-reused`, `breaking`
+
+#### Scenario: A rename keeps the wire
+
+- **GIVEN** field 1 renamed from `id` to `order_id` with its number and type unchanged
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** it reports `field-renamed` as `dangerous`, and nothing as removed or added
+
+#### Scenario: A move between files is no change
+
+- **GIVEN** a message moved from `orders.proto` to `requests.proto` in the same package
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** it reports no change for that message
+
+### Requirement: ContractVerdictsJoinConsumersConservatively
+
+With a base ref, `certify_service_contract` SHALL classify each changed element against the
+merge-base via a closed deterministic rule table (`breaking` | `dangerous` | `non-breaking`), and a
+changed schema the table cannot read SHALL be `potentially-breaking`, which withholds the suggested
+version bump. Each `breaking` or `dangerous` element SHALL list the client call sites in this
+repository whose HTTP method and literal path match it, and SHALL be emitted as a registered
+advisory `contract-breaking` finding. Callers through generated clients or
+with dynamic URLs SHALL be disclosed as a boundary, never implied absent. The tool SHALL be a
+`conclusion` in family `change`, available only in the `full` preset.
+
+A service's consumers are usually not in its own repository, so with `federation` the tool SHALL
+also census client call sites in the indexed sibling repositories of `.openlore/federation.json`.
+
+The same consumer rule SHALL apply across repositories as within one: a call site counts only
+when its literal URL has no host or a host the specification's `servers` declares, and an
+all-parameter operation path SHALL be excluded from the census and disclosed, because it matches
+too broadly to attribute. The census SHALL be scoped to the `breaking` and `dangerous` addresses
+the in-repository join already covers.
+
+Each hit SHALL be reported against the sibling's REGISTRY NAME, never a path on this machine, and
+every repository-derived string SHALL be screened before it is served. Sibling directories SHALL
+be compared by canonical path, so the repository under certification is never censused as its own
+sibling and two registry names for one directory are censused once. Consumers SHALL be served as
+one bounded top-level list with an exact omitted count, not nested per changed element, so the
+response budget can shrink them without discarding the verdict.
+
+A finding SHALL distinguish three states: called in this repository, called only in a censused
+sibling, or called in neither — and the third SHALL name how many siblings were censused, how
+many were only partly scanned, and how many were not censused, so it is not read as proof of
+safety. A sibling that is missing, unindexed, stale or unbaselined SHALL be named as not censused
+rather than counted consumer-free; one whose scan reached a file cap SHALL be named as partly
+scanned; a requested registry name that does not exist SHALL be reported; and a registry that
+cannot be read SHALL be named rather than answered as though federation were not requested.
+Without `federation`, the tool SHALL disclose that consumers outside this repository were not
+assessed.
+
+#### Scenario: A breaking schema change names its consumers
+
+- **GIVEN** a base ref where `DELETE /v1/orders/{id}` exists, a working tree where it is removed, and
+  a client calling `DELETE /v1/orders/${id}`
+- **WHEN** `certify_service_contract` runs with the base ref
+- **THEN** the change is `operation-removed`, `breaking`, names the call site's file and line, and
+  the boundary statement for other repositories is present
+
+#### Scenario: A consumer in a sibling repository is named by its registry id
+
+- **GIVEN** a removed operation with no caller in this repository, and an indexed sibling
+  registered as `web` whose `src/client.ts` calls it
+- **WHEN** `certify_service_contract` runs with the base ref and `federation`
+- **THEN** `federatedConsumers` holds `{ repo: 'web', file: 'src/client.ts' }`, the changed
+  element carries a `federatedConsumerCount`, the finding says it is called from
+  `web:src/client.ts`, and no filesystem path appears
+
+#### Scenario: A sibling calling another vendor is not a consumer
+
+- **GIVEN** a specification declaring `servers: https://svc.example.com` and an indexed sibling
+  whose only matching call is to `https://other-vendor.example.net` on the same path
+- **WHEN** the census runs
+- **THEN** no federated consumer is reported for that operation, and the finding does not name
+  the sibling
+
+#### Scenario: A partly scanned sibling is not evidence of absence
+
+- **GIVEN** an indexed sibling whose client scan reaches its file cap
+- **WHEN** the census runs
+- **THEN** the sibling is listed in `federationCensus.partial` and the finding says it was only
+  partly scanned
+
+#### Scenario: A sibling whose index cannot be trusted is not counted clean
+
+- **GIVEN** a sibling registered but never analyzed
+- **WHEN** the census runs
+- **THEN** it is absent from the censused repositories, named in `federationCensus.skipped` with
+  its index state, and a boundary says a caller there is not counted
+
+#### Scenario: Unprovable is potentially-breaking
+
+- **GIVEN** a response schema changed to a `oneOf`
+- **WHEN** the change is classified
+- **THEN** it is `schema-unassessed`, `potentially-breaking`, and the suggested bump is withheld
+
+### Requirement: ContractParityIsTwoWayAndScoped
+
+Without a base ref, `certify_service_contract` SHALL return the declared operations and a two-way
+parity report against the indexed route handlers: each operation no handler serves
+(`contract-declared-unimplemented`) and each handler whose path a specification covers but does not
+declare (`contract-implemented-undeclared`). A path SHALL be covered when its parent path equals a
+declared operation's path or that operation's parent path, compared with and without the
+specification's base path. A handler on an uncovered path SHALL NOT be reported; a handler with a
+dynamic path SHALL be a disclosed boundary. Parity SHALL be reported as not assessed when no route
+inventory exists or no server route is indexed.
+
+#### Scenario: A declared operation with no handler is reported
+
+- **GIVEN** a specification that declares `DELETE /v1/orders/{id}` and no handler for it
+- **WHEN** `certify_service_contract` runs with no base ref
+- **THEN** the operation is a `contract-declared-unimplemented` finding with the spec file and line
+
+#### Scenario: A near-miss prefix is not covered
+
+- **GIVEN** a specification declaring only `/v1/orders/{id}`, and handlers on `/v1/orders/export`,
+  `/v1/ordersX`, and `/internal/health`
+- **WHEN** parity runs
+- **THEN** only `/v1/orders/export` is reported as `contract-implemented-undeclared`
+
+### Requirement: EnvImpactFollowsAHelperOneHopAndCountsTheRest
+
+`analyze_env_impact` SHALL report, as read sites, the call sites whose string literal names the
+variable and that were followed one hop into a same-file helper that performs the read — located to
+the CALL SITE's file and line, each carrying the helper it was followed through. It SHALL NOT present
+such a site as a direct read.
+
+Because a name reaching a read through a function parameter is followed one hop only, `boundaries`
+SHALL ALWAYS state that limit, and SHALL COUNT the environment reads in the repository whose key is
+not a literal and that could not be followed — with their files, lines, key expressions, and the
+reason each was refused — so the result's remaining shortfall is evidence rather than a caveat. The
+boundary SHALL be present even when nothing could be followed and nothing was left unfollowed. When
+the census could not read the repository's in-scope files, or a bound of its own was reached, that
+SHALL be disclosed rather than reported as a count of zero.
+
+#### Scenario: A followed call site is a read site, with the helper disclosed
+
+- **GIVEN** a Go file calling `mustMapEnv(&svc.addr, "PRODUCT_CATALOG_SERVICE_ADDR")` and defining
+  `mustMapEnv` with `os.Getenv(envKey)` in the same file
+- **WHEN** `analyze_env_impact` runs for `PRODUCT_CATALOG_SERVICE_ADDR`
+- **THEN** the call site's file and line are reported as a read site, with the helper named, and
+  `boundaries` says the name was followed one hop through a same-file helper
+
+#### Scenario: Unfollowed reads are counted with their evidence
+
+- **GIVEN** a repository with an environment read whose key is a parameter no call site passes a
+  literal to
+- **WHEN** `analyze_env_impact` runs for any variable
+- **THEN** `boundaries` states that read sites are a lower bound and names how many such reads were
+  seen in how many files, and the sites are listed with their reason
+
+#### Scenario: The one-hop limit is stated even with nothing to follow
+
+- **GIVEN** a repository whose every environment read names its variable with a literal
+- **WHEN** `analyze_env_impact` runs
+- **THEN** `boundaries` still states the one-hop limit and says no unfollowed read was found
+
+### Requirement: EnvImpactNamesIacDeclarationSites
+
+`analyze_env_impact` SHALL report, in `declaredBy`, each infrastructure site in the repository that
+sets the variable — Kubernetes container `env`, compose `environment`, Dockerfile `ENV`, Terraform,
+OpenTofu, or CloudFormation function environment maps, ECS container definitions, GitHub Actions
+`env` — with ecosystem, resource, file, line, and whether a literal value is present. No value SHALL
+appear in any output. A source whose keys cannot be listed (`envFrom`, `env_file`, an expression)
+SHALL be listed as an opaque source, and a variable no file sets SHALL be `undeclared-in-corpus`,
+with the boundary that runtime injection and external secret stores are not visible.
+
+#### Scenario: Manifests that set a variable are named
+
+- **GIVEN** `DATABASE_URL` read in `src/db.ts`, set in a Kubernetes Deployment and in
+  `docker-compose.yml`
+- **WHEN** `analyze_env_impact` runs for `DATABASE_URL`
+- **THEN** `declaredBy` lists both sites with file and line, and no output contains either value
+
+#### Scenario: A variable no file sets
+
+- **GIVEN** a variable read in code and set by no file in the repository
+- **WHEN** `analyze_env_impact` runs for it
+- **THEN** it is `undeclared-in-corpus`, and the boundary says it may be set at runtime
+
+### Requirement: BlastRadiusNamesManifestsStillSettingARemovedRead
+
+`blast_radius` SHALL list, in `envDeclarations`, each env var a changed code file read at the base
+and that no code file in the working tree reads, with the infrastructure sites that still set it. A
+name still read in another file SHALL NOT be listed.
+
+#### Scenario: A code rename shows the stale manifests
+
+- **GIVEN** a diff that renames the read of `DATABASE_URL` to `DB_URL`, and two manifests that set
+  `DATABASE_URL`
+- **WHEN** `blast_radius` runs on the diff
+- **THEN** `envDeclarations` lists `DATABASE_URL` with both manifest sites
+
+### Requirement: PeerFootprintsAreSharedAcrossWorktrees
+
+The system SHALL keep a board of live agent footprints in the clone's git common directory, so every
+worktree of one clone reads the same entries with no network service. `declare_footprint` SHALL
+record an entry (actor, worktree, branch, write-set and read-set resolved to symbols with their
+content hashes, a title of at most 120 characters) and SHALL return the hazards between it and every
+live peer entry, using the existing footprint and hazard classifier plus a `duplicate-intent` class
+for two write-sets that create the same symbol name or file. `map_in_flight_conflicts` SHALL treat
+live entries as agent task descriptors, and `fleet_status` SHALL list them. An entry SHALL end when
+released, when its branch is merged or deleted, or when it is not refreshed within the session
+expiry rule. A check git could not answer SHALL NOT end an entry: when the clone's branches cannot
+be listed, neither a deleted nor a merged branch is detected, and the entry ends on release or on the
+expiry rule. A branch whose short name git disambiguates (`heads/<name>`, when a tag shares the name)
+SHALL be matched to its branch, not read as deleted. Entry titles SHALL be redacted and withheld when instruction-shaped, and every peer field
+SHALL be served as `local-unreviewed` data. Hazards SHALL be advisory unless `enforcement.policy`
+names them blocking.
+
+#### Scenario: Sibling worktrees see each other
+
+- **GIVEN** two worktrees of one clone, where the agent in the first declares a write-set containing
+  `parseConfig`
+- **WHEN** the agent in the second declares a write-set containing `parseConfig`
+- **THEN** the response reports a write-write hazard naming the first agent's worktree and branch
+
+#### Scenario: Two agents about to write the same new function
+
+- **GIVEN** a live entry whose write-set creates `normalizeUrl` in `src/url.ts`
+- **WHEN** another agent declares a write-set creating `normalizeUrl` anywhere in the repository
+- **THEN** a `duplicate-intent` hazard names both entries
+
+#### Scenario: A landed branch leaves the board
+
+- **GIVEN** a live entry for branch `feat-a`
+- **WHEN** `feat-a` is merged and any agent reads the board
+- **THEN** the entry is no longer live
+
+### Requirement: ClaimKindsCoverContractsAndDecisions
+
+`verify_claim` SHALL accept the kinds `endpoint-implemented` and `endpoint-consumed` (subject: an
+OpenAPI or Swagger operation address) and `decision-governed` (subject: a symbol), and SHALL return
+the existing verdicts and receipt shape for each. A refuted `endpoint-consumed` verdict SHALL be
+scoped to the indexed repository and SHALL name external callers as not visible.
+`decision-governed` SHALL apply recall's freshness rules, so an orphaned memory is never counted as
+governing. A subject the evaluator cannot assess SHALL yield `unverifiable` with the reason.
+
+#### Scenario: An unimplemented operation is refuted
+
+- **GIVEN** a spec declaring `DELETE /v1/orders/{id}` and no handler serving it
+- **WHEN** `verify_claim` runs with kind `endpoint-implemented` on that address
+- **THEN** the verdict is refuted and names the spec file and line
+
+#### Scenario: No indexed caller is not "no caller"
+
+- **GIVEN** an operation `POST /v1/webhooks/stripe` with no consumer in the indexed repository
+- **WHEN** `verify_claim` runs with kind `endpoint-consumed`
+- **THEN** the verdict is refuted, scoped to the indexed repository, and states that external callers
+  are not visible
+
+#### Scenario: Removing a governed symbol names the decision
+
+- **GIVEN** an authoritative decision anchored to `DeprecatedHandler`
+- **WHEN** `verify_claim` runs with kind `decision-governed` on `DeprecatedHandler`
+- **THEN** the verdict is confirmed and the receipt names the decision id and its freshness
+
+### Requirement: EditsAfterTheLastTestRunAreNamed
+
+When the harness payloads delivered to OpenLore's after-tools hook (which receives every tool
+call, not only edits) include a shell command that
+matches a test command the repository declares (a package test script, a CI run step, a test build
+target) or a runner from a closed list, the session ledger SHALL record the time of the run, its exit
+status when the payload carries one, and the content hashes of the session's edited symbols at that
+moment. The before-stop receipt SHALL name the symbols edited after the most recent recorded run and
+the tests that reach them. The system SHALL NOT run any test. When no hook payloads were received,
+the fact SHALL be withheld and the reason stated.
+
+#### Scenario: An edit after the test run is named
+
+- **GIVEN** a session that edits `parseConfig`, runs `npm test`, then edits `loadDefaults`
+- **WHEN** the before-stop hook runs
+- **THEN** the receipt names `loadDefaults` and the tests that reach it, and does not name
+  `parseConfig`
+
+#### Scenario: No payloads means no claim
+
+- **GIVEN** a harness that delivers no after-tools payloads
+- **WHEN** the before-stop receipt is built
+- **THEN** it states that test runs are not observed, rather than naming every edited symbol
+
+### Requirement: LeaseTokensAreReturnedWithServedContext
+
+`orient` and `recall` SHALL return a `leaseToken` that identifies the set of (symbol or file, content
+hash) pairs they served and that any process on the same clone can resolve for a bounded time. A
+response that served nothing SHALL carry no token.
+
+#### Scenario: A sub-agent checks its parent's lease
+
+- **GIVEN** a `leaseToken` returned to a parent agent by `orient`, and a later edit to one of the
+  served symbols
+- **WHEN** a sub-agent in another process asks `verify_claim` whether that lease is current
+- **THEN** the verdict is refuted and names the changed symbol
+
+### Requirement: LeaseTokensAreVerifiableClaims
+
+`verify_claim` SHALL accept the kind `lease-current` with a `leaseToken` as the subject, and SHALL
+return `confirmed` when every (address, hash) in the token still matches, `refuted` listing each
+entry that changed, and `unverifiable` when the token is unknown or expired.
+
+#### Scenario: A changed served symbol refutes the lease
+
+- **GIVEN** a `leaseToken` from an `orient` call that served `parseConfig`, and a later edit to it
+- **WHEN** `verify_claim` runs with kind `lease-current` on the token
+- **THEN** the verdict is refuted and names `parseConfig`
+
+### Requirement: DeployedHandlersAreLiveAndDisclosed
+
+`find_dead_code` SHALL treat a function bound by a `deploys_symbol` edge as an entry point
+(`rootKinds.deployed`), and SHALL list the function resources whose handler binds to no indexed
+function in `unresolvedDeployBindings` with the reason.
+
+#### Scenario: A deployed handler is not dead code
+
+- **GIVEN** a Terraform `aws_lambda_function` with `handler = "src/orders.handler"` and no in-code
+  caller of `handler`
+- **WHEN** `find_dead_code` runs
+- **THEN** `handler` is not a dead-code candidate, and `rootKinds.deployed` counts it
+
+### Requirement: ContractRootsAreCountedByProtocol
+
+`find_dead_code` SHALL label a root kept live by an `implements_endpoint` edge by the protocol of
+the contract element it serves, read from that element's own format tag: `rootKinds.grpcHandlers`
+for a protobuf RPC, `rootKinds.graphqlResolvers` for a GraphQL field, and `rootKinds.httpHandlers`
+for an HTTP route. The three counts SHALL be disjoint, with `rootKinds.deployed` taking precedence
+over all of them. `httpHandlers` SHALL remain the fallback lane: a binding whose contract node
+carries no readable format tag is counted there. `rootKinds` as a whole is not a partition — a root
+in a config-wired file is counted under `externallyWired` as well as under every other kind it
+matches — and this requirement does not make it one.
+
+#### Scenario: A gRPC method is not counted as an HTTP handler
+
+- **GIVEN** a Go method bound to a protobuf RPC by an `implements_endpoint` edge
+- **WHEN** `find_dead_code` runs
+- **THEN** `rootKinds.grpcHandlers` counts it and `rootKinds.httpHandlers` does not
+
+#### Scenario: A GraphQL resolver is not counted as an HTTP handler
+
+- **GIVEN** a resolver bound to a GraphQL field by an `implements_endpoint` edge
+- **WHEN** `find_dead_code` runs
+- **THEN** `rootKinds.graphqlResolvers` counts it and `rootKinds.httpHandlers` does not
+
+### Requirement: FrameworkRouteHandlersAreLiveFromTheRouteInventory
+`get_route_inventory` and `find_dead_code` read the same build and SHALL NOT contradict each
+other. `find_dead_code` SHALL join the `route-inventory.json` written by `analyze` into its
+liveness roots, resolving each inventoried route to a graph node by file and handler name, and
+SHALL count the resolved roots in `rootKinds.httpHandlers` with a `routeInventoryRoots` receipt.
+A handler SHALL be rooted ONLY when it resolves to exactly one declaration in that file: a
+handler resolving to several declarations, to none, in a file not in the index, with no name, or
+past the join's route cap SHALL NOT be rooted, SHALL be counted by reason in
+`routeRootsNotAssessed`, and SHALL never be guessed — a root attributed to the wrong declaration
+would make real dead code look live. A candidate the inventory names as a handler SHALL NOT carry
+the reason "not a route handler" and SHALL NOT be rated `high`. An absent, oversized, truncated,
+or non-JSON inventory SHALL degrade to the edge-derived roots WITH a stated boundary, never
+crash and never read as "no routes".
+#### Scenario: A decorator route with no declared contract is not dead
+- **GIVEN** a `@Controller()` class whose `@Get('broadcast')` method has no in-repo caller and no
+  declared OpenAPI operation (`contractSource: "none"`)
+- **THEN** the method is not a dead-code candidate and `rootKinds.httpHandlers` counts it
+#### Scenario: A Next.js App Router route handler is not dead
+- **GIVEN** `export async function POST` in `app/api/graphql/route.ts` with no in-repo caller
+- **THEN** `POST` is not a dead-code candidate
+#### Scenario: A handler that cannot be pinned is disclosed, not guessed
+- **GIVEN** an inventoried route whose handler name matches two declarations in its file
+- **THEN** neither declaration is rooted, both are capped at `low` with the inventory named as the
+  reason, and `routeRootsNotAssessed` counts the route under `ambiguous`
+#### Scenario: A corrupt inventory degrades with a disclosure
+- **GIVEN** a `route-inventory.json` that is absent or truncated mid-JSON
+- **THEN** the answer is the edge-derived one it had before the join, and
+  `routeInventoryRoots.boundary` states that the inventory could not be read
+
+### Requirement: AmbientDeclarationsAreNotDeadCodeCandidates
+A function-shaped symbol in a TypeScript ambient declaration file (`.d.ts`, `.d.mts`, `.d.cts`)
+is a bodyless type declaration: there is no code in it to be dead. `find_dead_code` and every
+conclusion built on its dead set (`report_coverage_gaps`, `get_landmarks`, `verify_claim`) SHALL
+NOT report such a symbol as a dead-code candidate at any confidence, and SHALL count the
+exclusion in `declarationsExcluded` rather than drop it silently.
+#### Scenario: A declared static method is not dead code
+- **GIVEN** `public static create(properties?: ITrace): Trace;` in a `.d.ts` file, with no caller
+- **THEN** `create` is absent from `candidateDead` and `declarationsExcluded.count` includes it
+
+### Requirement: GeneratedFileSymbolsAreNeverHighConfidenceDead
+A generated file's symbols are driven by whatever generated them — protobuf reflection, Go struct
+embedding, a runtime registry — not by a direct in-repo call. `find_dead_code` SHALL classify each
+candidate's file through the generated-file guard and SHALL cap a candidate in a generated,
+vendored, or lockfile-classified file at `low`, naming the guard's rule, what matched, and its
+certainty in the reason. Such symbols MAY remain candidates (nothing proves a caller), but SHALL
+NOT be asserted `high`. A guard rule that could not run SHALL be disclosed as a caveat.
+#### Scenario: Protobuf plumbing is not asserted dead
+- **GIVEN** a `*.pb.go` file whose header reads `Code generated by protoc-gen-go. DO NOT EDIT.`
+  and whose `ProtoReflect` method has no in-repo caller
+- **THEN** `ProtoReflect` is rated `low`, and the reason names the `header-marker` rule
+
+### Requirement: PeersAreToldWhenASymbolTheyReadChanges
+
+When a live peer on the footprint board changes a symbol in the read-set this worktree's agent
+declared (`declare_footprint`), the next `after-tools` receipt SHALL name the symbol, its file, the
+peer's actor, branch, and worktree, and when the read-set was declared, as a neutral fact, once per
+session. The change SHALL be computed from the board and the peer's working tree, with no message
+transport: the declared text no longer holds in the peer's tree (a deleted file counts), and the peer's base
+commit at declaration and its base now both still hold it, so a peer that branched from an older
+version or rebased onto another change is not blamed. An
+edit to a symbol outside the declared read-set SHALL produce no notice.
+
+#### Scenario: A peer changes what I read
+
+- **GIVEN** an agent that declared reading `parseConfig`, and a peer in another worktree that then
+  changes `parseConfig`'s body
+- **WHEN** the agent's next after-tools hook runs
+- **THEN** the receipt names `parseConfig`, its file, the peer's actor, branch, and worktree, and
+  the declaration time
+
+#### Scenario: Unrelated peer work is quiet
+
+- **GIVEN** a peer that edits only symbols this agent did not declare reading
+- **WHEN** the agent's next after-tools hook runs
+- **THEN** no peer notice is printed
+
+#### Scenario: An older base is not a change
+
+- **GIVEN** a peer whose base commit predates this agent's version of a declared symbol, and who has
+  not edited it
+- **WHEN** the agent's next after-tools hook runs
+- **THEN** no peer notice is printed
+
+### Requirement: PeersAreToldWhenAServedSymbolChanges
+
+When a live peer on the footprint board changes a function that `orient` or `recall` served under
+the hook's analysis root (in any session) within the board's live window, the next `after-tools`
+receipt SHALL name the function, the peer, and when it was served, once per session per peer and
+symbol, with the same attribution rule as a declared read: the peer's bases at declaration and now
+still hold the served text. A symbol both declared and served SHALL be named once, as declared.
+
+#### Scenario: A peer changes what I was served
+
+- **GIVEN** a worktree where `orient` served `parseConfig`, and a peer that then changes its body
+- **WHEN** the next after-tools hook runs in that worktree
+- **THEN** the receipt names `parseConfig`, the peer, and the time it was served
+
+#### Scenario: An old serve is quiet
+
+- **GIVEN** a function served longer ago than a board entry lives without a refresh
+- **WHEN** a peer changes it
+- **THEN** no peer notice is printed
+
+### Requirement: FleetRecordsAndPlansUseTheBoard
+
+Fleet verification records SHALL live next to the peer board in the git common directory so every
+worktree of the clone reads them; a legacy per-worktree record SHALL still be read, and is folded
+into the shared file on the next write. Records are written by any worktree: only well-formed ones
+are read, their text is screened before it is served, a file that cannot be read is never written
+over, and a record from another worktree is listed as `other-worktree`, not checked against this
+worktree's code. `plan_parallel_work` SHALL offer an option that adds live board entries from other
+worktrees to the planned tasks, named `board:<actorId>`; this directory's own entries are not added.
+
+A verification record SHALL end on the same evidence as a peer-board entry, decided by the board's
+own predicates rather than a copy of them: not re-proven within 30 minutes (the session expiry
+rule), its recorded directory removed, its branch deleted, or its branch merged into the default
+branch. A record SHOULD carry the time it was recorded. That field is optional, so a record written
+before this rule existed still parses.
+
+A rule the record does not carry the evidence for SHALL be reported as unknown and skipped, never
+resolved as ended. A record with no recorded time, or one whose recorded time cannot be read as a
+date, SHALL NOT be expired. A record with no recorded directory SHALL NOT be a removed worktree. A
+base commit that is not a commit id SHALL leave the merged rule unknown instead of being passed to
+git. A git command that could not be answered SHALL NOT be read as evidence: when the clone's
+branches cannot be listed at all, the branch rules SHALL be unknown rather than `branch-deleted`. A
+branch absent from the clone SHALL be `branch-deleted` only when the record carries evidence that
+the name was a local branch when it was written, captured at write time; without it the branch rules
+SHALL be unknown, since the same field may name a task that never was a branch. Judging many records
+SHALL cost the same git work as judging one record per distinct branch.
+
+`fleet_status` SHALL stay read-only, reporting ended records as a count with their reasons and never
+as a live verdict, and SHALL name the rules it could not evaluate; the next write SHALL remove ended
+records from the records file. The surface SHALL disclose that nothing re-proves a record, so a
+verdict decays 30 minutes after it was recorded, and that no tool records a verdict yet, so an empty
+record list means nothing was recorded rather than that nothing holds.
+
+#### Scenario: A verdict whose branch landed is no longer live
+
+- **GIVEN** a verification record proved on a branch that is then merged into the default branch
+- **WHEN** fleet status is read
+- **THEN** the record is reported as ended with the reason `branch-merged`, not as a live verdict
+
+#### Scenario: A record with no recorded time is not expired
+
+- **GIVEN** a verification record carrying no recorded time
+- **WHEN** fleet status is read long after the session expiry
+- **THEN** the record is still live, and the expiry predicate is disclosed as unknown for it
+
+#### Scenario: Git that cannot be asked is not evidence of a deletion
+
+- **GIVEN** a verification record in a directory that is not a git work tree
+- **WHEN** fleet status is read
+- **THEN** the record is still live, the branch predicates are disclosed as unknown, and the next write does not remove it
+
+#### Scenario: A name that was never a branch is not a deleted branch
+
+- **GIVEN** a verification record whose branch names a task that is not a branch of this clone
+- **WHEN** fleet status is read
+- **THEN** the record is still live and the branch predicates are disclosed as unknown
+
+#### Scenario: A base commit that is not a commit id is never passed to git
+
+- **GIVEN** a verification record whose base commit is not a hexadecimal commit id
+- **WHEN** its lifecycle is judged
+- **THEN** the merged predicate is unknown, no revision is passed to git, and the record stays live
+
+#### Scenario: An ended record is removed on the next write
+
+- **GIVEN** a verification record that has ended
+- **WHEN** the next verification verdict is recorded
+- **THEN** the ended record is no longer in the records file
+
+#### Scenario: A fleet verdict is shared
+
+- **GIVEN** a fleet verification record proved in worktree A
+- **WHEN** worktree B reads fleet status
+- **THEN** the record is visible
+
+#### Scenario: Board entries join a plan
+
+- **GIVEN** a live board entry for agent B, and the board option set
+- **WHEN** agent A calls `plan_parallel_work` with its own task
+- **THEN** the plan includes agent B's entry as a task
+
+### Requirement: ContractOperationsSurfaceInTheBriefings
+
+`orient` SHALL include, as an additive `contracts` field, the OpenAPI operations served by indexed
+routes in the files of its relevant functions or in route files that name one of them, and
+`blast_radius` SHALL include the same for routes in the files the diff changes. Each entry SHALL
+name the operation address, `operationId`, specification file and line, serving route, required
+parameters and body properties, and deprecation. A route SHALL match by method and full path, or
+without the base path only when unique and not all-parameter; nothing is added otherwise.
+
+#### Scenario: orient shows the contract of the handler being edited
+
+- **GIVEN** a task whose relevant functions are in `src/orders.ts`, which has an indexed
+  `POST /orders` route, and an OpenAPI document declaring `POST /v1/orders` with required body
+  properties `sku` and `qty`
+- **WHEN** `orient` returns
+- **THEN** `contracts` names `POST /v1/orders`, the spec file and line, and `sku` and `qty`
+
+#### Scenario: No handler in scope
+
+- **GIVEN** a task whose files have no indexed route
+- **WHEN** `orient` returns
+- **THEN** there is no `contracts` field and no specification is read
+
+### Requirement: ChangedSpecificationsSurfaceTheirBoundCode
+
+`blast_radius` SHALL include, as an additive `changedContracts` field, the contract elements
+declared by the specification files the diff changes, and for each element the indexed route
+handler that serves it and the in-repo client call sites that consume it. Consumers SHALL be read
+from the whole repository, not from the diff, because a specification change affects callers the
+diff does not touch. The field SHALL be a blast radius and never a verdict: it SHALL NOT compare
+against a base revision or grade the change, and its note SHALL name
+`certify_service_contract` as the tool that does.
+
+An element SHALL be reported `unbound` only when nothing prevented a binding from being seen: a
+concrete-method route is indexed, no route matched it ambiguously, the consumer scan ran and was
+not capped, and its path is not all-parameter. Each of those conditions SHALL instead be
+disclosed as not assessed. A call site SHALL be counted as a consumer only when its literal URL
+has no host or a host the specification's `servers` declares; a specification declaring no host,
+and the languages the consumer scan reads, SHALL be disclosed. Where several indexed routes match
+one operation, no single handler SHALL be named and the candidates SHALL be disclosed. A changed
+specification that cannot be parsed, cannot be read, was never examined under the scan cap, or
+parses with no recognized operation SHALL be named rather than omitted. Elements and consumers
+SHALL be bounded with exact omitted counts.
+
+#### Scenario: A specification-only diff still briefs
+
+- **GIVEN** a diff that edits `api/openapi.yaml` and no source file, an indexed `POST /orders`
+  route in `src/orders.ts`, and a client in `src/client.ts` calling `GET /v1/orders/{id}`
+- **WHEN** `blast_radius` returns
+- **THEN** `changedContracts` names `POST /v1/orders` with its serving route, and
+  `GET /v1/orders/{id}` with the consuming call site, though neither source file is in the diff
+
+#### Scenario: No route index is not an unbound operation
+
+- **GIVEN** a changed specification in a repository with no route inventory
+- **WHEN** `blast_radius` returns
+- **THEN** no element is marked `unbound`, and `notAssessed` says the serving handler was not
+  assessed
+
+#### Scenario: A wildcard-method route may still serve the operation
+
+- **GIVEN** a changed specification and a repository whose only indexed route carries a wildcard
+  method, as Django routes do
+- **WHEN** `blast_radius` returns
+- **THEN** no element is marked `unbound`, and `notAssessed` names the wildcard-method routes
+
+#### Scenario: A call to another host is not a consumer
+
+- **GIVEN** a specification declaring `servers: https://api.example.com/v1` and an operation
+  `GET /alpha`, and a repository whose only matching call is to
+  `https://totally-unrelated.example.net/v1/alpha`
+- **WHEN** `blast_radius` returns
+- **THEN** the element has no `consumedBy`, and `notAssessed` says call sites targeting another
+  host were not counted
+
+#### Scenario: Two handlers match, so neither is named
+
+- **GIVEN** a changed specification whose operation is matched by indexed routes in two files
+- **WHEN** `blast_radius` returns
+- **THEN** the element has no `servedBy` and is not `unbound`, and `notAssessed` names both
+  candidate files
+
+#### Scenario: The diff touches no specification
+
+- **GIVEN** a diff that changes only source files
+- **WHEN** `blast_radius` returns
+- **THEN** there is no `changedContracts` field
+
+### Requirement: LiteralPayloadsAreCheckedAgainstRequiredProperties
+
+For each in-repo client call site of an operation whose request body requires properties,
+`certify_service_contract` SHALL report each required property a literal body (an object, or
+`JSON.stringify` of one) lacks, and a call with no body, as an advisory
+`contract-payload-missing-required` finding naming the call site and the operation. A body that is
+not a literal SHALL be listed as not assessed, never reported as conforming.
+
+#### Scenario: A missing required field is named
+
+- **GIVEN** an operation `POST /orders` whose request body requires `customerId` and `items`, and a
+  call site sending `JSON.stringify({ items })`
+- **WHEN** `certify_service_contract` runs
+- **THEN** a `contract-payload-missing-required` finding names the call site and `customerId`
+
+#### Scenario: A built payload is not called conforming
+
+- **GIVEN** a call site whose body is a variable built elsewhere
+- **WHEN** the check runs
+- **THEN** the call site is listed as not assessed
+
+### Requirement: SessionCountsAreExposedAsData
+
+`openlore status --json` SHALL report, for the elements the agent's edits changed (as the after-edit
+hook attributes them; withheld without that report), counts of body-only changes, signature changes,
+unclassified changes (signature unreadable or possibly cut), symbols first seen after the agent
+edited them, declared contract elements changed, and declared infrastructure resources changed (each
+element in exactly one), and of changed exported symbols. A declaration has no declaration line to
+compare, so it SHALL be counted on its own line rather than as an unclassified symbol. It SHALL NOT
+compute a percentage, score, or threshold.
+
+#### Scenario: Counts, not budgets
+
+- **GIVEN** a session that changed the bodies of two functions and the signature of a third,
+  and two of the three are exported
+- **WHEN** `openlore status --json` runs
+- **THEN** it reports body-only 2, signature-changed 1, exports-changed 2, and no percentage or
+  threshold field
+
+#### Scenario: A declared operation is counted as what it is
+
+- **GIVEN** a session in which the agent changed one declared OpenAPI operation
+- **WHEN** `openlore status --json` runs
+- **THEN** it reports one contract element changed and no unclassified change
+
+### Requirement: VerifyChangeCarriesPayloadFindings
+
+`verify_change` SHALL carry `contract-payload-missing-required` findings for call sites on lines the
+diff adds or changes, and in files not yet added to git, as receipt items and as findings
+`enforcement.policy` classifies; an older call site in a touched file SHALL NOT be reported. It SHALL
+state how many request bodies there it could not read.
+
+#### Scenario: A new call site without a required field
+
+- **GIVEN** a diff that adds `fetch('/orders', { method: 'POST', body: JSON.stringify({ items }) })`
+  for an operation requiring `customerId`
+- **WHEN** `verify_change` runs
+- **THEN** its receipt names the missing `customerId`
+
+### Requirement: ContractConsumersNameTheirTests
+
+With a base ref, each in-repo consumer of a `breaking` or `dangerous` element reported by
+`certify_service_contract` SHALL carry the tests that reach the indexed function holding the call,
+or the reason they were not computed; it SHALL never be shown as having no tests when they were not
+computed.
+
+#### Scenario: A breaking change names the tests to run
+
+- **GIVEN** a removed operation `DELETE /v1/orders/{id}` called from `drop` in `src/client.ts`, and a
+  test that calls `drop`
+- **WHEN** `certify_service_contract` runs with a base ref
+- **THEN** the call site carries that test
+
+#### Scenario: Without an index
+
+- **GIVEN** no analysis index
+- **WHEN** the same check runs
+- **THEN** each consumer says its tests were not computed and why
+
+### Requirement: ServedContractsAndResourcesCarryCanonicalHashes
+
+Contract elements and IaC resources SHALL be tracked in the ledger like code symbols, with a hash
+computed as SHA-256 over the element's parsed fields serialized with sorted keys, so that a
+formatting-only change does not change the hash and a changed field, path, or attribute does. The
+background-change note SHALL name such an element by its address and file.
+
+#### Scenario: A teammate edits the spec the agent read
+
+- **GIVEN** a session that was served the operation `POST /v1/checkout` from `openapi.yaml`, and a
+  second process that then adds a required property to its request body
+- **WHEN** the agent makes its next tool call
+- **THEN** the note names `POST /v1/checkout` and `openapi.yaml`
+
+#### Scenario: Re-indenting the spec is not a change
+
+- **GIVEN** the same session, and a second process that only re-indents `openapi.yaml`
+- **WHEN** the agent makes its next tool call
+- **THEN** no note names the operation
+
+### Requirement: OrientShowsTheInfrastructureAHandlerDependsOn
+
+`orient` SHALL list, as one budgeted additive field, each resource bound to a function in its scope
+by a `deploys_symbol` edge and, for those deployed functions, the environment variables they read
+with the infrastructure sites that set them. A variable no site the scan read sets SHALL be named
+as undeclared rather than omitted, and whatever the scan or the read pass could not cover SHALL be
+disclosed beside it, so `undeclared` is never an absolute claim. Nothing SHALL be read for the
+field when no resource runs a function in scope, so a task that touches no deployed handler pays
+only one pass over the edge list.
+
+#### Scenario: orient on a Lambda handler names its resource and manifests
+
+- **GIVEN** a Lambda resource whose handler binds to `handler` in `src/orders.ts`, which reads
+  `TABLE_NAME`, set in the same Terraform resource
+- **WHEN** `orient` runs on a task about `handler`
+- **THEN** the briefing names `aws_lambda_function.orders` and the Terraform site that sets
+  `TABLE_NAME`
+
+#### Scenario: A variable the repository does not set
+
+- **GIVEN** the same handler, which also reads `AWS_REGION`, which no indexed manifest sets
+- **WHEN** `orient` runs
+- **THEN** `AWS_REGION` is named as undeclared
+
+#### Scenario: A task that touches no deployed handler
+
+- **GIVEN** a scope whose functions read environment variables and that no resource deploys
+- **WHEN** `orient` runs
+- **THEN** the field is absent, and neither the scope's files nor the infrastructure manifests are
+  read for it
+
+### Requirement: UnboundContractHandlerIsNeverHighConfidenceDead
+
+A handler bound to a declared operation is a liveness root, so a binding the contract projection
+REFUSED to make roots nothing: a gRPC server registration or a GraphQL resolver map can name a
+function literally while that function still reaches no root. `find_dead_code` SHALL NOT report
+such a symbol in its highest-confidence dead tier, and SHALL disclose the reason. This governs
+bindings the projection REFUSED; a handler whose registration style was never read at all — its RPC
+stays in `unboundRpcs` — is outside it and may still be rated `high`.
+
+A candidate SHALL be capped at `low` when its name matches a symbol a refused registration or
+resolver entry WROTE, or when its class matches the implementation class a refused registration
+named — narrowed to the one directory where the projection's own scope rule proves the class can
+live nowhere else, and matched by name alone where no such proof exists. A refusal that names NO
+function, and whose implementation argument could not be read, SHALL cap every candidate in the file
+that declares the registration: the handler names are not in the registration, and such an object is
+written where it is registered. A refusal that names no function and whose implementation WAS
+readable — an inline handler, or an unknown field or service with an all-inline map — SHALL cap
+nothing, because it left no named symbol unrooted and a cap would state a reason that is false. Each
+cap SHALL carry a reason naming the refused contract wiring and pointing at
+`contractRootsNotAssessed`, and SHALL NOT assert identity where the match is by name alone.
+
+The cap SHALL read the COMPLETE refusal list. Because each disclosure's `items` are bounded for a
+reader, the producer SHALL carry the deduplicated symbol, class and file names over every refusal;
+a reader's cap SHALL NOT decide whether a handler can be called confidently dead. An index that
+cannot name every refusal — one written before those names were carried, or one past the name
+list's own disclosed cap — SHALL have NO candidate rated high-confidence dead, and SHALL state how
+many refusals it cannot name at report level and in its soundness caveats, not only on a candidate
+that reached the highest tier.
+
+The cap only ever LOWERS a verdict — it never promotes a candidate, and it never removes one from
+the candidate set, which stays the reachability partition `deadCodeIds` and `find_dead_code` share.
+
+The cap is a LOWER BOUND and the response SHALL say so. NOT covered: an implementation object
+assembled in a module other than the registration's; a registration style the scan does not read at
+all, whose RPC is listed in `unboundRpcs`; GraphQL resolver-plumbing keys, which produce no refusal;
+and OpenAPI `unresolvedBindings`, which name no symbol (the one name a route carries substitutes a
+placeholder when extraction fails, so it cannot ground a symbol match). Where a refusal names only a
+file, unrelated candidates in that file are capped as well: precision is lost, soundness is not.
+
+#### Scenario: A method whose class a refused gRPC registration named
+
+- **GIVEN** a Go method `orderServer.GetOrder` that reaches no liveness root, and an unresolved
+  registration naming `orderServer` as its implementation class
+- **WHEN** `find_dead_code` runs with a dependency-graph signal that does not import the method by
+  name
+- **THEN** the candidate is rated `low`, not `high`, and its reason names the refused registration
+
+#### Scenario: A registration whose implementation argument could not be read
+
+- **GIVEN** `server.addService(Echo.service, serviceImplementation)` in `examples/cancellation/server.js`,
+  disclosed as a `not-literal` refusal naming no symbol, and a candidate-dead handler declared in
+  that file
+- **WHEN** `find_dead_code` runs
+- **THEN** the candidate is rated `low` and its reason names the unreadable implementation argument
+
+#### Scenario: A readable refusal that names no function caps nothing
+
+- **GIVEN** a refusal in a file holding an unrelated candidate whose reason is
+  `inline-implementation`, `unknown-field` or `unknown-service` with an all-inline map, and no other
+  refusal naming that file
+- **WHEN** `find_dead_code` runs
+- **THEN** the candidate keeps its `high` rating
+
+#### Scenario: A resolver a refused GraphQL resolver map named
+
+- **GIVEN** an unresolved resolver entry naming the function `order`, and a candidate-dead function
+  of that name
+- **WHEN** `find_dead_code` runs
+- **THEN** the candidate is rated `low` and its reason names the refused resolver map
+
+#### Scenario: More refusals than the reader slice lists, all named by the index
+
+- **GIVEN** 43 unresolved registrations of which the disclosure lists 20, and complete name lists
+  naming all 43
+- **WHEN** `find_dead_code` runs
+- **THEN** a candidate no refusal names keeps its `high` rating — the reader slice decides nothing
+
+#### Scenario: An index that cannot name every refusal
+
+- **GIVEN** an index whose refusal names are incomplete (written before they were carried, or past
+  the name cap)
+- **WHEN** `find_dead_code` runs
+- **THEN** no candidate is rated `high`, and the count of unnamed refusals appears in
+  `contractRootsNotAssessed` and in `soundness.caveats`, whatever each candidate's tier
+
+#### Scenario: A class cap is scoped where the projection proves it
+
+- **GIVEN** a Go registration naming the unqualified type `server` in `greeter/`, and an unrelated
+  struct of the same name in `metrics/`
+- **WHEN** `find_dead_code` runs
+- **THEN** the method in `greeter/` is capped and the one in `metrics/` is not
+
+#### Scenario: A candidate no contract wiring names is unaffected
+
+- **GIVEN** an unresolved registration naming neither the candidate's name nor its class, and no
+  truncation
+- **WHEN** `find_dead_code` runs
+- **THEN** the candidate keeps its `high` rating and carries no contract reason
+
+### Requirement: SemanticChangeProvenanceIsReproducibleAndPortable
+
+The system SHALL provide an opt-in `certify_provenance` conclusion tool that emits a semantic change
+certificate for the working tree against a base resolved through `resolveBaseRefDisclosed`. The
+certificate SHALL record what the change does: the structural delta as counts, the blast radius, the
+specs touched and any drift, and the tests reaching the change. The certificate SHALL be
+reproducible (same inputs produce a byte-identical document) and content-addressed by a digest of
+its predicate body, so that any consumer can recompute it and verify it rather than trusting its
+source. It SHALL be emittable as an in-toto statement with a stable, versioned `predicateType`
+(input `format: "in-toto"`), and equivalently as standalone JSON; OpenLore SHALL emit the document
+and SHALL NOT perform signing. The certificate SHALL disclose unresolved dynamic dispatch and
+present its claims as a sound lower bound, never as "safe"; a base that cannot be resolved SHALL be
+an error unless the caller opts in to a disclosed fallback. It SHALL cross-reference
+`change_impact_certificate` as its sibling — that tool briefs the author's pending diff in-session,
+this emits a portable, recomputable record a third party can verify.
+
+#### Scenario: A consumer recomputes and verifies the certificate
+
+- **GIVEN** a certificate emitted for a working tree and base, and its recorded digest
+- **WHEN** a consumer calls `certify_provenance` over the same tree and base
+- **THEN** the document is byte-identical and the digest matches, so the certificate is verified
+  without trusting who produced it
+
+#### Scenario: It attaches to existing attestation without replacing it
+
+- **WHEN** the certificate is requested with `format: "in-toto"`
+- **THEN** it is a statement with a stable versioned `predicateType`, and OpenLore performs no
+  signing of its own
+
+#### Scenario: A bad base is an error
+
+- **GIVEN** a base ref that cannot be resolved and no opt-in fallback
+- **WHEN** the certificate is requested
+- **THEN** the tool returns an error with the reason rather than certifying against a substituted
+  base
+
+### Requirement: MergeSemanticCompatibilityIsCertified
+
+The system SHALL provide an opt-in `certify_merge` conclusion tool that, given two refs and their
+merge-base, deterministically certifies their structural compatibility: each symbol one side
+removed or changed in signature is joined — in both directions — against the direct call edges the
+other side added into it; only direct call edges are joined. Each finding SHALL be classified
+`incompatible` (severity `error`) or `potentially-incompatible` (severity `warning`) using the same
+closed classification rules as public-surface certification — a change that cannot be proven
+compatible is `potentially-incompatible`, never silently compatible — and SHALL name the edge and
+the rule; the certificate's overall `verdict` and `summary` carry the labels, and the certificate
+SHALL name the two refs and the base. The verdict SHALL be presented as a sound lower bound (`no-detected-conflict`, never
+"safe"), and the certificate SHALL disclose that calls the other side already had, import edges,
+unindexed languages, and dynamic dispatch are not assessed. A ref that cannot be resolved SHALL be
+an error, not a certificate. Findings SHALL be emitted under the registered governance finding code
+`merge-semantic-conflict`, advisory by default. The tool SHALL cross-reference its siblings:
+footprint hazards (in-flight overlap) and the textual merge oracle (will git conflict) versus this
+tool (what breaks when git does not).
+
+#### Scenario: Cleanly merging branches are caught disagreeing
+
+- **GIVEN** branch A adds a call to `parseConfig` and branch B adds a required parameter to
+  `parseConfig`, with no textual overlap between the branches
+- **WHEN** `certify_merge` runs on A and B
+- **THEN** the certificate reports the A-call-site × B-signature-change join as `incompatible`
+  with the classification rule
+
+#### Scenario: A migrated rename is not a false conflict
+
+- **GIVEN** branch B renames a symbol and updates every caller within B, and branch A adds a
+  caller to the old name
+- **WHEN** the certificate is computed
+- **THEN** only A's new edge is reported, and B's migrated callers produce no finding
+
+#### Scenario: The unprovable is never silently compatible
+
+- **GIVEN** one branch changes a parameter type in a way that cannot be proven wider or narrower
+  (an incomparable or untyped change, or a language with no signature classification), and the
+  other branch adds a call to that function
+- **WHEN** the certificate is computed
+- **THEN** the finding is `potentially-incompatible`, with rule `signature-unprovable`
+
+#### Scenario: An unresolvable ref is an error
+
+- **GIVEN** a ref that cannot be resolved
+- **WHEN** the certificate is requested
+- **THEN** the tool returns an error and no certificate
+
+### Requirement: FleetVerificationMemorySurvivesBaseDrift
+
+The system SHALL hold, under the opt-in coordination preset, a verification memory of typed anchored
+records, each carrying the base commit it was proven against and the symbols it was proven over.
+When a live record is read in the worktree that recorded it, the system SHALL decide its state
+deterministically with the freshness lease — `still-valid`, `invalidated` (an anchored symbol
+changed), or `needs-reverification` (an anchor cannot be located, carries no content hash, or
+cannot be checked) — and SHALL NOT serve a record as fresh without a graph to check it against. A
+record from another worktree and an ended record are not classified here; see
+`FleetRecordsAndPlansUseTheBoard`. The `fleet_status` conclusion SHALL report the classified records and the peer
+board summary, and SHALL point to the dispatch, in-flight, and landing tools by name without running
+them. Where records live, when they end, and the disclosure that no tool records a verdict yet are
+stated in `FleetRecordsAndPlansUseTheBoard`.
+
+#### Scenario: A still-valid record is reported without re-verification
+
+- **GIVEN** a record proven against base commit X, read in the worktree that recorded it, and the
+  base advances to Y touching unrelated code
+- **WHEN** `fleet_status` is read before the record ends
+- **THEN** the record is `still-valid`
+
+#### Scenario: Drift invalidates the record
+
+- **GIVEN** a live record, read in the worktree that recorded it, whose proven symbols a later
+  commit changed
+- **WHEN** `fleet_status` is read
+- **THEN** the record is `invalidated`, not fresh
+
+#### Scenario: A lost anchor is never silently trusted or dropped
+
+- **GIVEN** a live record, read in the worktree that recorded it, whose anchored symbol can no
+  longer be located
+- **WHEN** `fleet_status` is read
+- **THEN** the record is `needs-reverification`, surfaced as such, neither served fresh nor dropped

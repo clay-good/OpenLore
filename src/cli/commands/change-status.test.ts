@@ -9,6 +9,7 @@ import {
   renderStatusTable,
   runChangeStatusCli,
   type ValidateChange,
+  validateWithOpenSpec,
 } from './change-status.js';
 
 const roots: string[] = [];
@@ -43,6 +44,29 @@ afterEach(async () => {
 });
 
 describe('change evidence audit', () => {
+  it('a missing openspec CLI is not assessed: same verdict as passing, never archivable', async () => {
+    const original = process.env.PATH;
+    let missing: Awaited<ReturnType<typeof validateWithOpenSpec>>;
+    process.env.PATH = '';
+    try {
+      missing = await validateWithOpenSpec(tmpdir(), 'any-change');
+    } finally {
+      process.env.PATH = original;
+    }
+    expect(missing).toEqual({ passes: false, assessed: false, reason: 'the openspec CLI is not on PATH' });
+
+    const root = await fixture();
+    await addChange(root, 'built', 'cli', '### Requirement: Synced');
+    await writeFile(join(root, 'src', 'markers.ts'), '// change: built\n');
+    const [passing] = await auditChangeStatuses({ rootPath: root, validateChange: validate });
+    const [unassessed] = await auditChangeStatuses({ rootPath: root, validateChange: async () => missing });
+    expect(unassessed.verdict).toBe(passing.verdict);
+    expect(unassessed.requirementsSynced).toEqual(passing.requirementsSynced);
+    expect(unassessed.validates).toMatchObject({ assessed: false, reason: 'the openspec CLI is not on PATH' });
+    expect(unassessed.archivableCandidate).toBe(false);
+    expect(renderStatusTable([unassessed])).toContain('validates not assessed (the openspec CLI is not on PATH)');
+  });
+
   it('computes every verdict from marker and domain-scoped requirement evidence', async () => {
     const root = await fixture();
     await addChange(root, 'built', 'cli', '### Requirement: Synced');
@@ -332,6 +356,18 @@ describe('change evidence audit', () => {
     const payload = JSON.parse(stdout) as { evidenceDisclaimer: string; changes: Array<{ evidenceDisclaimer: string }> };
     expect(payload.evidenceDisclaimer).toBe(EVIDENCE_DISCLAIMER);
     expect(payload.changes[0].evidenceDisclaimer).toBe(EVIDENCE_DISCLAIMER);
+  });
+
+  it('reports no open changes, not a crash, when openspec/changes does not exist', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openlore-change-status-'));
+    roots.push(root);
+    let stdout = '';
+    vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: string | Uint8Array) => {
+      stdout += String(chunk);
+      return true;
+    }) as typeof process.stdout.write);
+    expect(await runChangeStatusCli({ rootPath: root, json: true, validateChange: validate })).toBe(0);
+    expect((JSON.parse(stdout) as { changes: unknown[] }).changes).toEqual([]);
   });
 
   it('rejects traversal-like or unknown names before reading outside the open-change set', async () => {

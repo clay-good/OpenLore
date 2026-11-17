@@ -1,0 +1,23 @@
+{
+  "corpus": "gridprims",
+  "description": "Utility-data tools (JavaScript ESM, documented). Dogfood corpus.",
+  "queries": [
+    { "kind": "identifier", "query": "detectDelimiter", "targets": [{ "name": "detectDelimiter", "file": "parsers/delimited.mjs" }] },
+    { "kind": "identifier", "query": "readXlsx first sheet", "targets": [{ "name": "readXlsx", "file": "parsers/xlsx.mjs" }] },
+    { "kind": "identifier", "query": "lookupZip", "targets": [{ "name": "lookupZip", "file": "core/lib/zip-lookup.mjs" }] },
+    { "kind": "identifier", "query": "headroomReport", "targets": [{ "name": "headroomReport", "file": "core/lib/service-headroom.mjs" }] },
+    { "kind": "identifier", "query": "parseXml", "targets": [{ "name": "parseXml", "file": "parsers/xml.mjs" }] },
+    { "kind": "identifier", "query": "roundSig significant figures", "targets": [{ "name": "roundSig", "file": "core/lib/precision.mjs" }] },
+    { "kind": "identifier", "query": "localToUtc", "targets": [{ "name": "localToUtc", "file": "parsers/time.mjs" }] },
+    { "kind": "paraphrase", "query": "translate a message and substitute named placeholders", "targets": [{ "name": "t", "file": "site/lib/i18n.mjs" }] },
+    { "kind": "paraphrase", "query": "escape values in a tagged template for markup", "targets": [{ "name": "html", "file": "site/lib/html.mjs" }] },
+    { "kind": "paraphrase", "query": "count calendar dates covered by a bill cycle including start and end", "targets": [{ "name": "daysIn", "file": "core/lib/bill-totals.mjs" }] },
+    { "kind": "paraphrase", "query": "average power over each meter reading period", "targets": [{ "name": "intervalKw", "file": "core/lib/load-stats.mjs" }] },
+    { "kind": "paraphrase", "query": "storage capacity needed to keep critical loads powered during an outage", "targets": [{ "name": "battery", "file": "core/lib/backup-power.mjs" }] },
+    { "kind": "paraphrase", "query": "current carrying capacity of an overhead conductor", "targets": [{ "name": "ampacity", "file": "core/lib/line-rating.mjs" }] },
+    { "kind": "paraphrase", "query": "estimate reading difficulty by counting vowel groups in a word", "targets": [{ "name": "syllables", "file": "core/lib/readability.mjs" }] },
+    { "kind": "paraphrase", "query": "turn raw bytes into a string respecting a BOM", "targets": [{ "name": "decodeText", "file": "parsers/delimited.mjs" }] },
+    { "kind": "paraphrase", "query": "electric vehicles charging at full power from plug-in until full", "targets": [{ "name": "unmanaged", "file": "core/lib/ev-fleet.mjs" }] },
+    { "kind": "paraphrase", "query": "lowest typical demand as the fifth percentile", "targets": [{ "name": "baseload", "file": "core/lib/load-insights.mjs" }] }
+  ]
+}

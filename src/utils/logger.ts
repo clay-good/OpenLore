@@ -233,6 +233,16 @@ export class Logger {
   }
 
   /**
+   * Whether a `debug` message would actually be shown — so a caller can skip
+   * computing a diagnostic nobody will read.
+   */
+  isDebugEnabled(): boolean {
+    if (loggerOptionsStorage.getStore()?.muteAll) return false;
+    const options = this.getOptions();
+    return options.verbose && !options.quiet;
+  }
+
+  /**
    * Start a spinner for long-running operations
    * @returns Spinner control object with succeed/fail/stop methods
    */

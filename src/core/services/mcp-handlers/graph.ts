@@ -6,6 +6,8 @@
  */
 
 import { validateDirectory, readCachedContext, diagnoseIndexUnservable, notReadyResult, safeJoin } from './utils.js';
+import { resolveQualifiedSymbol } from './symbol-query.js';
+export { resolveQualifiedSymbol } from './symbol-query.js';
 import { readDependencyGraphOrPartial } from './artifact-cache.js';
 import { loadTraversalIndex } from './traversal.js';
 import { resolveFederationScope, findCrossRepoConsumersBatch, findCrossRepoClientCallers } from '../../federation/resolver.js';
@@ -49,6 +51,8 @@ import { recordPerfWork } from '../../analyzer/perf-counters.js';
 import type { DecisionNode } from '../../decisions/project.js';
 import { decisionContentProvenance } from '../served-content.js';
 import { isIacLanguage } from '../../analyzer/iac/types.js';
+import { isContractLanguage } from '../../analyzer/contract/types.js';
+import { isProjectedLanguage, isDeclarationEdgeKind } from '../../analyzer/projected-language.js';
 import { getFileGodFunctions, extractSubgraph } from '../../analyzer/subgraph-extractor.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import {
@@ -494,6 +498,32 @@ export function isInfraNode(n: FunctionNode | undefined): boolean {
   return !!n && isIacLanguage(n.language);
 }
 
+/**
+ * Whether a node is a declared interface element (change: add-contract-node-projection). Like an
+ * infrastructure resource, it rides on the code graph's primitives but is NOT code: it must reach
+ * the agent as a typed cross-domain neighbour, never in a list of functions it could edit or test.
+ */
+export function isContractNode(n: FunctionNode | undefined): boolean {
+  return !!n && isContractLanguage(n.language);
+}
+
+/** Render a declared operation as a typed cross-domain neighbor. */
+export function contractToNeighbor(
+  n: FunctionNode,
+  direction: 'upstream' | 'downstream',
+  depth: number,
+) {
+  return {
+    nodeType: 'contract' as const,
+    name: n.name,
+    file: n.filePath,
+    format: n.language,
+    ...(n.startLine !== undefined ? { line: n.startLine } : {}),
+    direction,
+    depth,
+  };
+}
+
 /** Render an IaC resource node as a typed cross-domain neighbor (spec-17). */
 export function infraToNeighbor(
   n: FunctionNode,
@@ -539,6 +569,50 @@ export async function handleGetCallGraph(directory: string): Promise<unknown> {
 }
 
 /**
+ * Unresolved-ambiguous call sites touching a traversed id set (change:
+ * harden-call-resolution-ambiguity). A site whose CALLER is in-scope is an outbound call
+ * the resolver refused to bind (downstream is under-counted); a site listing a SEED among
+ * its candidates is a potential hidden upstream caller (upstream is under-counted).
+ * Disclosed so the answer reads as a sound lower bound.
+ *
+ * Shared by `analyze_impact` and `get_subgraph`: both traverse the same graph past the
+ * same unbound sites, and `ambiguousCallSites` is a registered disclosure channel, so a
+ * traversal that crosses one can no longer be reported as a complete answer (change:
+ * never-claim-complete-beside-a-refusal).
+ */
+function ambiguousCallSitesBlock(
+  ctx: { callGraph?: { ambiguousSites?: AmbiguousCallSite[] }; edgeStore?: { getNode(id: string): { name: string } | null | undefined } | null },
+  involvedIds: ReadonlySet<string>,
+  seedIds: readonly string[],
+): Record<string, unknown> {
+  const inScope = (ctx.callGraph?.ambiguousSites ?? []).filter(
+    (s: AmbiguousCallSite) => involvedIds.has(s.callerId) || s.candidateIds.some(id => seedIds.includes(id)),
+  );
+  if (inScope.length === 0) return {};
+  return {
+    ambiguousCallSites: {
+      count: inScope.length,
+      note:
+        'Call sites the resolver refused to bind because >1 candidate was viable. A caller ' +
+        'in-scope means downstream is under-counted; a seed among the candidates means a ' +
+        'potential hidden upstream caller. This answer is a lower bound here.',
+      sample: inScope.slice(0, 10).map((s: AmbiguousCallSite) => ({
+        caller: ctx.edgeStore?.getNode(s.callerId)?.name ?? s.callerId,
+        // A chained intra-object site's receiver is `this.<field>`, not the bare `this` the
+        // raw edge carries; rendering the bare token names a call the source does not have
+        // (change: shrink-receiver-resolution-boundary — same rule as error-propagation.ts).
+        callee: s.calleeObject
+          ? `${s.calleeObject}.${s.receiverField ? `${s.receiverField}.` : ''}${s.calleeName}`
+          : s.calleeName,
+        strategy: s.strategy,
+        candidates: s.candidateCount,
+      })),
+    },
+  };
+}
+
+
+/**
  * Extract a depth-limited subgraph centred on a named function.
  * Falls back to semantic search if no exact name match is found.
  */
@@ -557,8 +631,10 @@ export async function handleGetSubgraph(
   if (!ctx) return await diagnoseIndexUnservable(absDir);
   if (!ctx.edgeStore) return notReadyResult('Call graph index is empty or unavailable — run analyze_codebase to (re)build it (a version upgrade resets the graph index until the next analyze).', 'graph-unavailable');
 
+  const store = ctx.edgeStore;
+  const qualified = resolveQualifiedSymbol(functionName, n => store.getInternalNodesByName(n), id => store.getNode(id));
   const lower = functionName.toLowerCase();
-  let seeds = ctx.edgeStore.searchNodes(lower);
+  let seeds = qualified ?? store.searchNodes(lower);
 
   // searchNodes is a fuzzy FTS match, so a unique symbol can come back alongside
   // incidental hits. Prefer exact name matches so a known symbol resolves to a
@@ -575,7 +651,7 @@ export async function handleGetSubgraph(
 
       if (VectorIndex.exists(outputDir)) {
         const cfg = await readOpenLoreConfig(absDir);
-        const embedSvc = await resolveEmbedder(cfg);
+        const embedSvc = await resolveEmbedder(cfg, outputDir);
         if (embedSvc) {
           const results = await VectorIndex.search(outputDir, functionName, embedSvc, {
             limit: 1,
@@ -691,6 +767,10 @@ export async function handleGetSubgraph(
     nodes: subNodes,
     edges: subEdges,
     ...(governingDecisions.length > 0 ? { governingDecisions } : {}),
+    // Same unbound call sites `analyze_impact` discloses. A subgraph that came back with
+    // no edges because the resolver refused to bind them is not an empty neighbourhood,
+    // and must not read as a complete one.
+    ...ambiguousCallSitesBlock(ctx, visitedIds, seedIds),
     confidenceBoundary,
   };
   return withIndexStaleness(absDir, result, ctx, subgraphFiles);
@@ -724,8 +804,10 @@ export async function handleAnalyzeImpact(
   // error instead of crashing on `undefined.toLowerCase()`.
   if (typeof symbol !== 'string' || symbol.trim() === '') return { error: 'symbol is required.' };
 
+  const store = ctx.edgeStore;
+  const qualified = resolveQualifiedSymbol(symbol, n => store.getInternalNodesByName(n), id => store.getNode(id));
   const lower = symbol.toLowerCase();
-  let seeds = ctx.edgeStore.searchNodes(lower);
+  let seeds = qualified ?? store.searchNodes(lower);
 
   // searchNodes is a fuzzy FTS match, so a unique symbol can come back alongside
   // incidental hits. Prefer exact name matches so a known symbol resolves to a
@@ -742,7 +824,7 @@ export async function handleAnalyzeImpact(
 
       if (VectorIndex.exists(outputDir)) {
         const cfg = await readOpenLoreConfig(absDir);
-        const embedSvc = await resolveEmbedder(cfg);
+        const embedSvc = await resolveEmbedder(cfg, outputDir);
         if (embedSvc) {
           const results = await VectorIndex.search(outputDir, symbol, embedSvc, {
             limit: 1,
@@ -860,14 +942,14 @@ export async function handleAnalyzeImpact(
   };
 
   const upstreamNodes = upstreamResolved
-    .filter(x => !isInfraNode(x.node))
+    .filter(x => !isInfraNode(x.node) && !isContractNode(x.node))
     .map(x => {
       const { items, ...receipt } = impactCallSites(x.node.id, 'upstream');
       return { ...nodeToSummary(x.node), depth: x.depth, ...(items.length > 0
         ? { callSites: items, callSitesReceipt: receipt } : {}) };
     });
   const downstreamNodes = downstreamResolved
-    .filter(x => !isInfraNode(x.node))
+    .filter(x => !isInfraNode(x.node) && !isContractNode(x.node))
     .map(x => {
       const { items, ...receipt } = impactCallSites(x.node.id, 'downstream');
       return { ...nodeToSummary(x.node), depth: x.depth, ...(items.length > 0
@@ -879,15 +961,26 @@ export async function handleAnalyzeImpact(
     ...upstreamResolved.filter(x => isInfraNode(x.node)).map(x => infraToNeighbor(x.node, 'upstream', x.depth)),
     ...downstreamResolved.filter(x => isInfraNode(x.node)).map(x => infraToNeighbor(x.node, 'downstream', x.depth)),
   ];
-  const crossDomain = infraNeighbors.length > 0
+  // Declared operations the seed serves or calls — the same lane, typed as contract.
+  const contractNeighbors = [
+    ...upstreamResolved.filter(x => isContractNode(x.node)).map(x => contractToNeighbor(x.node, 'upstream', x.depth)),
+    ...downstreamResolved.filter(x => isContractNode(x.node)).map(x => contractToNeighbor(x.node, 'downstream', x.depth)),
+  ];
+  const crossDomain = infraNeighbors.length > 0 || contractNeighbors.length > 0
     ? {
-        reachesInfrastructure: true,
-        ecosystems: [...new Set(infraNeighbors.map(n => n.ecosystem))].sort(),
-        infrastructure: infraNeighbors,
+        ...(infraNeighbors.length > 0 ? {
+          reachesInfrastructure: true as const,
+          ecosystems: [...new Set(infraNeighbors.map(n => n.ecosystem))].sort(),
+          infrastructure: infraNeighbors,
+        } : {}),
+        ...(contractNeighbors.length > 0 ? {
+          reachesContract: true as const,
+          operations: contractNeighbors,
+        } : {}),
       }
     : undefined;
 
-  const blastRadius = upstreamNodes.length + downstreamNodes.length + infraNeighbors.length;
+  const blastRadius = upstreamNodes.length + downstreamNodes.length + infraNeighbors.length + contractNeighbors.length;
 
   // Governing decisions (spec-16): decisions whose `affects` edges intersect the
   // seed plus its blast radius — the deterministic join that answers "what
@@ -897,6 +990,7 @@ export async function handleAnalyzeImpact(
   for (const n of upstreamNodes) if (n.file) involvedFiles.add(n.file);
   for (const n of downstreamNodes) if (n.file) involvedFiles.add(n.file);
   for (const n of infraNeighbors) if (n.file) involvedFiles.add(n.file);
+  for (const n of contractNeighbors) if (n.file) involvedFiles.add(n.file);
   const governingDecisions = ctx.edgeStore.getDecisionsForFiles([...involvedFiles]).map(decisionToNeighbor);
 
   // Confidence boundary: the blast radius rests on the edges traversed within the
@@ -931,31 +1025,7 @@ export async function handleAnalyzeImpact(
   // call the resolver refused to bind (downstream is under-counted); a site listing a
   // SEED among its candidates is a potential hidden upstream caller (upstream is
   // under-counted). Disclosed so the blast radius reads as a sound lower bound.
-  const ambiguousInScope = (ctx.callGraph?.ambiguousSites ?? []).filter(
-    (s: AmbiguousCallSite) => involvedIds.has(s.callerId) || s.candidateIds.some(id => seedIds.includes(id)),
-  );
-  const ambiguousBlock = ambiguousInScope.length > 0
-    ? {
-        ambiguousCallSites: {
-          count: ambiguousInScope.length,
-          note:
-            'Call sites the resolver refused to bind because >1 candidate was viable. A caller ' +
-            'in-scope means downstream is under-counted; a seed among the candidates means a ' +
-            'potential hidden upstream caller. The blast radius is a lower bound here.',
-          sample: ambiguousInScope.slice(0, 10).map((s: AmbiguousCallSite) => ({
-            caller: ctx.edgeStore!.getNode(s.callerId)?.name ?? s.callerId,
-            // A chained intra-object site's receiver is `this.<field>`, not the bare `this` the
-            // raw edge carries; rendering the bare token names a call the source does not have
-            // (change: shrink-receiver-resolution-boundary — same rule as error-propagation.ts).
-            callee: s.calleeObject
-              ? `${s.calleeObject}.${s.receiverField ? `${s.receiverField}.` : ''}${s.calleeName}`
-              : s.calleeName,
-            strategy: s.strategy,
-            candidates: s.candidateCount,
-          })),
-        },
-      }
-    : {};
+  const ambiguousBlock = ambiguousCallSitesBlock(ctx, involvedIds, seedIds);
 
   const results = seeds.map(seed => {
     const isHub     = hubIds.has(seed.id);
@@ -974,6 +1044,7 @@ export async function handleAnalyzeImpact(
         upstream: upstreamNodes.length,
         downstream: downstreamNodes.length,
         ...(infraNeighbors.length > 0 ? { infrastructure: infraNeighbors.length } : {}),
+        ...(contractNeighbors.length > 0 ? { contract: contractNeighbors.length } : {}),
       },
       riskScore,
       riskLevel: riskScore <= 20 ? 'low' : riskScore <= 45 ? 'medium' : riskScore <= 70 ? 'high' : 'critical',
@@ -1177,7 +1248,8 @@ export async function handleGetLowRiskRefactorCandidates(
   let candidates = cg.nodes.filter(n => {
     const fanIn  = n.fanIn  ?? 0;
     const fanOut = n.fanOut ?? 0;
-    return !n.isExternal && !n.isTest && fanIn <= LOW_RISK_MAX_FAN_IN && fanOut <= LOW_RISK_MAX_FAN_OUT && !hubIds.has(n.id) && !entryIds.has(n.id);
+    // A projected declaration (an RPC, a schema, a resource) is not code to rename or rewrite.
+    return !n.isExternal && !n.isTest && !isProjectedLanguage(n.language) && fanIn <= LOW_RISK_MAX_FAN_IN && fanOut <= LOW_RISK_MAX_FAN_OUT && !hubIds.has(n.id) && !entryIds.has(n.id);
   });
 
   if (filePattern) candidates = candidates.filter(n => n.filePath.includes(filePattern));
@@ -1218,8 +1290,10 @@ export async function handleGetLeafFunctions(
   if (!ctx.callGraph) return notReadyResult('Call graph not available. Re-run analyze_codebase.', 'graph-unavailable');
 
   const cg = ctx.callGraph as SerializedCallGraph;
-  const hasOutgoing = new Set(cg.edges.filter(e => e.calleeId).map(e => e.callerId));
-  let leaves = cg.nodes.filter(n => !n.isExternal && !n.isTest && !hasOutgoing.has(n.id));
+  // A declaration binding (handler → the operation it serves) is not a call, so it does not make
+  // its caller a non-leaf; and a projected declaration is not a function at all.
+  const hasOutgoing = new Set(cg.edges.filter(e => e.calleeId && !isDeclarationEdgeKind(e.kind)).map(e => e.callerId));
+  let leaves = cg.nodes.filter(n => !n.isExternal && !n.isTest && !isProjectedLanguage(n.language) && !hasOutgoing.has(n.id));
 
   if (filePattern) leaves = leaves.filter(n => n.filePath.includes(filePattern));
 
@@ -1476,8 +1550,12 @@ export async function handleTraceExecutionPath(
 
   const entryLower  = entryFunction.toLowerCase();
   const targetLower = targetFunction.toLowerCase();
-  const entryMatches  = cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(entryLower));
-  const targetMatches = cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(targetLower));
+  const byName = (name: string) => cg.nodes.filter(n => !n.isTest && n.name === name);
+  const byId = (id: string) => nodeMap.get(id);
+  const entryMatches  = resolveQualifiedSymbol(entryFunction, byName, byId)
+    ?? cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(entryLower));
+  const targetMatches = resolveQualifiedSymbol(targetFunction, byName, byId)
+    ?? cg.nodes.filter(n => !n.isTest && n.name.toLowerCase().includes(targetLower));
 
   if (entryMatches.length === 0)  return { error: `No function matching "${entryFunction}" found in call graph.` };
   if (targetMatches.length === 0) return { error: `No function matching "${targetFunction}" found in call graph.` };

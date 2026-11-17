@@ -834,6 +834,17 @@ describe('panic — individual signal detection', () => {
     expect(t.panicScore).toBeGreaterThanOrEqual(15);
   });
 
+  it('edit_oscillation (+10, the oscillation delta) fires for a newly observed edit loop', () => {
+    const t = freshTracker();
+    const same = freshTracker();
+    t.panicScore = same.panicScore = 20;
+    t.lastPanicUpdateAt = same.lastPanicUpdateAt;
+    updatePanic(t, { density: 0, oscillation: 0, weight: 1, staleDepth: 0, editOscillation: 1 });
+    updatePanic(same, { density: 0, oscillation: 0, weight: 1, staleDepth: 0 });
+    expect(t.panicScore - same.panicScore).toBe(10);
+    expect(t.panicTriggers).toContain('edit_oscillation');
+  });
+
   it('oscillation_spike (+10) fires when oscillation >= 0.50', () => {
     const t = freshTracker();
     t.panicScore = 0;

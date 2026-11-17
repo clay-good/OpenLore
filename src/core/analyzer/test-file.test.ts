@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { isTestFile, TEST_DETECTION_DECISIONS, TEST_DETECTION_LANGUAGES } from './test-file.js';
+import { isTestFile, TEST_DETECTION_DECISIONS, TEST_DETECTION_LANGUAGES , TEST_DETECTION_CAVEATS } from './test-file.js';
 import { CALLGRAPH_LANGUAGES } from './call-graph.js';
 
 const FIXTURES: Record<string, { test: string; source: string }> = {
@@ -116,5 +116,30 @@ describe('isTestFile', () => {
   it('normalizes Windows path separators', () => {
     expect(isTestFile('src\\__tests__\\foo.ts')).toBe(true);
     expect(isTestFile('src\\foo.test.ts')).toBe(true);
+  });
+});
+
+// Rust's path conventions beyond `tests/`: the sibling file a module declares with
+// `#[cfg(test)] mod tests;`, and the `_test.rs` suffix (change: fix-rust-test-detection).
+describe('Rust path conventions', () => {
+  it('recognizes the sibling tests.rs file', () => {
+    expect(isTestFile('crates/invariant-core/src/authority/tests.rs')).toBe(true);
+    expect(isTestFile('src/tests.rs')).toBe(true);
+    expect(isTestFile('tests.rs')).toBe(true);
+  });
+
+  it('recognizes the _test.rs suffix', () => {
+    expect(isTestFile('src/foo_test.rs')).toBe(true);
+  });
+
+  it('still keeps production Rust out', () => {
+    expect(isTestFile('src/authority/mod.rs')).toBe(false);
+    expect(isTestFile('src/latest.rs')).toBe(false);
+    expect(isTestFile('src/attest.rs')).toBe(false);
+  });
+
+  it('names what no path can show', () => {
+    expect(TEST_DETECTION_CAVEATS.get('Rust')).toMatch(/#\[cfg\(test\)\]/);
+    expect(TEST_DETECTION_CAVEATS.get('Rust')).toMatch(/macro/);
   });
 });

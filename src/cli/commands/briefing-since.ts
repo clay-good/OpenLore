@@ -14,6 +14,8 @@ import { isChangedSetCaveat } from '../../core/services/symbol-changed-set.js';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
+import { positiveIntegerOption } from '../numeric-options.js';
+import { toCliVocabulary } from '../surface-vocabulary.js';
 
 interface BriefingItem {
   name: string;
@@ -166,7 +168,7 @@ export async function runBriefingSinceCli(opts: BriefingSinceCliOptions): Promis
   }
 
   if (result && typeof result === 'object' && 'error' in result) {
-    const error = (result as { error: string }).error;
+    const error = toCliVocabulary((result as { error: string }).error);
     if (opts.json) await writeStdout(JSON.stringify({ status: 'unavailable', error }, null, 2) + '\n');
     else logger.warning(`briefing-since: ${error}`);
     return 1;
@@ -184,7 +186,7 @@ export const briefingSinceCommand = new Command('briefing-since')
   .description('Ranked, labeled briefing of what changed since a base ref — which changes structurally matter (surprising/hub/chokepoint/ordinary). Read-only, deterministic, never blocks.')
   .option('--base <ref>', 'Git ref to brief changes SINCE (e.g. main, HEAD~20). Default: auto (main → master → HEAD~1).')
   .option('--file-pattern <substr>', 'Region scope — only brief changes whose file path contains this substring')
-  .option('--max <n>', 'Bound on briefed symbols, highest-tier-first (default 50, capped 200)', (v) => parseInt(v, 10))
+  .option('--max <n>', 'Bound on briefed symbols, highest-tier-first (default 50, capped 200)', positiveIntegerOption('--max'))
   .option('--json', 'Emit the briefing as JSON', false)
   .action(async (opts: { base?: string; filePattern?: string; max?: number; json?: boolean }) => {
     const code = await runBriefingSinceCli({

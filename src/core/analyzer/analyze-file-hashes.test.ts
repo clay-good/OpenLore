@@ -1,0 +1,101 @@
+/**
+ * A full analysis records the content hash of every file it read, so the
+ * read path judges a cited file by its bytes and not its mtime.
+ *
+ * Regression: full analysis cleared `file_hashes` and never wrote it, so freshness fell back
+ * to comparing mtimes. A checkout, pull or new worktree that rewrote unchanged files made the
+ * index read as "behind the working tree" for every file it touched.
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, mkdir, readFile, rm, writeFile, utimes } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { runAnalysisCore } from './analysis-core.js';
+import { EdgeStore } from '../services/edge-store.js';
+import { checkCitedFileFreshness } from '../services/mcp-handlers/freshness.js';
+import { isCacheFresh } from '../services/mcp-handlers/utils.js';
+import { openloreInit } from '../../api/init.js';
+import { openloreAnalyze } from '../../api/analyze.js';
+import { SOURCE_SCAN_MAX_FILE_BYTES } from '../../constants.js';
+
+const SOURCE = 'export function computeTariff(kwh: number): number { return kwh * 0.12; }\n';
+
+let root: string;
+let out: string;
+
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), 'analyze-hashes-'));
+  out = join(root, '.openlore', 'analysis');
+  await mkdir(join(root, 'src'), { recursive: true });
+  await writeFile(join(root, 'src', 'tariff.ts'), SOURCE);
+  await writeFile(join(root, 'src', 'aliases.json'), '{"kwh":"kilowatt-hour"}\n');
+  await runAnalysisCore(root, out, { maxFiles: 200, include: [], exclude: [] });
+});
+
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+});
+
+const withStore = async <T>(fn: (store: EdgeStore) => Promise<T>): Promise<T> => {
+  const store = EdgeStore.open(EdgeStore.dbPath(out));
+  try { return await fn(store); } finally { store.close(); }
+};
+
+describe('full analysis records per-file content hashes', () => {
+  it('stores the SHA-256 of the bytes each file was read as', async () => {
+    const expected = createHash('sha256').update(SOURCE).digest('hex');
+    expect(await withStore(async (store) => store.getFileHash('src/tariff.ts'))).toBe(expected);
+  });
+
+  it('a file rewritten with the same content (checkout, pull, new worktree) stays fresh', async () => {
+    const later = new Date(Date.now() + 60 * 60 * 1000);
+    await utimes(join(root, 'src', 'tariff.ts'), later, later);
+    const result = await withStore((edgeStore) => checkCitedFileFreshness(root, ['src/tariff.ts'], { edgeStore }));
+    expect(result.staleFiles).toEqual([]);
+  });
+
+  it('a cited file outside the call graph (data, config) has a baseline too', async () => {
+    const later = new Date(Date.now() + 60 * 60 * 1000);
+    await utimes(join(root, 'src', 'aliases.json'), later, later);
+    const result = await withStore((edgeStore) => checkCitedFileFreshness(root, ['src/aliases.json'], { edgeStore }));
+    expect(result.staleFiles).toEqual([]);
+  });
+
+  it('a file whose content changed is stale', async () => {
+    await writeFile(join(root, 'src', 'tariff.ts'), `${SOURCE}export const changed = true;\n`);
+    const result = await withStore((edgeStore) => checkCitedFileFreshness(root, ['src/tariff.ts'], { edgeStore }));
+    expect(result.staleFiles).toEqual(['src/tariff.ts']);
+  });
+
+  it('a file too large for the freshness scan keeps the mtime fallback instead of reading stale forever', async () => {
+    await writeFile(join(root, 'src', 'big.json'), JSON.stringify({ blob: 'x'.repeat(SOURCE_SCAN_MAX_FILE_BYTES) }));
+    await runAnalysisCore(root, out, { maxFiles: 200, include: [], exclude: [], reExtract: true });
+    expect(await withStore(async (store) => store.getFileHash('src/big.json'))).toBeNull();
+    const result = await withStore((edgeStore) => checkCitedFileFreshness(root, ['src/big.json'], { edgeStore }));
+    expect(result.staleFiles).toEqual([]);
+  });
+});
+
+describe('the read-path content check agrees with analyze', () => {
+  it('an unchanged tree analyzed with configured include patterns reads as unchanged', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'analyze-include-'));
+    try {
+      await mkdir(join(dir, 'src'), { recursive: true });
+      await mkdir(join(dir, 'docs'), { recursive: true });
+      await writeFile(join(dir, 'src', 'tariff.ts'), SOURCE);
+      await writeFile(join(dir, 'docs', 'note.ts'), 'export const note = 1;\n');
+      await openloreInit({ rootPath: dir });
+      const configPath = join(dir, '.openlore', 'config.json');
+      const config = JSON.parse(await readFile(configPath, 'utf8'));
+      config.analysis = { ...config.analysis, includePatterns: ['docs/**'] };
+      await writeFile(configPath, JSON.stringify(config));
+      await openloreAnalyze({ rootPath: dir });
+      expect(await isCacheFresh(dir)).toBe(true);
+      await writeFile(join(dir, 'src', 'tariff.ts'), `${SOURCE}export const changed = true;\n`);
+      expect(await isCacheFresh(dir)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  });
+});

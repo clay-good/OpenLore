@@ -1,0 +1,13 @@
+{
+  "name": "openlore",
+  "owner": { "name": "Clay Good", "url": "https://github.com/clay-good" },
+  "metadata": { "description": "OpenLore: deterministic structural context for coding agents." },
+  "plugins": [
+    {
+      "name": "openlore",
+      "source": "./plugin",
+      "description": "Call graph, tests, specs, and decisions for each edit, through hooks and MCP. Local only.",
+      "category": "development"
+    }
+  ]
+}

@@ -1224,8 +1224,11 @@ export const setupCommand = new Command('setup')
       // unify-onboarding-entrypoint): the same non-blocking autopilot gate, so a
       // user who reaches the trail through `setup` gets the identical posture
       // rather than a second, stricter one.
-      const { wireGovernanceGate } = await import('../install/index.js');
-      await wireGovernanceGate(projectRoot);
+      const { wireGovernanceGate, reportGovernanceGate } = await import('../install/index.js');
+      // Reported, not swallowed: `setup` never runs `init`, so it is one of the two paths that
+      // installs a gate into a repository with no config, and it must say which mode it
+      // installed (change: fix-install-never-blocks-by-default).
+      reportGovernanceGate(await wireGovernanceGate(projectRoot));
       // Freshness is owned by the MCP server's --watch-auto (Spec 13.1); strip
       // any legacy full-analyze PostToolUse hook a prior version installed (B9).
       await uninstallClaudeHook(projectRoot);

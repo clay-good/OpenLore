@@ -216,6 +216,7 @@ describe('runImpactCertificateCli (advisory posture & exit codes)', () => {
       tests: {
         count: 0,
         toRun: [],
+        files: [],
         soundness: { caveats: ['Symbol scope resolved by substring fallback and may have widened.'] },
         truncatedAtDepth: 2,
       },

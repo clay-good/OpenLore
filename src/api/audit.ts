@@ -148,6 +148,7 @@ async function audit(options: AuditApiOptions): Promise<AuditReport> {
         reason: resolution.reason,
         message: resolution.message,
         remediation: resolution.remediation,
+        ...(resolution.lookedFor ? { lookedFor: resolution.lookedFor } : {}),
         artifactPath: resolution.artifactPath,
       };
   const index = resolution.state === 'available' ? resolution.index : null;

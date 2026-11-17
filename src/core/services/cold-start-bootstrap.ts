@@ -28,6 +28,7 @@
 
 import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { openloreCliEntry } from '../../utils/platform-command.js';
 import { childEnvWithoutScopedTlsRelaxation } from './tls-scope.js';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep, win32 } from 'node:path';
@@ -45,17 +46,23 @@ import { readOpenLoreConfigDataSync, resolveOpenLoreConfigPath } from './config-
 export type RepairReason =
   | 'index-absent'
   | 'integrity-mismatched'
+  | 'integrity-degraded'
   | 'stale-region'
   | 'schema-reset'
-  | 'analysis-age';
+  | 'analysis-age'
+  | 'artifact-unservable'
+  | 'seeded';
 
 /** Human-facing label for each reason, used in the "refresh started" disclosure. */
 export const REPAIR_REASON_DETAIL: Record<RepairReason, string> = {
   'index-absent': 'no index found',
   'integrity-mismatched': 'the index did not reconcile against its build attestation',
+  'integrity-degraded': 'the index is materially smaller than its build attestation (a partial or truncated store)',
   'stale-region': 'part of the index is explicitly stale',
   'schema-reset': 'the index schema was reset by a version upgrade',
   'analysis-age': 'the analysis is older than the freshness threshold',
+  'artifact-unservable': 'an analysis artifact is present but could not be served (corrupt, or a lost/refused generation publish)',
+  'seeded': 'the index was copied from another checkout of this repository',
 };
 
 /** Directories already repaired (or in flight) this process — build at most once each. */
@@ -181,6 +188,11 @@ export function requestRepairFromHost(directory: string, staleFiles: readonly st
 /** Register the process-wide repair builder (the MCP server injects install's forced buildIndex). */
 export function registerRepairBuilder(fn: RepairBuilder): void {
   registeredBuilder = fn;
+}
+
+/** True when a repair could run here: a builder is registered and auto-analysis is not disabled. */
+export function canRepairInBackground(): boolean {
+  return registeredBuilder !== null && !process.env.OPENLORE_NO_AUTO_ANALYZE;
 }
 
 /** True once an `openlore analyze` artifact exists for the directory. */
@@ -528,7 +540,13 @@ export async function buildIndexInChildProcess(
 
   // The PROJECT file decides whether `init` is needed; user-wide defaults do not
   // initialize a repository (and a malformed user file must not abort the build).
-  if (!existsSync(resolveOpenLoreConfigPath(directory))) await run(['init']);
+  if (!existsSync(resolveOpenLoreConfigPath(directory))) {
+    await run(['init']);
+    // Auto-init is the setup a human never ran: record autopilot as its explicit default
+    // (change: default-decision-autopilot-with-visible-trace).
+    const { recordAutoInitAutopilot } = await import('../decisions/autopilot.js');
+    await recordAutoInitAutopilot(directory);
+  }
   await run([
     'analyze',
     ...(opts.repair ? ['--reanalyze'] : []),
@@ -541,6 +559,38 @@ export async function buildIndexInChildProcess(
     // that already has a published generation.
     '--partial-serving',
   ]);
+  // Keyword is published and serving; local vectors follow in a process nobody waits
+  // for (change: enable-local-semantic-search-in-background). It decides for itself
+  // whether to run — opt-out, package, model — and exits silently when it should not.
+  if (opts.mode !== 'degraded') startBackgroundVectorPass(directory, { cliPath, spawnProcess });
+}
+
+/**
+ * Start the detached local-vector pass for `directory` after a keyword build published
+ * (change: enable-local-semantic-search-in-background). Nobody waits for it; it decides for
+ * itself whether to run (opt-out, package, model) and exits silently when it should not.
+ * Every builder that publishes a keyword-only index calls it, or the vectors it replaced are
+ * never rebuilt.
+ */
+export function startBackgroundVectorPass(
+  directory: string,
+  opts: { cliPath?: string; spawnProcess?: typeof spawn } = {},
+): void {
+  // This package's own built CLI, never a bare argv[1]: a host that embeds OpenLore (the serve
+  // daemon, a test runner) would otherwise launch some other program with these arguments.
+  const cliPath = opts.cliPath ?? openloreCliEntry();
+  if (!cliPath || childBuildsStopping) return;
+  try {
+    const child = (opts.spawnProcess ?? spawn)(process.execPath, [cliPath, 'analyze', '--background-vectors'], {
+      cwd: directory,
+      stdio: 'ignore',
+      detached: true,
+      windowsHide: true,
+      env: childEnvWithoutScopedTlsRelaxation(),
+    });
+    child.once('error', () => { /* fail-soft: keyword keeps serving */ });
+    child.unref();
+  } catch { /* fail-soft: keyword keeps serving */ }
 }
 
 /**
@@ -693,8 +743,30 @@ export function repairDisclosureText(reason: RepairReason): string {
     return 'No index existed for this repository yet; a background build has started and did not block '
       + 'this call. Re-run once it completes for results computed from the full graph.';
   }
+  if (reason === 'seeded') {
+    // A seed is this checkout's FIRST index, so it carries the auto-init opt-outs too.
+    return 'Served from an index copied from another checkout of this repository; files this checkout '
+      + 'changed are reported behind the working tree. A background rebuild has started and did not block '
+      + `this call; it writes to ${OPENLORE_ANALYSIS_REL_PATH}. Opt out with \`"autoInit": false\` in `
+      + '.openlore/config.json, or OPENLORE_NO_AUTO_ANALYZE=1.';
+  }
   return `Served from a stale index (${REPAIR_REASON_DETAIL[reason]}); a background refresh has started `
     + 'and did not block this call. Re-run for fresh results once it completes.';
+}
+
+/**
+ * Record a repair that a DETACHED process runs for `directory`, so this process's answers
+ * disclose it. For a one-shot command, which exits long before the build ends.
+ */
+export function recordDetachedRepair(directory: string, reason: RepairReason): void {
+  if (inFlight.has(directory)) return;
+  inFlight.set(directory, {
+    reason,
+    startedAt: Date.now(),
+    mode: 'full',
+    ceiling: AUTO_INIT_DEGRADED_FILE_CEILING,
+    sizedFiles: 0,
+  });
 }
 
 /**

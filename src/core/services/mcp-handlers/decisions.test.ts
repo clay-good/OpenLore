@@ -615,6 +615,8 @@ describe('handleSyncDecisions', () => {
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'openlore-decisions-test-'));
+    // An OpenSpec corpus to sync into; the no-corpus case removes it.
+    await mkdir(join(tmpDir, 'openspec', 'specs'), { recursive: true });
     vi.mocked(validateDirectory).mockResolvedValue(tmpDir);
     vi.mocked(readOpenLoreConfig).mockResolvedValue(null);
   });
@@ -622,6 +624,22 @@ describe('handleSyncDecisions', () => {
   it('returns error when no openlore config exists', async () => {
     const result = await handleSyncDecisions(tmpDir) as { error: string };
     expect(result.error).toMatch(/No openlore configuration/);
+  });
+
+  it('with no OpenSpec corpus, names the skip, syncs nothing, and creates no folder', async () => {
+    vi.mocked(readOpenLoreConfig).mockResolvedValue({ openspecPath: 'openspec' } as never);
+    vi.mocked(syncApprovedDecisions).mockClear();
+    const { rm } = await import('node:fs/promises');
+    await rm(join(tmpDir, 'openspec'), { recursive: true, force: true });
+    await writeStore(tmpDir, makeStore());
+    const result = await handleSyncDecisions(tmpDir, false) as Record<string, unknown>;
+    expect(result).toMatchObject({
+      synced: [],
+      skipped: { reason: 'no-spec-source', lookedFor: ['openspec'], note: 'no OpenSpec corpus; decisions are kept in .openlore/decisions/' },
+    });
+    expect(syncApprovedDecisions).not.toHaveBeenCalled();
+    const { existsSync } = await import('node:fs');
+    expect(existsSync(join(tmpDir, 'openspec'))).toBe(false);
   });
 
   it('calls syncApprovedDecisions with rootPath and dryRun flag', async () => {

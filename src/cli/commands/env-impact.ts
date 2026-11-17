@@ -12,11 +12,13 @@
  *   openlore env-impact --name SECRET_KEY --json
  */
 
+import { sanitizeForTerminal } from '../../utils/misc.js';
 import { Command } from 'commander';
 import { logger, configureLogger } from '../../utils/logger.js';
 import { writeStdout } from '../output.js';
 import { toCliVocabulary } from '../surface-vocabulary.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
+import { depthOption } from '../numeric-options.js';
 
 interface ReadSiteView {
   file: string;
@@ -47,6 +49,9 @@ export interface EnvImpactView {
     reachingTests: number;
   };
   readSites?: ReadSiteView[];
+  declaration?: 'declared' | 'undeclared-in-corpus';
+  declaredBy?: Array<{ ecosystem: string; resource: string; file: string; line: number; literalValue: boolean }>;
+  opaqueEnvSources?: Array<{ ecosystem: string; resource: string; file: string; line: number; reason: string }>;
   affectedFunctions?: Array<{ symbol: string; file: string; distance: number }>;
   reachingTests?: Array<{ test: string; file: string }>;
   affectedFiles?: string[];
@@ -80,6 +85,15 @@ export function renderHuman(r: EnvImpactView): string {
     lines.push(`     ${site.file}:${site.line}  ${where}  [${req}]`);
   }
   if ((r.readSites ?? []).length === 0) lines.push('     (no source read sites found)');
+
+  // Where infrastructure sets it (add-iac-code-binding). Repository text: sanitized per line.
+  if ((r.declaredBy ?? []).length > 0) {
+    lines.push('   set by infrastructure:');
+    for (const d of r.declaredBy ?? []) {
+      lines.push(sanitizeForTerminal(`     ${d.file}:${d.line}  ${d.ecosystem} ${d.resource}${d.literalValue ? '  [literal value]' : ''}`));
+    }
+  } else if (r.declaration === 'undeclared-in-corpus') lines.push('   set by infrastructure: none in this repository (undeclared-in-corpus)');
+  for (const o of r.opaqueEnvSources ?? []) lines.push(sanitizeForTerminal(`     may be set by ${o.file}:${o.line}  ${o.ecosystem} ${o.resource} (${o.reason})`));
 
   if ((r.affectedFunctions ?? []).length > 0) {
     lines.push('   blast radius (upstream callers):');
@@ -137,7 +151,7 @@ export async function runEnvImpactCli(opts: EnvImpactCliOptions): Promise<number
 export const envImpactCommand = new Command('env-impact')
   .description('Analyze what breaks if an environment variable is removed or renamed: read sites, blast radius, tests (TS/JS/Python/Go/Ruby). Read-only, deterministic, never blocks.')
   .option('--name <var>', 'The environment variable to analyze, e.g. DATABASE_URL')
-  .option('--max-depth <n>', 'Backward-reachability depth bound (default 12, clamped to [1, 30])', (v) => parseInt(v, 10))
+  .option('--max-depth <n>', 'Backward-reachability depth bound (default 12, clamped to [1, 30])', depthOption('--max-depth'))
   .option('--json', 'Emit the result as JSON', false)
   .action(async (opts: { name?: string; maxDepth?: number; json?: boolean }) => {
     const code = await runEnvImpactCli({

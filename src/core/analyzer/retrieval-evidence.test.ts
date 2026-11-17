@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bm25MatchEvidence, bm25Score, buildBm25Corpus, tokenize } from './vector-index.js';
+import { bm25MatchEvidence, bm25Score, buildBm25Corpus, searchableFieldsForFunctionRow, tokenize } from './vector-index.js';
 
 describe('retrieval match evidence', () => {
   it.each([
@@ -36,6 +36,35 @@ describe('retrieval match evidence', () => {
       0,
       { symbol: 'beta beta beta beta', body: 'alpha beta' },
     ).field).toBe('symbol');
+  });
+
+  /**
+   * A receipt that names evidence the file does not contain is worse than no receipt
+   * (change: fix-retrieval-coverage-over-unread-content). The language marker rode the `path`
+   * field, so `search_code {"query":"type"}` answered `field: "path", terms: ["type"]` for
+   * `src/index.ts` — a path with no `type` token anywhere in it.
+   */
+  it('never names a field that does not contain the named terms', () => {
+    const fields = searchableFieldsForFunctionRow({
+      name: 'run', filePath: 'src/index.ts', language: 'TypeScript', text: '', signature: '', docstring: '',
+    });
+    const corpus = buildBm25Corpus([{ id: 'one', text: Object.values(fields).join(' ') }]);
+    const evidence = bm25MatchEvidence(corpus, tokenize('type'), 0, fields);
+
+    expect(evidence.field).toBe('language');
+    for (const term of evidence.terms) {
+      expect(tokenize(fields[evidence.field as 'language'] ?? '')).toContain(term);
+    }
+    expect(tokenize(fields.path ?? '')).not.toContain('type');
+  });
+
+  it('keeps the path field answering for the path', () => {
+    const fields = searchableFieldsForFunctionRow({
+      name: 'run', filePath: 'src/billing/index.ts', language: 'TypeScript', text: '', signature: '', docstring: '',
+    });
+    const corpus = buildBm25Corpus([{ id: 'one', text: Object.values(fields).join(' ') }]);
+
+    expect(bm25MatchEvidence(corpus, tokenize('billing'), 0, fields).field).toBe('path');
   });
 
   it('does not perturb aggregate BM25 scores or ordering', () => {

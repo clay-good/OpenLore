@@ -27,14 +27,16 @@
  */
 
 import { join } from 'node:path';
-import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR } from '../../constants.js';
+import { stat } from 'node:fs/promises';
+import { OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, MEMORY_NOTES_FILE } from '../../constants.js';
 import { EdgeStore } from '../services/edge-store.js';
 import type {
   StructuralAnchor,
   ContinuityProvenance,
+  MemoryStore,
 } from '../../types/index.js';
-import { hashSpan } from './anchor.js';
-import { nodeSpanText } from './anchor-adapter.js';
+import { hashSpan, spanTextOf } from './anchor.js';
+import { nodeSpanText, makeFreshnessView } from './anchor-adapter.js';
 import {
   computeContinuity,
   normalizedBodyHash,
@@ -44,7 +46,7 @@ import {
   type ContinuityPair,
   type AmbiguousContinuity,
 } from '../analyzer/continuity.js';
-import { loadMemoryStore, updateMemoryStore } from './memory-store.js';
+import { loadMemoryStore, updateMemoryStore, memoryDir } from './memory-store.js';
 import { loadDecisionStore, updateDecisionStore } from './store.js';
 import { getHeadCommit } from './git-time.js';
 
@@ -253,6 +255,51 @@ function buildContinuity(
   return computeContinuity(disappeared, appeared, newNormBodyCount);
 }
 
+/** Most a `bodyHash` write may grow notes.json beyond twice its size (add-memory-anchor-verdicts). */
+const MAX_BASELINE_WRITE_GROWTH = 1024 * 1024;
+
+/** A well-formed recorded body hash (`hashSpan` output), or undefined. */
+function bodyHashOf(a: StructuralAnchor): string | undefined {
+  const h: unknown = a.bodyHash;
+  return typeof h === 'string' && /^[0-9a-f]{16}$/.test(h) ? h : undefined;
+}
+
+/**
+ * Continuity baselines for symbols that carry a span anchor (add-memory-anchor-
+ * verdicts). Continuity pairs a renamed symbol by the body an anchor recorded; a
+ * span anchor stays fresh through edits elsewhere in its symbol, so that recorded
+ * body goes stale, and the next clean rename would find no successor. After an
+ * analysis, each such symbol whose stored offsets describe its file takes its
+ * current body hash as `bodyHash` on EVERY live anchor on it, so the anchors on one
+ * symbol never disagree. Freshness never reads `bodyHash`: it only says what the
+ * symbol looked like when it was last analyzed. Symbols with plain anchors only are
+ * left exactly as they were.
+ */
+function symbolBodyBaselines(
+  rootPath: string,
+  store: EdgeStore,
+  memories: ReadonlyArray<{ anchors?: readonly StructuralAnchor[]; invalidatedAt?: string }>,
+  pairByFrom: ReadonlyMap<string, ContinuityPair>,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  const view = makeFreshnessView(store, rootPath);
+  const reads = new Map<string, string | null>();
+  for (const m of memories) {
+    if (m.invalidatedAt || !Array.isArray(m.anchors)) continue;
+    for (const a of m.anchors) {
+      if (!a?.nodeId || spanTextOf(a) === undefined) continue;
+      const nodeId = pairByFrom.get(fromKey(a.nodeId))?.to.id ?? a.nodeId;
+      if (out.has(nodeId)) continue;
+      // Offsets must describe the file; the hash is of the raw span, as continuity hashes.
+      if (!view.nodeSource?.(nodeId)) continue;
+      const node = store.getNode(nodeId);
+      const raw = node ? nodeSpanText(rootPath, node, reads) : undefined;
+      if (raw !== undefined) out.set(nodeId, hashSpan(raw));
+    }
+  }
+  return out;
+}
+
 /**
  * Carry anchored memory + decisions forward across renames/moves detected between
  * the pre-re-analysis `oldNodes` snapshot and the freshly persisted graph. Safe to
@@ -285,6 +332,32 @@ export async function carryForwardContinuity(
   };
   for (const m of memStore.memories) collect(m.anchors);
   for (const d of decisionStore.decisions) collect(d.anchors);
+  // A symbol with a live span anchor uses the body its anchors share (see
+  // symbolBodyBaselines); before any analysis wrote one, the most recently recorded
+  // live span anchor's own baseline, which a span anchor recorded after an edit has
+  // and an older plain anchor does not. Without a live span anchor `bodyHash` is not
+  // read at all, so a leftover one never overrides the baseline main would use.
+  const spanBaseline = new Map<string, { body?: string; recorded?: { at: string; hash: string } }>();
+  for (const m of memStore.memories) {
+    if (m.invalidatedAt || !Array.isArray(m.anchors)) continue;
+    for (const a of m.anchors) {
+      if (!a?.nodeId || spanTextOf(a) === undefined) continue;
+      const entry = spanBaseline.get(a.nodeId) ?? {};
+      const body = bodyHashOf(a);
+      if (body && (!entry.body || body < entry.body)) entry.body = body;
+      const at = typeof m.recordedAt === 'string' ? m.recordedAt : '';
+      if (a.contentHash && (!entry.recorded || at > entry.recorded.at
+        || (at === entry.recorded.at && a.contentHash < entry.recorded.hash))) {
+        entry.recorded = { at, hash: a.contentHash };
+      }
+      spanBaseline.set(a.nodeId, entry);
+    }
+  }
+  for (const [nodeId, b] of spanBaseline) {
+    const entry = anchoredSymbols.get(nodeId);
+    const hash = b.body ?? b.recorded?.hash;
+    if (entry && hash) entry.contentHash = hash;
+  }
   if (anchoredSymbols.size === 0) return EMPTY_SUMMARY;
 
   if (!EdgeStore.exists(storeDir)) return EMPTY_SUMMARY;
@@ -302,45 +375,77 @@ export async function carryForwardContinuity(
   }
 
   let result: ReturnType<typeof computeContinuity>;
+  let rebaselined: Map<string, string>;
+  let pairByFrom: Map<string, ContinuityPair>;
+  let ambiguousByFrom: Map<string, AmbiguousContinuity>;
   try {
     result = buildContinuity(rootPath, store, oldNodes, anchoredSymbols);
+    pairByFrom = new Map(result.pairs.map((p) => [fromKey(p.from.nodeId), p]));
+    ambiguousByFrom = new Map(result.ambiguous.map((a) => [fromKey(a.from.nodeId), a]));
+    // Baselines for the symbols the anchors will name AFTER this run's carries, so a
+    // symbol renamed now is ready for its next rename.
+    rebaselined = symbolBodyBaselines(rootPath, store, memStore.memories, pairByFrom);
   } finally {
     try { store.close(); } catch { /* ignore */ }
   }
 
-  if (result.pairs.length === 0 && result.ambiguous.length === 0) return EMPTY_SUMMARY;
-
-  const pairByFrom = new Map(result.pairs.map((p) => [fromKey(p.from.nodeId), p]));
-  const ambiguousByFrom = new Map(result.ambiguous.map((a) => [fromKey(a.from.nodeId), a]));
-  const atCommit = await getHeadCommit(rootPath);
-
   let memoriesUpdated = 0;
   let decisionsUpdated = 0;
+  if (result.pairs.length > 0 || result.ambiguous.length > 0) {
+    const atCommit = await getHeadCommit(rootPath);
 
-  // Persist memory re-anchors.
-  if (memStore.memories.some((m) => m.anchors?.some((a) => a.nodeId && (pairByFrom.has(a.nodeId) || ambiguousByFrom.has(a.nodeId))))) {
-    await updateMemoryStore(rootPath, (store_) => ({
-      ...store_,
-      memories: store_.memories.map((m) => {
-        const { anchors, changed } = reanchorAnchors(m.anchors, pairByFrom, ambiguousByFrom, atCommit);
-        if (changed) memoriesUpdated++;
-        return changed ? { ...m, anchors } : m;
-      }),
-    }));
+    // Persist memory re-anchors.
+    if (memStore.memories.some((m) => m.anchors?.some((a) => a.nodeId && (pairByFrom.has(a.nodeId) || ambiguousByFrom.has(a.nodeId))))) {
+      await updateMemoryStore(rootPath, (store_) => ({
+        ...store_,
+        memories: store_.memories.map((m) => {
+          const { anchors, changed } = reanchorAnchors(m.anchors, pairByFrom, ambiguousByFrom, atCommit);
+          if (changed) memoriesUpdated++;
+          return changed ? { ...m, anchors } : m;
+        }),
+      }));
+    }
+
+    // Persist decision re-anchors (only decisions that carry explicit anchors).
+    if (decisionStore.decisions.some((d) => d.anchors?.some((a) => a.nodeId && (pairByFrom.has(a.nodeId) || ambiguousByFrom.has(a.nodeId))))) {
+      await updateDecisionStore(rootPath, (store_) => ({
+        ...store_,
+        decisions: store_.decisions.map((d) => {
+          if (!d.anchors?.length) return d;
+          const { anchors, changed } = reanchorAnchors(d.anchors, pairByFrom, ambiguousByFrom, atCommit);
+          if (changed) decisionsUpdated++;
+          return changed ? { ...d, anchors } : d;
+        }),
+      }));
+    }
   }
 
-  // Persist decision re-anchors (only decisions that carry explicit anchors).
-  if (decisionStore.decisions.some((d) => d.anchors?.some((a) => a.nodeId && (pairByFrom.has(a.nodeId) || ambiguousByFrom.has(a.nodeId))))) {
-    await updateDecisionStore(rootPath, (store_) => ({
-      ...store_,
-      decisions: store_.decisions.map((d) => {
-        if (!d.anchors?.length) return d;
-        const { anchors, changed } = reanchorAnchors(d.anchors, pairByFrom, ambiguousByFrom, atCommit);
-        if (changed) decisionsUpdated++;
-        return changed ? { ...d, anchors } : d;
-      }),
-    }));
+  if (rebaselined.size > 0) {
+    // Best effort and bounded: this write is automatic, and notes.json is repo content.
+    // It runs after the carries and must never undo them, and it must not turn a small
+    // hostile store into a huge one by re-serializing it (deep nesting pretty-prints
+    // quadratically).
+    try {
+      const stale = (a: StructuralAnchor) => !!a?.nodeId && rebaselined.has(a.nodeId) && bodyHashOf(a) !== rebaselined.get(a.nodeId);
+      const rebase = (memories: MemoryStore['memories']) => memories.map((m) => {
+        // A superseded note is history: it is left as it was recorded.
+        if (m.invalidatedAt || !Array.isArray(m.anchors) || !m.anchors.some(stale)) return m;
+        return { ...m, anchors: m.anchors.map((a) => (stale(a) ? { ...a, bodyHash: rebaselined.get(a.nodeId!)! } : a)) };
+      });
+      // Read after the carries above, so the anchors already name their carried symbols.
+      const current = await loadMemoryStore(rootPath);
+      if (current.memories.some((m) => !m.invalidatedAt && Array.isArray(m.anchors) && m.anchors.some(stale))) {
+        const before = await stat(join(memoryDir(rootPath), MEMORY_NOTES_FILE)).then((s) => s.size, () => 0);
+        const after = JSON.stringify({ ...current, memories: rebase(current.memories) }, null, 2).length;
+        if (after <= Math.max(before * 2, before + MAX_BASELINE_WRITE_GROWTH)) {
+          await updateMemoryStore(rootPath, (store_) => ({ ...store_, memories: rebase(store_.memories) }));
+        }
+      }
+    } catch {
+      // A baseline left unwritten costs the next clean rename its carry, never a wrong answer.
+    }
   }
 
+  if (result.pairs.length === 0 && result.ambiguous.length === 0) return EMPTY_SUMMARY;
   return { carried: result.pairs, ambiguous: result.ambiguous, memoriesUpdated, decisionsUpdated };
 }

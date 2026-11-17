@@ -1614,6 +1614,33 @@ describe('handleDetectChanges', () => {
     expect(result.error).toMatch(/git diff failed/);
   });
 
+  it('does not prescribe a re-analyze when only non-code files changed', async () => {
+    const git = (...args: string[]) => spawnSync('git', args, { cwd: tmpDir, encoding: 'utf-8' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@test.dev');
+    git('config', 'user.name', 'Test');
+    git('config', 'commit.gpgsign', 'false');
+    await mkdir(join(tmpDir, 'src'), { recursive: true });
+    await writeFile(join(tmpDir, 'src', 'a.ts'), 'export function doWork(): number {\n  return 1;\n}\n', 'utf-8');
+    await writeFile(join(tmpDir, '.gitignore'), 'dist\n', 'utf-8');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'init');
+    await writeFile(join(tmpDir, '.gitignore'), 'dist\n.openlore/\n', 'utf-8');
+    readCachedContext.mockResolvedValue({
+      callGraph: makeCallGraph({
+        nodes: [{
+          id: 'src/a.ts::doWork', name: 'doWork', filePath: 'src/a.ts', signature: 'doWork(): number',
+          language: 'typescript', fanIn: 0, fanOut: 0, startLine: 1, endLine: 3, isExternal: false, isTest: false,
+        }],
+      }),
+    });
+    const { handleDetectChanges } = await import('./analysis.js');
+    const result = await handleDetectChanges(tmpDir) as { changedFunctions: unknown[]; message: string };
+    expect(result.changedFunctions).toEqual([]);
+    expect(result.message).toMatch(/None of the 1 changed file\(s\) holds an indexed function/);
+    expect(result.message).not.toMatch(/^Changed files found/);
+  });
+
   // Regression: call-graph nodes store repo-root-RELATIVE filePaths. The diff
   // parser must key changed files by the same relative form, or no changed
   // function ever matches a node (handler returns "no matching function nodes").

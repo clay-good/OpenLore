@@ -1,0 +1,22 @@
+{
+  "corpus": "roughlogic",
+  "description": "Trade calculator site (plain JavaScript, almost no doc comments). Dogfood corpus.",
+  "queries": [
+    { "kind": "identifier", "query": "computeVoltageDrop", "targets": [{ "name": "computeVoltageDrop", "file": "calc-electrical.js" }] },
+    { "kind": "identifier", "query": "darcy weisbach friction loss", "targets": [{ "name": "darcyWeisbachFrictionLoss", "file": "pure-math.js" }] },
+    { "kind": "identifier", "query": "escapeHtml", "targets": [{ "name": "escapeHtml", "file": "shell-meta.js" }] },
+    { "kind": "identifier", "query": "conduit fill calculation", "targets": [{ "name": "computeConduitFill", "file": "calc-electrical.js" }] },
+    { "kind": "identifier", "query": "electrical box fill", "targets": [{ "name": "computeBoxFill", "file": "calc-electrical.js" }] },
+    { "kind": "identifier", "query": "transformer size", "targets": [{ "name": "computeTransformerSize", "file": "calc-electrical.js" }] },
+    { "kind": "identifier", "query": "awg wire diameter in inches", "targets": [{ "name": "awgDiameterInches", "file": "pure-math.js" }] },
+    { "kind": "paraphrase", "query": "solve the missing value from voltage, current and resistance", "targets": [{ "name": "computeOhmsLaw", "file": "calc-electrical.js" }] },
+    { "kind": "paraphrase", "query": "convert celsius to fahrenheit", "targets": [{ "name": "C_to_F", "file": "pure-math.js" }] },
+    { "kind": "paraphrase", "query": "wait until the user stops typing before recalculating", "targets": [{ "name": "debounce", "file": "ui-fields.js" }] },
+    { "kind": "paraphrase", "query": "overcurrent protection rating for a circuit", "targets": [{ "name": "computeBreakerSize", "file": "calc-electrical.js" }] },
+    { "kind": "paraphrase", "query": "regularized incomplete beta function", "targets": [{ "name": "betainc", "file": "pure-math.js" }] },
+    { "kind": "paraphrase", "query": "standby power unit capacity for a home's loads", "targets": [{ "name": "computeGeneratorSize", "file": "calc-electrical.js" }] },
+    { "kind": "paraphrase", "query": "time for an irrigation arm to circle a field", "targets": [{ "name": "computeCenterPivotRuntime", "file": "calc-agriculture.js" }] },
+    { "kind": "paraphrase", "query": "chlorine concentration for a food-contact sanitizing bucket", "targets": [{ "name": "computeKitchenSanitizerPpm", "file": "calc-kitchen.js" }] },
+    { "kind": "paraphrase", "query": "filter the tool list by what was typed in the search box", "targets": [{ "name": "searchTools", "file": "app.js" }] }
+  ]
+}

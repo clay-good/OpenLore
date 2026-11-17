@@ -31,7 +31,7 @@ import { Help, type Command, type Option } from 'commander';
 export const COMMAND_GROUPS: ReadonlyArray<{ title: string; commands: readonly string[] }> = [
   {
     title: 'Set up & run',
-    commands: ['install', 'connect', 'init', 'analyze', 'embed', 'mcp', 'serve', 'doctor', 'features', 'setup', 'update', 'view'],
+    commands: ['configure', 'install', 'connect', 'init', 'analyze', 'embed', 'mcp', 'serve', 'doctor', 'features', 'setup', 'update', 'view'],
   },
   {
     title: 'Navigate the code',
@@ -44,6 +44,7 @@ export const COMMAND_GROUPS: ReadonlyArray<{ title: string; commands: readonly s
       'impact-certificate',
       'check-edit',
       'certify-public-surface',
+      'certify-service-contract',
       'enforce',
       'review',
       'review-corpus',
@@ -54,6 +55,7 @@ export const COMMAND_GROUPS: ReadonlyArray<{ title: string; commands: readonly s
       'coverage-gaps',
       'working-set',
       'briefing-since',
+      'footprint',
     ],
   },
   {
@@ -62,7 +64,7 @@ export const COMMAND_GROUPS: ReadonlyArray<{ title: string; commands: readonly s
   },
   {
     title: 'Multi-repo & sharing',
-    commands: ['federation', 'spec-store', 'export', 'import', 'manifest', 'plugin-manifest'],
+    commands: ['federation', 'spec-store', 'export', 'import', 'manifest'],
   },
   {
     title: 'Advanced / experimental',

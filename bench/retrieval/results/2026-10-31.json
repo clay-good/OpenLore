@@ -1,0 +1,851 @@
+{
+  "generatedAt": "2026-10-31T22:13:04.418Z",
+  "results": [
+    {
+      "corpus": "openlore",
+      "mode": "keyword",
+      "served": [
+        "keyword+vocabulary"
+      ],
+      "queries": 26,
+      "recallAt5": 0.46153846153846156,
+      "mrr": 0.3685897435897436,
+      "identifier": {
+        "recallAt5": 0.8333333333333334,
+        "mrr": 0.7395833333333334
+      },
+      "paraphrase": {
+        "recallAt5": 0.14285714285714285,
+        "mrr": 0.05059523809523809
+      },
+      "buildSeconds": 31.24,
+      "analysisDiskKb": 126856,
+      "vectorIndexDiskKb": 7656,
+      "outcomes": [
+        {
+          "query": "resolveEmbedder",
+          "kind": "identifier",
+          "rank": 2,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "safeJoin path confinement",
+          "kind": "identifier",
+          "rank": 4,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "handleOrient",
+          "kind": "identifier",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "sanitizeForTerminal",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "readOpenLoreConfig",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "checkRetrievalMode in doctor",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "collectIndexStatus",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "servedRetrievalMode",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "handleSearchCode",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "buildBm25Corpus",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "atomicWriteFile",
+          "kind": "identifier",
+          "rank": 8,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "repairInBackground",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "strip control sequences so a repository cannot forge terminal output",
+          "kind": "paraphrase",
+          "rank": 3,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "make sure a joined path stays inside the project root",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "choose which embedding provider to use from environment and configuration",
+          "kind": "paraphrase",
+          "rank": 4,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "which tests should run for this change",
+          "kind": "paraphrase",
+          "rank": 8,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "record an architectural decision",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "detect when specifications no longer match the code",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "find unreachable functions that nothing calls",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "cheapest call route between two functions",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "files that are usually edited in the same commit",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "hide API keys and passwords before printing text",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "write a file so a crash never leaves it half written",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "split identifiers into words for keyword ranking",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "persist a note tied to a symbol for later sessions",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "what breaks downstream if I commit this diff",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        }
+      ]
+    },
+    {
+      "corpus": "openlore",
+      "mode": "local-semantic",
+      "served": [
+        "local-semantic"
+      ],
+      "queries": 26,
+      "recallAt5": 0.6153846153846154,
+      "mrr": 0.467094017094017,
+      "identifier": {
+        "recallAt5": 0.9166666666666666,
+        "mrr": 0.7527777777777777
+      },
+      "paraphrase": {
+        "recallAt5": 0.35714285714285715,
+        "mrr": 0.22222222222222224
+      },
+      "buildSeconds": 437.575,
+      "analysisDiskKb": 143252,
+      "vectorIndexDiskKb": 22568,
+      "outcomes": [
+        {
+          "query": "resolveEmbedder",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "safeJoin path confinement",
+          "kind": "identifier",
+          "rank": 2,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "handleOrient",
+          "kind": "identifier",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "sanitizeForTerminal",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "readOpenLoreConfig",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "checkRetrievalMode in doctor",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "collectIndexStatus",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "servedRetrievalMode",
+          "kind": "identifier",
+          "rank": 3,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "handleSearchCode",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "buildBm25Corpus",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "atomicWriteFile",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "repairInBackground",
+          "kind": "identifier",
+          "rank": 5,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "strip control sequences so a repository cannot forge terminal output",
+          "kind": "paraphrase",
+          "rank": 4,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "make sure a joined path stays inside the project root",
+          "kind": "paraphrase",
+          "rank": 4,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "choose which embedding provider to use from environment and configuration",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "which tests should run for this change",
+          "kind": "paraphrase",
+          "rank": 2,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "record an architectural decision",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "detect when specifications no longer match the code",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "find unreachable functions that nothing calls",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "cheapest call route between two functions",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "files that are usually edited in the same commit",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "hide API keys and passwords before printing text",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "write a file so a crash never leaves it half written",
+          "kind": "paraphrase",
+          "rank": 9,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "split identifiers into words for keyword ranking",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "persist a note tied to a symbol for later sessions",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "what breaks downstream if I commit this diff",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        }
+      ]
+    },
+    {
+      "corpus": "gridprims",
+      "mode": "keyword",
+      "served": [
+        "keyword+vocabulary"
+      ],
+      "queries": 17,
+      "recallAt5": 0.8235294117647058,
+      "mrr": 0.8014705882352942,
+      "identifier": {
+        "recallAt5": 1,
+        "mrr": 1
+      },
+      "paraphrase": {
+        "recallAt5": 0.7,
+        "mrr": 0.6625
+      },
+      "buildSeconds": 6.798,
+      "analysisDiskKb": 29904,
+      "vectorIndexDiskKb": 1320,
+      "outcomes": [
+        {
+          "query": "detectDelimiter",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "readXlsx first sheet",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "lookupZip",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "headroomReport",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "parseXml",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "roundSig significant figures",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "localToUtc",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "translate a message and substitute named placeholders",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "escape values in a tagged template for markup",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "count calendar dates covered by a bill cycle including start and end",
+          "kind": "paraphrase",
+          "rank": 2,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "average power over each meter reading period",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "storage capacity needed to keep critical loads powered during an outage",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "current carrying capacity of an overhead conductor",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "estimate reading difficulty by counting vowel groups in a word",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "turn raw bytes into a string respecting a BOM",
+          "kind": "paraphrase",
+          "rank": 8,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "electric vehicles charging at full power from plug-in until full",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "lowest typical demand as the fifth percentile",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        }
+      ]
+    },
+    {
+      "corpus": "gridprims",
+      "mode": "local-semantic",
+      "served": [
+        "local-semantic"
+      ],
+      "queries": 17,
+      "recallAt5": 0.9411764705882353,
+      "mrr": 0.8647058823529411,
+      "identifier": {
+        "recallAt5": 1,
+        "mrr": 1
+      },
+      "paraphrase": {
+        "recallAt5": 0.9,
+        "mrr": 0.77
+      },
+      "buildSeconds": 16.651,
+      "analysisDiskKb": 34576,
+      "vectorIndexDiskKb": 5840,
+      "outcomes": [
+        {
+          "query": "detectDelimiter",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "readXlsx first sheet",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "lookupZip",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "headroomReport",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "parseXml",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "roundSig significant figures",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "localToUtc",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "translate a message and substitute named placeholders",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "escape values in a tagged template for markup",
+          "kind": "paraphrase",
+          "rank": 2,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "count calendar dates covered by a bill cycle including start and end",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "average power over each meter reading period",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "storage capacity needed to keep critical loads powered during an outage",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "current carrying capacity of an overhead conductor",
+          "kind": "paraphrase",
+          "rank": 5,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "estimate reading difficulty by counting vowel groups in a word",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "turn raw bytes into a string respecting a BOM",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "electric vehicles charging at full power from plug-in until full",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "lowest typical demand as the fifth percentile",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        }
+      ]
+    },
+    {
+      "corpus": "roughlogic",
+      "mode": "keyword",
+      "served": [
+        "keyword+vocabulary"
+      ],
+      "queries": 16,
+      "recallAt5": 0.4375,
+      "mrr": 0.44642857142857145,
+      "identifier": {
+        "recallAt5": 1,
+        "mrr": 1
+      },
+      "paraphrase": {
+        "recallAt5": 0,
+        "mrr": 0.015873015873015872
+      },
+      "buildSeconds": 19.166,
+      "analysisDiskKb": 109828,
+      "vectorIndexDiskKb": 2780,
+      "outcomes": [
+        {
+          "query": "computeVoltageDrop",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "darcy weisbach friction loss",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "escapeHtml",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "conduit fill calculation",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "electrical box fill",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "transformer size",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "awg wire diameter in inches",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "solve the missing value from voltage, current and resistance",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "convert celsius to fahrenheit",
+          "kind": "paraphrase",
+          "rank": 7,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "wait until the user stops typing before recalculating",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "overcurrent protection rating for a circuit",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "regularized incomplete beta function",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "standby power unit capacity for a home's loads",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "time for an irrigation arm to circle a field",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "chlorine concentration for a food-contact sanitizing bucket",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        },
+        {
+          "query": "filter the tool list by what was typed in the search box",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "keyword+vocabulary"
+        }
+      ]
+    },
+    {
+      "corpus": "roughlogic",
+      "mode": "local-semantic",
+      "served": [
+        "local-semantic"
+      ],
+      "queries": 16,
+      "recallAt5": 0.5,
+      "mrr": 0.41475694444444444,
+      "identifier": {
+        "recallAt5": 0.8571428571428571,
+        "mrr": 0.7607142857142858
+      },
+      "paraphrase": {
+        "recallAt5": 0.2222222222222222,
+        "mrr": 0.145679012345679
+      },
+      "buildSeconds": 108.107,
+      "analysisDiskKb": 118320,
+      "vectorIndexDiskKb": 11292,
+      "outcomes": [
+        {
+          "query": "computeVoltageDrop",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "darcy weisbach friction loss",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "escapeHtml",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "conduit fill calculation",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "electrical box fill",
+          "kind": "identifier",
+          "rank": 8,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "transformer size",
+          "kind": "identifier",
+          "rank": 5,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "awg wire diameter in inches",
+          "kind": "identifier",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "solve the missing value from voltage, current and resistance",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "convert celsius to fahrenheit",
+          "kind": "paraphrase",
+          "rank": 5,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "wait until the user stops typing before recalculating",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "overcurrent protection rating for a circuit",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "regularized incomplete beta function",
+          "kind": "paraphrase",
+          "rank": 1,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "standby power unit capacity for a home's loads",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "time for an irrigation arm to circle a field",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "chlorine concentration for a food-contact sanitizing bucket",
+          "kind": "paraphrase",
+          "rank": null,
+          "retrievalMode": "local-semantic"
+        },
+        {
+          "query": "filter the tool list by what was typed in the search box",
+          "kind": "paraphrase",
+          "rank": 9,
+          "retrievalMode": "local-semantic"
+        }
+      ]
+    }
+  ]
+}

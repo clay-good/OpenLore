@@ -108,7 +108,7 @@ describe('MCP tool presets', () => {
   // preset only; it must NOT leak into the lean/minimal/memory surfaces.
   it('coordination preset exposes plan_parallel_work; lean/minimal/memory do not', () => {
     const coord = selectActiveTools(TOOL_DEFINITIONS, { preset: 'coordination' }).map(t => t.name);
-    expect(new Set(coord)).toEqual(new Set(['orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'analyze_impact', 'find_path']));
+    expect(new Set(coord)).toEqual(new Set(['orient', 'plan_parallel_work', 'map_in_flight_conflicts', 'certify_merge', 'fleet_status', 'declare_footprint', 'analyze_impact', 'find_path']));
     for (const sel of [{}, { minimal: true }, { preset: 'memory' }, { preset: 'navigation' }] as const) {
       expect(selectActiveTools(TOOL_DEFINITIONS, sel).map(t => t.name)).not.toContain('plan_parallel_work');
     }
@@ -355,7 +355,7 @@ describe('MCP tool presets', () => {
   // substrate default (both-faces reads), but NOT the lean navigate-only `navigation` preset.
   it('verify_claim is in the verify preset and the substrate default, but not the lean navigation preset', () => {
     const verify = selectActiveTools(TOOL_DEFINITIONS, { preset: 'verify' }).map(t => t.name);
-    expect(new Set(verify)).toEqual(new Set(['orient', 'search_code', 'verify_claim']));
+    expect(new Set(verify)).toEqual(new Set(['orient', 'search_code', 'verify_claim', 'verify_change', 'certify_provenance']));
     expect(selectActiveTools(TOOL_DEFINITIONS, { preset: 'navigation' }).map(t => t.name)).not.toContain('verify_claim');
     // The default surface is now substrate, which DOES include verify_claim.
     expect(selectActiveTools(TOOL_DEFINITIONS, {}).map(t => t.name)).toContain('verify_claim');
@@ -675,7 +675,32 @@ describe('tools/list payload budget (spec-28)', () => {
     // contracts rather than treating the added schema as free bytes.
     // questionKind adds one closed-vocabulary input to search_code: 97,500 → 97,800 B
     // (measured 97,727 B), leaving 73 B rather than silently removing the guard.
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(97_800);
+    // remember's optional trigger/pinned inputs, with transport-enforced bounds: 97,800 → 98,500 B
+    // (measured 98,283 B; change: add-memory-trigger-predicates). Their descriptions were trimmed first.
+    // remember's optional claims input (closed kind enum, bounded terms): 98,500 → 99,200 B
+    // (measured 98,897 B; change: add-memory-claim-verdicts). Its description was trimmed first.
+    // verify_change adds one conclusion tool (its schema + description): 99,200 → 100,700 B
+    // (measured 100,184 B; change: add-verification-feedback-loop).
+    // certify_provenance adds one conclusion tool: 100,700 → 102,400 B
+    // (measured 101,838 B; change: add-change-provenance-certificate).
+    // certify_merge adds one conclusion tool: 102,400 → 104,000 B
+    // (measured 103,392 B; change: add-merge-semantic-certificate).
+    // fleet_status adds one conclusion tool: 104,000 → 105,200 B
+    // (measured 104,526 B; change: add-fleet-coordination-arc).
+    // get_handoff_briefing adds one conclusion tool: 105,200 → 106,800 B
+    // (measured 106,065 B; change: add-session-handoff-briefing).
+    // certify_service_contract adds one conclusion tool: 106,800 → 107,800 B
+    // (measured 107,279 B; change: add-service-contract-certification).
+    // declare_footprint adds one conclusion tool: 107,800 → 109,300 B
+    // (measured 108,500 B; change: add-peer-footprint-board).
+    // certify_provenance's in-toto validation wording lengthens an existing tool's
+    // description, not a new tool: 109,300 → 110,500 B (measured 109,350 B;
+    // change: add-change-provenance-certificate).
+    // Detailed configuration candidate schema adds 1,436 B after the live usability trial;
+    // measured 111,518 B. The default surface does not include this opt-in tool.
+    // A description on each of the 47 inputs that had none (mcp-quality Complete Input
+    // Schemas): 112,000 → 115,500 B (measured 114,718 B). The wording was kept short first.
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(115_500);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {
@@ -736,3 +761,31 @@ describe('tools/list payload budget (spec-28)', () => {
     }
   });
 });
+
+describe('the plugin preset (change: reframe-governance-as-agent-evidence)', () => {
+  const PLUGIN_TOOLS = [
+    'analyze_impact', 'blast_radius', 'find_path', 'get_function_skeleton', 'get_subgraph', 'orient',
+    'recall', 'search_code', 'suggest_insertion_points', 'verify_change', 'verify_claim',
+  ];
+  it('is exactly the 11 evidence tools, each registered', () => {
+    expect([...TOOL_PRESETS.plugin].sort()).toEqual(PLUGIN_TOOLS);
+    const registered = new Set(TOOL_DEFINITIONS.map(t => t.name));
+    for (const name of PLUGIN_TOOLS) expect(registered.has(name), name).toBe(true);
+    expect(selectActiveTools(TOOL_DEFINITIONS, { preset: 'plugin' }).map(t => t.name).sort()).toEqual(PLUGIN_TOOLS);
+  });
+  it('stays small: at most 12 tools', () => {
+    expect(TOOL_PRESETS.plugin.size).toBeLessThanOrEqual(12);
+  });
+  it('carries no spec-generation tool', () => {
+    expect([...TOOL_PRESETS.plugin].filter(name => name.startsWith('prepare_spec_'))).toEqual([]);
+  });
+  it('offers nothing the npm default lacks, except verify_change until a benchmark run admits it to substrate', () => {
+    // design 1 gate: verify_change joins substrate only with a conforming benchmark-protocol run.
+    const outside = [...TOOL_PRESETS.plugin].filter(name => !TOOL_PRESETS.substrate.has(name));
+    expect(outside).toEqual(TOOL_PRESETS.substrate.has('verify_change') ? [] : ['verify_change']);
+  });
+  it('leaves substrate unchanged at its 15 tools', () => {
+    expect(TOOL_PRESETS.substrate.size).toBe(15);
+  });
+});
+

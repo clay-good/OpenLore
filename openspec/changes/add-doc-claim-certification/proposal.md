@@ -1,70 +1,53 @@
-# Certify documentation claims against the graph: the repo's own guard, generalized
+# Tell the agent when its change made a local doc false
 
-> Status: PROPOSED (2026-07-27, substrate-whitespace sweep). OpenLore already runs this check on
-> itself — by hand, one hardcoded assertion at a time. Prior art for the category: AST-anchored
-> documentation-drift governance (e.g. https://github.com/pallaprolus/drift-vscode) and
-> signature-validating doc drift detectors; all of them check *doc blocks next to code*, none
-> resolves *prose claims about the system* against a call graph.
+> Priority: P3 · Not built
+> Reaches the agent through: `verify_change` (and so the before-stop hook), and a new `doc-current` kind of `verify_claim`
+> Why it helps the agent: it fixes the README line it just broke, in the same change.
 
-## The gap
+## Problem
 
-`src/doc-claim-sync.test.ts` is a hand-written test that pins README badges, a documented language
-count, a test-count floor, and package metadata to the code that makes them true
-(`doc-claim-sync.test.ts:51`, `:80`, `:100`). It exists because those claims silently rotted. It is
-also the whole mechanism: every new documented claim needs a new bespoke assertion by a human who
-remembers to write it. Nothing checks the hundreds of other claims in `README.md`, `docs/`, and
-every proposal — a named CLI flag, an MCP tool name, a `file.ts:line` citation, a documented
-function that no longer exists.
-
-This matters twice over for OpenLore specifically. Its docs are consumed by *agents*, so a stale
-documented flag becomes an agent's failed command. And the substrate already holds the ground
-truth for most of these claims — the symbol table, the export surface, the tool registry, the
-file tree — it just never reads its own documentation.
+An agent renames a function or deletes a file, and the README, `docs/` and other Markdown still
+name the old one. Nothing tells the agent. The next agent reads the stale doc and runs a command
+or opens a path that no longer exists. The graph already knows which symbols and files the diff
+removed; it never looks at the Markdown that names them.
 
 ## What changes
 
-**`certify_doc_claims`** (`--preset full`; CLI `openlore certify-docs [--path <glob>] [--json]`):
-extract machine-checkable claims from Markdown and resolve each against the substrate.
+- New `src/core/services/doc-claims.ts`: extract checkable claims from tracked local Markdown.
+  The claim forms are closed and syntactic:
+  - a backticked identifier that named exactly one indexed symbol at the merge-base;
+  - a path-shaped token or a relative Markdown link target;
+  - a `path:line` citation.
+- `verify_change` checks the claims the diff can break: names of symbols it removed, paths it
+  deleted or moved, line citations into files it changed, and claims on Markdown lines it added.
+  A claim that held at the merge-base and is false now is the advisory finding
+  `doc-claim-refuted`, with the doc `file:line` and the evidence (symbol gone, file moved to X,
+  cited line now past the end of the file).
+- A renamed symbol is reported as renamed, with its new name, through the shipped identity
+  continuity. The agent can fix the doc with one edit.
+- `verify_claim` gains the kind `doc-current`: the subject is a Markdown path, optionally
+  `path:line`. Verdict `holds`, `refuted` (each false claim with evidence), or `unverifiable`
+  (no checkable claim there).
 
-The claim vocabulary is **closed and syntactic** — a claim is extracted only when its shape is
-unambiguous, never inferred from prose meaning:
+## What does not change
 
-| Claim | Extracted from | Resolved against |
-|---|---|---|
-| symbol exists | a backticked identifier matching a declared symbol form | the symbol table |
-| file/path exists | a path-shaped token or markdown link target | the file tree |
-| line citation | `path.ts:123` | file length, and whether the cited line is still inside the named symbol's span |
-| CLI flag / command exists | a fenced command invoking this repo's own binary | the command registry |
-| tool exists | a name matching a registered MCP tool form | the tool definitions |
+- No new tool and no new command. `verify_change` and `verify_claim` keep their names.
+- Local files only. Links to a URL are not fetched and not checked.
+- No model, and no judgment of prose meaning, tone or completeness.
+- Advisory. `doc-claim-refuted` blocks only if `enforcement.policy` names it.
+- Works without OpenSpec: any tracked `.md` file counts.
 
-Each claim returns `holds`, `refuted` (with the counter-evidence: the symbol that no longer
-exists, the file that moved, the line now outside the span), or `uncheckable` (the shape matched
-but the subject is external, e.g. another project's flag) — and `uncheckable` is a first-class,
-counted outcome, not a silent skip. Symbol-identity continuity is honored: a documented symbol
-that was renamed is reported as **renamed, with its new name**, not as missing.
+## Limits we disclose
 
-Deliberately NOT built: any judgment of prose accuracy, tone, or completeness (no LLM anywhere in
-this path); documentation generation or rewriting; docstring/JSDoc signature checking, which is a
-linter's job and a different anchor; and any default gating — this is advisory, with one
-registered finding code (`doc-claim-refuted`) an operator may opt into via `enforcement.policy`
-exactly like every other finding.
+- An ambiguous or external subject is `unverifiable`, never `refuted`: a name that matched several
+  symbols, a common word, another project's path. The count of such claims is stated.
+- Command lines, flags, numbers and badges in docs are not checked. `src/doc-claim-sync.test.ts`
+  keeps that job for this repository.
+- `verify_change` reports only what the diff broke. A doc that was already wrong is found only by
+  `verify_claim` `doc-current`.
+- Markdown only. Docstrings and code comments are out of scope.
 
-## Why this is in scope
+## Depends on
 
-The honesty contract is the product's core claim, and documentation is the one surface where
-OpenLore currently has no way to keep it. The capability is a pure join of artifacts the substrate
-already owns, it dogfoods immediately (the bespoke test becomes the first conforming client, and
-the 138 files in `openspec/changes/` become checkable), and it serves the same conclusion shape as
-`verify_claim` — one level up, on prose instead of structure.
-
-## Impact
-
-- Touches: a new handler + CLI command; readers for the file tree, symbol table, command registry,
-  and `TOOL_DEFINITIONS`; one finding code registered in `FINDING_CODE_REGISTRY`.
-- Tool surface: +1 tool in `--preset full` only; family `verify`; `conclusion` class; cross-
-  references `verify_claim` (structural claims) and `check_spec_drift` (spec↔code).
-- Specs: `mcp-handlers` — 1 ADDED (DocumentationClaimsAreCertifiedAgainstTheSubstrate).
-- Risk: false refutations from over-eager extraction (mitigated: the vocabulary is closed and
-  syntactic, and an ambiguous match is `uncheckable`, never `refuted` — the failure mode is
-  under-claiming); noise on repos documenting external tools (mitigated: same — external subjects
-  resolve to `uncheckable`, counted and disclosed).
+Shipped: `verify_change`, `verify_claim`, symbol identity continuity
+(`src/core/decisions/continuity-carry-forward.ts`), merge-base blob reads, the finding registry.

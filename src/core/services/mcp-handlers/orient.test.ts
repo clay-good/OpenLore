@@ -145,6 +145,36 @@ describe('handleOrient', () => {
     expect(result.hint).toBeDefined();
   });
 
+  // A test function is never where a feature is added. On a Rust workspace the top insertion
+  // points were `#[test]` functions, so orient told the agent to write the feature inside a
+  // test (change: fix-rust-test-detection). A test stays a `relevantFunction` — it shows use.
+  it('never offers a test function as an insertion point', async () => {
+    vi.mocked(VectorIndex.exists).mockReturnValue(true);
+    vi.mocked(VectorIndex.search).mockResolvedValue([
+      makeSearchResult({ id: 'src/util.rs::hashes_a_string', name: 'hashes_a_string', filePath: 'src/util.rs' }),
+      makeSearchResult({ id: 'src/util.rs::sha256_hex', name: 'sha256_hex', filePath: 'src/util.rs' }),
+    ]);
+    const utils = await import('./utils.js');
+    vi.mocked(utils.readCachedContext).mockResolvedValue({
+      callGraph: {
+        nodes: [
+          { id: 'src/util.rs::hashes_a_string', name: 'hashes_a_string', filePath: 'src/util.rs', isTest: true },
+          { id: 'src/util.rs::sha256_hex', name: 'sha256_hex', filePath: 'src/util.rs' },
+        ],
+        edges: [],
+      },
+    } as never);
+
+    const result = await handleOrient('/tmp/proj', 'hash a string', 2) as Record<string, unknown>;
+
+    const insertion = (result.insertionPoints as Array<{ name: string }>).map(p => p.name);
+    expect(insertion).toContain('sha256_hex');
+    expect(insertion).not.toContain('hashes_a_string');
+    const relevant = (result.relevantFunctions as Array<{ name: string }>).map(f => f.name);
+    expect(relevant).toContain('hashes_a_string');
+    vi.mocked(utils.readCachedContext).mockResolvedValue(null);
+  });
+
   it('returns orient structure when code index exists and search returns results', async () => {
     vi.mocked(VectorIndex.exists).mockReturnValue(true);
     vi.mocked(VectorIndex.search).mockResolvedValue([
@@ -621,12 +651,9 @@ describe('handleOrient', () => {
 
     expect(result.searchMode).toBe('bm25_fallback');
     expect(result.retrievalMode).toBe('keyword');
-    expect(typeof result.note).toBe('string');
-    // Honest, low-noise: name the mode + offer the upgrade, never warn about a
-    // "fallback" or an "unavailable" server for the plain default.
-    expect(result.note as string).toContain('Keyword (BM25)');
-    expect(result.note as string).toContain('embed --local');
-    expect(result.note as string).not.toContain('unavailable');
+    // The mode is reported; upgrade advice is for humans (status/doctor), never the agent.
+    expect(result.note).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('openlore embed');
   });
 
   it('includes specDomains when mapping index provides file-to-spec data', async () => {
@@ -644,6 +671,29 @@ describe('handleOrient', () => {
     expect(Array.isArray(result.specDomains)).toBe(true);
     const domains = result.specDomains as Array<{ domain: string }>;
     expect(domains.some(d => d.domain === 'auth')).toBe(true);
+  });
+
+  it('states "no spec source" instead of an empty specDomains alone, and is unchanged when specs exist', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    vi.mocked(VectorIndex.exists).mockReturnValue(true);
+    vi.mocked(VectorIndex.search).mockResolvedValue([makeSearchResult({ filePath: 'src/auth.ts' })]);
+    const bare = mkdtempSync(join(tmpdir(), 'olorient-nospec-'));
+    const withSpecs = mkdtempSync(join(tmpdir(), 'olorient-spec-'));
+    try {
+      const none = await handleOrient(bare, 'auth') as Record<string, unknown>;
+      expect(none.specDomains).toEqual([]);
+      expect(none.specSources).toEqual({ found: [], lookedFor: ['openspec'] });
+
+      mkdirSync(join(withSpecs, 'openspec', 'specs', 'auth'), { recursive: true });
+      writeFileSync(join(withSpecs, 'openspec', 'specs', 'auth', 'spec.md'), '# Auth\n');
+      const some = await handleOrient(withSpecs, 'auth') as Record<string, unknown>;
+      expect('specSources' in some).toBe(false);
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+      rmSync(withSpecs, { recursive: true, force: true });
+    }
   });
 
   it('includes call paths derived from call graph context', async () => {

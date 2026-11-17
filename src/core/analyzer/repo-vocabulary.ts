@@ -527,7 +527,10 @@ export function loadRepositoryVocabulary(outputDir: string): RepositoryVocabular
   const dbPath = join(outputDir, 'vector-index');
   const metaPath = join(outputDir, 'vector-index-meta.json');
   const sidecarPath = vocabularyPath(dbPath);
-  const metaStamp = fileStamp(metaPath);
+  // The meta file is small and is read on every call: its content keys the cache. A stat stamp
+  // misses a same-size rewrite inside one timestamp tick (seen on Windows), serving a stale answer.
+  const metaJson = readBoundedNoFollow(metaPath);
+  const metaStamp = metaJson;
   const vocabularyStamp = fileStamp(sidecarPath);
   const cached = vocabularyCache.get(outputDir);
   if (cached && cached.metaStamp === metaStamp && cached.vocabularyStamp === vocabularyStamp) {
@@ -537,7 +540,6 @@ export function loadRepositoryVocabulary(outputDir: string): RepositoryVocabular
     vocabularyCache.set(outputDir, { metaStamp, vocabularyStamp, value });
     return value;
   };
-  const metaJson = readBoundedNoFollow(metaPath);
   if (metaJson === null) return remember(null);
   let contentStamp: string;
   try {

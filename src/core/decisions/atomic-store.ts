@@ -251,7 +251,7 @@ const storeWriteTails = new Map<string, Promise<void>>();
  * with one atomic unlink. A live holder is never stolen merely because its mtime
  * is old, so no cooperating successor can replace the path before that unlink.
  */
-async function withCommitLock<T>(lockPath: string, fn: () => Promise<T>): Promise<T> {
+export async function withCommitLock<T>(lockPath: string, fn: () => Promise<T>): Promise<T> {
   const token = `${process.pid}-${lockSeq++}`;
   const result = await acquireLockAt(dirname(lockPath), basename(lockPath), {
     payload: () => token,

@@ -6,7 +6,7 @@ import { globalOpenLoreConfigPath, mergeConfigLayers, readLayeredConfig } from '
 import { getDefaultConfig, readOpenLoreConfig, readOpenLoreConfigStrict, readProjectOpenLoreConfig, writeOpenLoreConfig } from '../core/services/config-manager.js';
 import { refuseRepoConfiguredEndpoint, rejectRepoConfiguredTlsOptOut, resolveTrustedCompatBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
 import { logger } from './logger.js';
-import { readConfig, readContextInjection, piMaySpawnDaemon, piToolSurface } from '../pi/extension.js';
+import { readConfig, piMaySpawnDaemon, piToolSurface } from '../pi/extension.js';
 import { autoInitSuppression, repairInBackground } from '../core/services/cold-start-bootstrap.js';
 
 describe('user and project configuration layers', () => {
@@ -39,7 +39,6 @@ describe('user and project configuration layers', () => {
     expect(await readOpenLoreConfig(project)).toMatchObject({ generation: { provider: 'openai', model: 'user-model' } });
     expect(await readOpenLoreConfigStrict(project)).toMatchObject({ generation: { provider: 'openai' } });
     expect(await readConfig(project)).toMatchObject({ generation: { provider: 'openai', model: 'user-model' } });
-    expect(await readContextInjection(project)).toEqual({ mode: 'off' });
     expect(await piMaySpawnDaemon(project)).toBe(false);
     expect(await piToolSurface(project)).toBe('all');
     await expect(access(join(project, '.openlore', 'config.json'))).rejects.toThrow();

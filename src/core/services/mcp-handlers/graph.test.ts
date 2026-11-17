@@ -36,6 +36,7 @@ vi.mock('./utils.js', () => ({
 }));
 
 import {
+  resolveQualifiedSymbol,
   buildAdjacency,
   bfs,
   buildWeightedAdjacency,
@@ -1392,6 +1393,31 @@ describe('cross-domain impact — analyze_impact', () => {
     expect(result.crossDomain).toBeUndefined();
   });
 
+  it('surfaces a declared operation as a typed contract neighbor, never as code', async () => {
+    store.clearAll();
+    store.insertNodes([
+      makeNode({ id: 'src/handlers.ts::getOrder', fanOut: 0 }),
+      makeNode({ id: 'openapi.yaml::GET /v1/orders/{id}', language: 'OpenAPI', startLine: 7 }),
+    ]);
+    store.insertEdges([{
+      callerId: 'src/handlers.ts::getOrder', calleeId: 'openapi.yaml::GET /v1/orders/{id}',
+      calleeName: 'GET /v1/orders/{id}', confidence: 'import', kind: 'implements_endpoint',
+    }]);
+    vi.mocked(readCachedContext).mockResolvedValueOnce({ edgeStore: store } as never);
+    const result = await handleAnalyzeImpact(dir, 'getOrder', 2) as {
+      crossDomain?: { reachesContract?: boolean; operations?: Array<{ nodeType: string; name: string; format: string; direction: string; line?: number }> };
+      downstreamCriticalPath: Array<{ name: string }>;
+      blastRadius: { contract?: number };
+    };
+    expect(result.crossDomain?.reachesContract).toBe(true);
+    expect(result.crossDomain?.operations).toEqual([
+      { nodeType: 'contract', name: 'GET /v1/orders/{id}', file: 'openapi.yaml', format: 'OpenAPI', direction: 'downstream', depth: 1 },
+    ]);
+    expect(result.blastRadius.contract).toBe(1);
+    // A specification line range is not a function the agent can edit or test.
+    expect(result.downstreamCriticalPath.map(n => n.name)).not.toContain('GET /v1/orders/{id}');
+  });
+
   it('omits crossDomain entirely for a pure-code impact', async () => {
     store.clearAll();
     store.insertNodes([
@@ -1602,5 +1628,52 @@ describe('confidenceBoundary wiring — handleTraceExecutionPath', () => {
     const r = await handleTraceExecutionPath('/tmp/proj', 'x', 'y') as { pathsFound: number; confidenceBoundary: Boundary };
     expect(r.pathsFound).toBe(0);
     expect(r.confidenceBoundary.complete).toBe(true); // empty basis, current index
+  });
+});
+
+describe('leaf and low-risk lists hold code only (change: add-contract-graph-projection)', () => {
+  it('a projected declaration is neither a leaf nor a refactor candidate, and its binding is not a call', async () => {
+    const nodes = [
+      makeNode({ id: 'srv/main.go::orderServer.GetOrder', fanIn: 0, fanOut: 0 }),
+      makeNode({ id: 'orders.proto::/orders.v1.OrderService/GetOrder', language: 'Protobuf', fanIn: 0, fanOut: 0 }),
+      makeNode({ id: 'orders.proto::orders.v1.Order', language: 'Protobuf', fanIn: 0, fanOut: 0 }),
+    ];
+    const edges = [{ ...makeEdge('srv/main.go::orderServer.GetOrder', 'orders.proto::/orders.v1.OrderService/GetOrder'), kind: 'implements_endpoint' as const }];
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: makeGraph(nodes, edges) } as never);
+    const leaves = await handleGetLeafFunctions('/tmp/proj') as { leaves: Array<{ language: string; file: string }> };
+    expect(leaves.leaves.map(l => l.file)).toEqual(['srv/main.go']);
+    const low = await handleGetLowRiskRefactorCandidates('/tmp/proj') as { candidates: Array<{ language: string }> };
+    expect(low.candidates.map(c => c.language)).not.toContain('Protobuf');
+  });
+});
+
+describe('resolveQualifiedSymbol', () => {
+  // `Class.method` is how the generated digest prints a hub (`EdgeStore.open`); get_subgraph and
+  // analyze_impact answered it "No function matching", and a bare `open` matched every `open`.
+  const n = (filePath: string, name: string, className?: string, extra: Partial<FunctionNode> = {}): FunctionNode => ({
+    id: `${filePath}::${className ? `${className}.` : ''}${name}`, name, filePath, className,
+    isAsync: false, language: 'TypeScript', startIndex: 0, endIndex: 1, fanIn: 0, fanOut: 0, ...extra,
+  });
+  const nodes = [
+    n('src/store.ts', 'open', 'EdgeStore'),
+    n('src/spill.ts', 'open', 'Spill'),
+    n('src/util.ts', 'open'),
+    n('infra/main.tf', 'aws_s3_bucket.logs'),
+  ];
+  const byName = (name: string) => nodes.filter(x => x.name === name);
+  const byId = (id: string) => nodes.find(x => x.id === id);
+  const ids = (q: string) => resolveQualifiedSymbol(q, byName, byId)?.map(x => x.id) ?? null;
+
+  it('resolves Class.method, name::path, Class.method::path and a node id', () => {
+    expect(ids('EdgeStore.open')).toEqual(['src/store.ts::EdgeStore.open']);
+    expect(ids('open::src/util.ts')).toEqual(['src/util.ts::open']);
+    expect(ids('Spill.open::spill.ts')).toEqual(['src/spill.ts::Spill.open']);
+    expect(ids('src/store.ts::EdgeStore.open')).toEqual(['src/store.ts::EdgeStore.open']);
+  });
+
+  it('leaves a plain name, and a dotted name with no Class.method reading, to the caller', () => {
+    expect(ids('open')).toBeNull();
+    expect(ids('aws_s3_bucket.logs')).toBeNull();
+    expect(ids('open::src/missing.ts')).toEqual([]);
   });
 });

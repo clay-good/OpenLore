@@ -4,44 +4,30 @@
 
 ### Requirement: ExtractionFactEarlyCutoff
 
-The incremental update SHALL compute a deterministic, position-normalized digest of each changed
-file's extracted facts — symbol identities, signatures, class membership, call edges, control-flow
-shape, and import facts: exactly the inputs cross-file resolution and dependent computations
-consume — and, when the digest equals the cached digest for that file, SHALL cut off propagation:
-the file's own records (spans, line numbers, control-flow rows, content hash) are updated, but no
-dependent files are re-parsed, no reverse-dependency closure runs, and no files are marked stale.
-The comparison SHALL be over extracted facts only — never file mtimes and never raw bytes (the
-existing raw-byte no-op skip remains a separate, cheaper gate). The digest SHALL carry an
-algorithm/schema version stamp, and a stamp mismatch SHALL invalidate all cached digests rather
-than compare across versions. When the digests differ, behavior SHALL be identical to the existing
-converge-or-flag path.
+The incremental update SHALL compute a deterministic digest of each changed file's extracted facts
+with byte positions left out, and SHALL stop propagation when the digest equals the stored digest
+for that file: the file's own records are updated, no dependent file is parsed again, and no file
+is marked stale. The comparison SHALL use extracted facts only, never modification times. The
+digest SHALL carry a version stamp, and digests with different stamps SHALL NOT be compared. When
+the digests differ, behavior SHALL be the same as before this change.
 
 #### Scenario: A comment-only edit costs one parse
 
-- **GIVEN** an indexed file with cross-file callers, edited to change only comments and formatting
-- **WHEN** the watcher processes the change
-- **THEN** the file is re-parsed once, its fact digest matches the cached digest, no caller file
-  is re-parsed, no file is marked stale, and the resulting graph equals what `analyze --force`
-  would produce
+- **WHEN** an indexed file with callers in other files is edited to change only comments and formatting
+- **THEN** that file is parsed once, no caller file is parsed, and no file is marked stale
+- **AND** the graph equals the graph `analyze --force` produces
 
 #### Scenario: The file's own positions stay exact
 
-- **GIVEN** a cut-off edit that inserted a comment block at the top of the file (shifting every
-  symbol's line numbers)
-- **WHEN** a consumer reads a symbol's span or line range after the cutoff
-- **THEN** the returned positions reflect the current source, because the file's own records were
-  updated even though propagation was cut off
+- **WHEN** a cut-off edit inserts a comment block at the top of a file
+- **THEN** each symbol's stored line range matches the current source
 
-#### Scenario: A structural change propagates exactly as today
+#### Scenario: A structural change propagates as today
 
-- **GIVEN** an edit that changes a function signature (or adds/removes a symbol or call)
-- **WHEN** the watcher processes the change
-- **THEN** the fact digests differ and the existing reverse-dependency closure, rebinding
-  discovery, budget bounds, and explicit-stale flags apply unchanged
+- **WHEN** an edit changes a signature, or adds or removes a symbol, call, or import
+- **THEN** the digests differ and the existing closure, work budget, and stale marks apply unchanged
 
-#### Scenario: A schema bump never compares stale digests
+#### Scenario: A version change never compares old digests
 
-- **GIVEN** cached fact digests produced under a previous digest-algorithm version
-- **WHEN** the analyzer runs under a new version
-- **THEN** the stamp mismatch invalidates the cached digests and no cross-version comparison
-  occurs — files re-digest instead of falsely cutting off
+- **WHEN** the analyzer runs with a digest version that differs from the stored one
+- **THEN** every stored digest is discarded and no file cuts off on it

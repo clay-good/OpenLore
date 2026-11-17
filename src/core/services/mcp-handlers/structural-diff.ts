@@ -37,7 +37,9 @@ import {
   type EditNature,
   type DeclaredFootprintInput,
 } from './footprint-escape.js';
-import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
+import { findDeprecatedCalls, deprecatedCallFindings, DEPRECATED_CALLS_CAVEAT } from './deprecated-calls.js';
+import { checkWeakening } from '../check-weakening.js';
+import type { SerializedCallGraph, FunctionNode, CallEdge } from '../../analyzer/call-graph.js';
 import { execFileGit as execFileAsync } from '../../../utils/git-exec.js';
 
 
@@ -182,6 +184,14 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
     return { error: `git diff failed: ${err instanceof Error ? err.message : String(err)}` };
   }
 
+  // ── Check weakening (add-check-weakening-findings) ─────────────────────────
+  // Computed before the code-only filter: a relaxed CI or lint config is a finding on its own. It
+  // reads its own fixed baseline (the merge-base with the requested or default branch), so a weakening
+  // committed earlier on the branch is still compared. Best-effort: a failure is reported in the block.
+  // The cached context is read once here and shared with the stale-caller pass below.
+  const ctx = await readCachedContext(absDir);
+  const weakening = await checkWeakeningBlock(absDir, input, ctx?.callGraph as SerializedCallGraph | undefined);
+
   // Code files only; logical path = the new path (so a file move doesn't explode
   // into all-removed + all-added at the function level).
   const fileScope = input.files ? new Set(input.files) : null;
@@ -204,6 +214,7 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
       message: 'No changed code files between the two states (only non-code or no changes).',
       summary: emptySummary(),
       ...(escapeBlock ? { escapeAnalysis: escapeBlock } : {}),
+      checkWeakening: weakening,
       soundness: diffSoundness(true),
     };
   }
@@ -336,12 +347,12 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
   const edgeKey = (e: { callerId: string; calleeName: string }) => `${e.callerId}\0${e.calleeName}`;
   const oldEdges = new Map(oldGraph.edges.filter(isCallEdge).map(e => [edgeKey(e), e]));
   const newEdges = new Map(newGraph.edges.filter(isCallEdge).map(e => [edgeKey(e), e]));
-  const addedEdges = [...newEdges].filter(([k]) => !oldEdges.has(k)).map(([, e]) => edgePair(e, newGraph));
+  const addedEdgesRaw: CallEdge[] = [...newEdges].filter(([k]) => !oldEdges.has(k)).map(([, e]) => e);
+  const addedEdges = addedEdgesRaw.map(e => edgePair(e, newGraph));
   const removedEdges = [...oldEdges].filter(([k]) => !newEdges.has(k)).map(([, e]) => edgePair(e, oldGraph));
 
   // ── Stale callers — callers (in the canonical graph) of a node whose signature
   //    changed or that was removed, that are NOT themselves in the changed set ──
-  const ctx = await readCachedContext(absDir);
   const changedPaths = new Set(codeChanged.map(c => c.path));
   const staleCallerNote = ctx?.edgeStore
     ? undefined
@@ -385,6 +396,13 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
     escapeBlock = await buildEscapeBlock(absDir, input, modifiedSymbols, limit);
   }
 
+  // ── New calls into deprecated code (add-deprecation-propagation) ─────────────
+  // Advisory by default; an operator can make `deprecated-symbol-use` blocking in enforcement.policy.
+  const deprecatedCalls = findDeprecatedCalls(addedEdgesRaw, newGraph, ctx?.edgeStore);
+  const deprecatedGate = deprecatedCalls.length
+    ? classifyFindings(deprecatedCallFindings(deprecatedCalls), effectivePolicy(await readOpenLoreConfig(absDir)))
+    : undefined;
+
   return {
     base: resolvedBase,
     head: input.headRef ?? 'working tree',
@@ -397,6 +415,7 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
       removedEdges: removedEdges.length,
       staleCallers: totalStale,
       renameCandidates: renameCandidates.length,
+      deprecatedCallsAdded: deprecatedCalls.length,
     },
     added: added.map(nodeRef).sort(byFileName).slice(0, limit),
     removed: removedOut.slice(0, limit),
@@ -405,8 +424,46 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
     edges: { added: addedEdges.slice(0, limit), removed: removedEdges.slice(0, limit) },
     ...(staleCallerNote ? { note: staleCallerNote } : {}),
     ...(escapeBlock ? { escapeAnalysis: escapeBlock } : {}),
+    ...(deprecatedGate ? {
+      deprecatedCalls: {
+        added: deprecatedCalls.slice(0, limit),
+        // Blocking findings are always kept, so a gated result shows why.
+        findings: [...deprecatedGate.blocking, ...deprecatedGate.classified.filter(f => f.enforcementClass !== 'blocking')]
+          .slice(0, Math.max(limit, deprecatedGate.blocking.length)),
+        gated: deprecatedGate.gated,
+      },
+    } : {}),
+    checkWeakening: weakening,
     soundness: diffSoundness(false, failedSnapshots),
   };
+}
+
+/**
+ * The `checkWeakening` block: the shapes against the fixed baseline, classified by the repo's
+ * enforcement policy (advisory by default; a code set to `off` is dropped).
+ */
+async function checkWeakeningBlock(absDir: string, input: StructuralDiffInput, callGraph: SerializedCallGraph | undefined): Promise<Record<string, unknown>> {
+  try {
+    const result = await checkWeakening({
+      root: absDir,
+      baseRef: input.baseRef,
+      headRef: input.headRef,
+      callGraph,
+      files: input.files,
+    });
+    const gate = classifyFindings(result.findings, effectivePolicy(await readOpenLoreConfig(absDir)));
+    return {
+      baseline: result.baseline,
+      findings: gate.classified.filter(f => f.enforcementClass !== 'off'),
+      gated: gate.gated,
+      // A code the policy turns off is still named, so silencing is visible, never an absence.
+      ...(gate.off.length ? { silenced: gate.off.map(f => ({ code: f.code, subject: f.subject })) } : {}),
+      ...(result.notAssessed.length ? { notAssessed: result.notAssessed } : {}),
+      ...(result.boundaries.length ? { boundaries: result.boundaries } : {}),
+    };
+  } catch (err) {
+    return { error: `Check weakening was not assessed: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 /**
@@ -565,13 +622,14 @@ function emptyGraph(): SerializedCallGraph {
     stats: { totalNodes: 0, totalEdges: 0, avgFanIn: 0, avgFanOut: 0 } };
 }
 function emptySummary() {
-  return { addedFunctions: 0, removedFunctions: 0, signatureChanges: 0, addedEdges: 0, removedEdges: 0, staleCallers: 0, renameCandidates: 0 };
+  return { addedFunctions: 0, removedFunctions: 0, signatureChanges: 0, addedEdges: 0, removedEdges: 0, staleCallers: 0, renameCandidates: 0, deprecatedCallsAdded: 0 };
 }
 function diffSoundness(empty: boolean, failedSnapshots?: string[]): { posture: string; caveats: string[] } {
   const caveats = [
 'A cross-file pair sharing a content-addressed stable id (name + parameter shape) is reported as a move with confidence "stable-id" — a strong signal, but NOT proof: a symbol that was deleted and independently replaced by a same-name/same-shape homonym is indistinguishable, so verify rather than assume "same symbol". The stable id is matched only when unique within the changed-file set (a same-shape symbol in an unchanged file is not considered). Identifier renames and symbols without a stable id (anonymous/synthetic) stay heuristic — paired by signature shape and reported separately.',
     'Signature-change detection is limited to what the analyzer extracts per language; cross-language signature notions differ.',
     'Edge deltas cover calls among/out of the changed files; calls into unchanged files resolve against the canonical graph for stale callers only.',
+    DEPRECATED_CALLS_CAVEAT,
     'Old file content is read at the merge-base of the base ref and the new state (the same point the changed-file list is scoped to), so a base branch that advanced past the branch point does not have its own edits attributed to this change.',
   ];
   if (empty) caveats.push('No code files changed — the structural delta is empty.');

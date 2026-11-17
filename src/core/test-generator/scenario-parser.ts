@@ -175,6 +175,11 @@ async function loadMapping(
 // SPEC FILE WALKER
 // ============================================================================
 
+/** Whether the repository has any spec to read scenarios from (no spec source is not 0% coverage). */
+export async function hasSpecFiles(rootPath: string): Promise<boolean> {
+  return (await findSpecFiles(join(rootPath, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR))).length > 0;
+}
+
 async function findSpecFiles(
   specsDir: string,
   domains?: string[]

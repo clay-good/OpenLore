@@ -113,6 +113,7 @@ async function openloreAnalyzeImpl(options: AnalyzeApiOptions): Promise<AnalyzeR
     options.excludePatterns ?? [],
     options.maxFiles ?? DEFAULT_MAX_FILES,
     analysisGeneratedExcludes(rootPath, outputPath, config.openspecPath),
+    config.filePolicies,
   );
 
   if (!(options.force ?? false) && await isAnalysisCacheFresh(rootPath, outputPath, fingerprintConfig)) {

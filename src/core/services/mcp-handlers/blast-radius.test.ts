@@ -23,6 +23,10 @@ vi.mock('../../drift/git-diff.js', () => ({
     resolved: !requested || requested === 'auto' ? 'HEAD' : requested,
     fellBack: false,
   })),
+  getRepoPrefix: vi.fn(async () => ''),
+  // The diff is read with lockfiles kept (generated-file guard); none of these fixtures is one.
+  isSkippableFile: () => false,
+  reframeRepoPath: (p: string, prefix: string) => (!prefix ? p : p.startsWith(prefix) ? p.slice(prefix.length) || null : null),
 }));
 
 // Partial mock: stub handleAnalyzeImpact but keep buildAdjacency real (select_tests needs it).
@@ -243,6 +247,21 @@ describe('computeBlastRadius', () => {
     expect(() => assertConclusionShape('blast_radius', b)).not.toThrow();
   });
 
+  it('lists every selected test file, while the single-test list stays cut at 15', async () => {
+    // 20 tests in 18 files: two files hold two tests each, ranked as select_tests returns them.
+    const selectedTests = Array.from({ length: 20 }, (_, i) => ({
+      test: `t${i}`, file: `src/f${Math.min(i, 17)}.test.ts`, confidence: i < 10 ? 'high' : 'medium',
+    }));
+    vi.mocked(handleSelectTests).mockResolvedValueOnce({ selectedTests, soundness: { posture: 'over-approximate', caveats: [] } } as never);
+
+    const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
+
+    expect(b.tests.count).toBe(20);
+    expect(b.tests.toRun).toHaveLength(15);
+    expect(b.tests.files).toEqual(Array.from({ length: 18 }, (_, i) => `src/f${i}.test.ts`));
+    expect(() => assertConclusionShape('blast_radius', b)).not.toThrow();
+  });
+
   it('forwards test-selection bounds and widening caveats unmodified', async () => {
     const soundness = {
       posture: 'over-approximate',
@@ -354,9 +373,21 @@ describe('computeBlastRadius', () => {
     expect(b.confidenceBoundary?.staleness).toEqual(marker);
   });
 
-  it('omits the confidence boundary when the index is current (no false staleness noise)', async () => {
+  // Changed with `never-claim-complete-beside-a-refusal`. This used to assert the whole
+  // boundary is ABSENT on a current index. The boundary is still dropped when the briefing
+  // has nothing to disclose, but this fixture is not that briefing: it degrades one file to
+  // file granularity (`unreadable`), cannot read `.gitattributes`, and has no merge-base
+  // with HEAD — three real gaps it already prints in `caveats`. Keeping the old assertion
+  // would mean a briefing that names three gaps in prose claims a complete answer. What
+  // the test is actually guarding — no FALSE staleness noise — is asserted directly.
+  it('reports no staleness when the index is current (no false staleness noise)', async () => {
     const b = await computeBlastRadius({ directory: '/p' }) as BlastRadiusBriefing;
-    expect(b.confidenceBoundary).toBeUndefined();
+    expect(b.confidenceBoundary?.staleness).toBeUndefined();
+    expect(b.confidenceBoundary?.integrity).toBeUndefined();
+    expect(b.confidenceBoundary?.knownUnknowable).toBeUndefined();
+    // The boundary is present only because the briefing disclosed gaps, and it names them.
+    expect(b.confidenceBoundary?.complete).toBe(false);
+    expect(b.confidenceBoundary?.incompleteBecause?.length).toBeGreaterThan(0);
   });
 
   it('errors clearly when no analysis exists', async () => {
@@ -436,6 +467,50 @@ describe('computeBlastRadius', () => {
     expect(b.specs.willGoStale).toBe(0);
     expect(b.caveats.join(' ')).toMatch(/drift could not be evaluated.*git exploded/i);
   });
+
+  it('pushes notes whose trigger matches the diff, with receipts, and leaves pinned notes to orient (change: add-memory-trigger-predicates)', async () => {
+    const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+    const dir = await mkdtemp(join(tmpdir(), 'openlore-blast-trigger-'));
+    try {
+      await mkdir(join(dir, OPENLORE_DIR, 'memory'), { recursive: true });
+      const note = (id: string, extra: Record<string, unknown>) =>
+        ({ id, kind: 'note', content: `content of ${id}`, anchors: [], recordedAt: '2026-01-01T00:00:00Z', ...extra });
+      await writeFile(join(dir, OPENLORE_DIR, 'memory', 'notes.json'), JSON.stringify({
+        version: '1', updatedAt: '', memories: [
+          note('glob0001', { trigger: { fileGlob: 'src/*.ts' } }),
+          note('sym00001', { trigger: { symbolPattern: 'validate*' } }),
+          note('dom00001', { trigger: { specDomain: 'mcp-handlers' } }),
+          note('miss0001', { trigger: { fileGlob: 'docs/**' } }),
+          note('pin00001', { pinned: true }),
+        ],
+      }), 'utf-8');
+      // The current spec link index shape: a file-only anchor is domain evidence.
+      await mkdir(join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR), { recursive: true });
+      await writeFile(join(dir, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, 'mapping.json'), JSON.stringify({
+        version: 8, links: [{ requirement: 'R', domain: 'mcp-handlers', specFile: 's', state: 'unmapped', anchors: [], functions: [], footprintFiles: ['src/utils.ts'] }],
+      }), 'utf-8');
+      const b = await computeBlastRadius({ directory: dir }) as BlastRadiusBriefing;
+      expect(b.injectedMemories?.map(m => [m.id, m.firedPredicate])).toEqual([
+        ['sym00001', { kind: 'symbolPattern', pattern: 'validate*', matched: 'validateDirectory' }],
+        ['glob0001', { kind: 'fileGlob', pattern: 'src/*.ts', matched: 'src/utils.ts' }],
+        ['dom00001', { kind: 'specDomain', domain: 'mcp-handlers' }],
+      ]);
+      expect(b.headline).toMatch(/3 triggered memories to read/);
+
+      // Analyzed below the repository root: git's repo-root paths are re-framed before matching.
+      const { getChangedFiles, getRepoPrefix } = await import('../../drift/git-diff.js');
+      vi.mocked(getRepoPrefix).mockResolvedValue('pkg/');
+      vi.mocked(getChangedFiles).mockResolvedValueOnce({ files: [{ path: 'pkg/src/utils.ts' }, { path: 'other/x.ts' }] } as never);
+      const sub = await computeBlastRadius({ directory: dir }) as BlastRadiusBriefing;
+      expect(sub.injectedMemories?.find(m => m.id === 'glob0001')?.firedPredicate)
+        .toEqual({ kind: 'fileGlob', pattern: 'src/*.ts', matched: 'src/utils.ts' });
+      expect(() => assertConclusionShape('blast_radius', b)).not.toThrow();
+    } finally {
+      const { getRepoPrefix } = await import('../../drift/git-diff.js');
+      vi.mocked(getRepoPrefix).mockResolvedValue('');
+      await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  });
 });
 
 describe('triggeredBlockPatterns (opt-in blocking fires only on its pattern)', () => {
@@ -502,7 +577,14 @@ describe('blast_radius names the boundary that bounds it', () => {
   });
   afterEach(async () => {
     const { rm } = await import('node:fs/promises');
-    await rm(root, { recursive: true, force: true });
+    await rm(root, {
+      recursive: true,
+      force: true,
+      // Windows runners can briefly hold a just-read artifact directory open (for example while
+      // indexing it). Let Node retry transient EBUSY/EPERM/ENOTEMPTY before failing the test.
+      maxRetries: process.platform === 'win32' ? 8 : 0,
+      retryDelay: 50,
+    });
   });
 
   it("names a site in the CALLER CLOSURE, not only in the changed files", async () => {

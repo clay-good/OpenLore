@@ -1,3 +1,4 @@
+import type { FilePolicies, ConfigurationAssistantConfig } from '../core/configuration/types.js';
 /**
  * Core type definitions for openlore
  */
@@ -17,9 +18,16 @@ export type PanicResponseMode = 'off' | 'observe' | 'advisory' | 'experimental_b
 
 // Configuration types
 export interface OpenLoreConfig {
+  filePolicies?: FilePolicies;
+  configurationAssistant?: ConfigurationAssistantConfig;
   version: string;
   projectType: ProjectType;
-  openspecPath: string;
+  openspecPath?: string;
+  /**
+   * Extra folders of architecture decision records, read-only and repository-relative (change:
+   * spec-framework-neutrality, task 3.2). `docs/adr` and `docs/decisions` are read without it.
+   */
+  adrPaths?: string[];
   analysis: AnalysisConfig;
   generation: GenerationConfig;
   llm?: LLMConfig;
@@ -72,8 +80,10 @@ export interface OpenLoreConfig {
    * Optional governance behavior (change: add-decision-autopilot). With
    * `autopilot: true`, the decisions commit gate auto-accepts verified decisions
    * (distinct `auto-approved` status, actor recorded on an append-only ledger),
-   * syncs them to specs, and never blocks a commit; blocking human review is the
-   * behavior when absent/false. Autopilot never touches a human-rejected decision.
+   * syncs them to specs, and never blocks a commit; `false` means blocking human
+   * review. Absent means on, unless a blocking decisions gate is installed
+   * (`resolveAutopilotMode`, change: default-decision-autopilot-with-visible-trace).
+   * Autopilot never touches a human-rejected decision.
    */
   governance?: {
     autopilot?: boolean;
@@ -120,9 +130,25 @@ export interface OpenLoreConfig {
   workspace?: WorkspaceConfig;
   /** Pi extension settings, including who owns daemon spawn authority. */
   pi?: PiConfig;
+  /** Agent-loop hook moments; `false` turns one off (change: add-agent-loop-hook-surfaces). */
+  hooks?: HooksConfig;
+}
+
+/** Each agent-loop moment wired by `openlore install`; absent or `true` is on, `false` is off. */
+export interface HooksConfig {
+  /** `openlore orient --inject` on a submitted prompt (change: hook-reliability). */
+  'prompt-submitted'?: boolean;
+  'before-edit'?: boolean;
+  'after-tools'?: boolean;
+  'before-stop'?: boolean;
+  'after-compact'?: boolean;
+  'before-subagent'?: boolean;
+  'subagent-start'?: boolean;
 }
 
 export interface PiConfig {
+  /** Repository-wide architecture/spec context injection. Default `'on-demand'`; `'full'` restores every-turn injection. */
+  contextMode?: 'on-demand' | 'full';
   /**
    * Whether the Pi extension may spawn its own daemon when none is discovered. Default `true`.
    * Set to `false` when a supervising host already runs one daemon per working tree: an
@@ -134,8 +160,9 @@ export interface PiConfig {
   /**
    * Which OpenLore tools are active when a Pi session starts. Default `'lean'`: the tools of the
    * MCP `substrate` preset plus `openlore_configure` and `openlore_activate_tools`, which turns on
-   * the other tool groups on demand. `'all'` activates every OpenLore tool at session start
-   * (change: add-pi-lean-tool-surface).
+   * the other tool groups on demand. If the user has Pi's native `tool_search` active, OpenLore
+   * instead keeps only `orient` and `search_code` directly visible and defers specialist tools
+   * to search. `'all'` activates every OpenLore tool at session start (change: add-pi-lean-tool-surface).
    */
   toolSurface?: 'lean' | 'all';
 }
@@ -283,10 +310,13 @@ export interface EmbeddingConfig {
    *    API key. The model is lazily downloaded and cached on first use. `model`
    *    is optional (defaults to a pinned small model); `baseUrl`/`apiKey` are
    *    ignored.
+   *  - `'none'`: keyword only. Opts out of the local vectors OpenLore otherwise adds in
+   *    the background, and wins over `EMBED_*` environment variables.
    * Omitting `provider` keeps the historical behaviour: a remote endpoint when
-   * `baseUrl` + `model` are present, otherwise no embeddings (keyword default).
+   * `baseUrl` + `model` are present, otherwise the keyword index, to which background
+   * builds add local vectors when the optional package is installed.
    */
-  provider?: 'remote' | 'local';
+  provider?: 'remote' | 'local' | 'none';
   /** Base URL of the OpenAI-compatible embeddings endpoint (remote provider) */
   baseUrl?: string;
   /** Embedding model name (required for remote; optional override for local) */
@@ -403,7 +433,7 @@ export interface GlobalOptions {
 
 export interface InitOptions extends GlobalOptions {
   force: boolean;
-  openspecPath: string;
+  openspecPath?: string;
 }
 
 export interface AnalyzeOptions extends GlobalOptions {
@@ -705,6 +735,8 @@ export interface MappingCoverageStatus {
   reason?: MappingCoverageReason;
   message?: string;
   remediation?: string;
+  /** With `specs-unavailable`: the spec sources checked (change: spec-framework-neutrality). */
+  lookedFor?: string[];
   artifactPath: string;
   /** Where available coverage came from: the persisted cache, or an in-memory rebuild. */
   source?: 'cache' | 'derived';
@@ -790,6 +822,7 @@ export type DecisionDisposition = 'pending' | 'promoted' | 'merged-into' | 'reje
 export type DecisionDispositionReason =
   | 'promoted-as-recorded'
   | 'promoted-with-rewrite'
+  | 'auto-accepted-on-record'
   | 'merged-into-consolidated'
   | 'superseded-by-later-draft'
   | 'not-in-consolidated-set'
@@ -1021,6 +1054,22 @@ export interface StructuralAnchor {
    * ambiguous move was detected for this anchor.
    */
   possiblyMovedTo?: string[];
+  /**
+   * Exact text inside the anchored symbol's body that the memory is about
+   * (add-memory-anchor-verdicts). When set, freshness re-locates this text in the
+   * symbol's current body by exact match instead of comparing the whole-symbol
+   * hash, so an edit elsewhere in the symbol does not drift the memory. Only set on
+   * a symbol anchor, and only when the text occurred exactly once at record time.
+   */
+  spanText?: string;
+  /**
+   * Whole-symbol hash at the last analysis that saw this symbol with current offsets
+   * (add-memory-anchor-verdicts). Written on every live anchor of a symbol that
+   * carries a span anchor, so continuity can follow a rename after edits the span
+   * anchor stayed fresh through. Never read by freshness; `contentHash` stays the
+   * recorded baseline.
+   */
+  bodyHash?: string;
 }
 
 /** How a symbol's identity moved between two indexed states (add-symbol-identity-continuity). */
@@ -1092,7 +1141,19 @@ export interface AnchorVerdict {
   staleRegion?: boolean;
   /** Structural context for the stale region; never changes the drifted verdict. */
   staleRegionComposition?: StaleRegionComposition;
+  /**
+   * Set on an orphaned span anchor whose text now occurs more than once in the
+   * symbol's body (add-memory-anchor-verdicts): the 1-based file lines where each
+   * occurrence starts, at most {@link MAX_SPAN_CANDIDATES}; `truncated` says more
+   * occurrences exist. The anchor is never re-attached to one of them by guessing.
+   */
+  spanCandidates?: { lines: number[]; truncated?: true };
+  /** Set on an orphaned symbol anchor whose file no longer exists (add-memory-anchor-verdicts). */
+  fileMissing?: true;
 }
+
+/** Most candidate lines disclosed for an ambiguous span anchor (add-memory-anchor-verdicts). */
+export const MAX_SPAN_CANDIDATES = 10;
 
 /**
  * Evidence behind a `fresh` verdict (add-trust-calibrated-context-economy). The
@@ -1161,7 +1222,39 @@ export interface AnchoredMemory {
   invalidatedByCommit?: string;
   /** Id of the prior memory this one supersedes (provenance for the lifecycle op). */
   supersedes?: string;
+  /**
+   * Deterministic predicate that pushes this memory into a briefing whose touched set matches it
+   * (change: add-memory-trigger-predicates). Absent ⇒ pull-only, as before.
+   */
+  trigger?: MemoryTrigger;
+  /** Always pushed into `orient`'s briefing for the repo (change: add-memory-trigger-predicates). */
+  pinned?: boolean;
+  /**
+   * Structural claims the memory rests on, in `verify_claim`'s grammar; each was confirmed when
+   * recorded and is checked again at every recall (change: add-memory-claim-verdicts).
+   */
+  claims?: MemoryClaim[];
 }
+
+/** A `verify_claim` claim a memory rests on (change: add-memory-claim-verdicts). */
+export interface MemoryClaim {
+  kind: 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current';
+  subject: string;
+  /** The second symbol, for `calls` / `reaches` / `impacts`. */
+  object?: string;
+  /** Short SHA of the index the claim was confirmed against when recorded, when captured. */
+  recordedIndexCommit?: string;
+}
+
+/**
+ * The closed union of memory trigger predicates (change: add-memory-trigger-predicates). Each is
+ * evaluated by set membership or bounded call-graph reachability — no LLM interprets a trigger.
+ */
+export type MemoryTrigger =
+  | { fileGlob: string }
+  | { symbolPattern: string }
+  | { specDomain: string }
+  | { withinHops: number };
 
 /** Persistent store written to .openlore/memory/notes.json */
 export interface MemoryStore {

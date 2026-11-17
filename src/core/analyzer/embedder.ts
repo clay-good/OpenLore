@@ -9,6 +9,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import type { Embedder } from './embedding-service.js';
 import type { OpenLoreConfig } from '../../types/index.js';
@@ -20,6 +21,13 @@ export type RetrievalMode = 'keyword' | 'keyword+vocabulary' | 'local-semantic' 
 export function isKeywordRetrievalMode(mode: RetrievalMode | string): boolean {
   return mode === 'keyword' || mode === 'keyword+vocabulary';
 }
+
+/**
+ * The optional semantic upgrade, phrased for a human. Printed only by `openlore status`
+ * and `openlore doctor`; agent payloads report `retrievalMode` and never carry it
+ * (spec `config` RetrievalUpgradeHintsAreForHumans).
+ */
+export const SEMANTIC_UPGRADE_HINT = 'optional: "openlore embed --local" adds on-device semantic ranking (no API key)';
 
 // Sidecar filenames, kept in sync with VectorIndex.META_FILE /
 // SpecVectorIndex.META_FILE. Referenced as literals (not imported) so this module
@@ -41,7 +49,16 @@ const SPEC_INDEX_META = 'spec-index-meta.json';
  * Dependencies are imported dynamically (matching the rest of the codebase) so
  * the remote `EmbeddingService` stays unit-mockable via `vi.doMock`.
  */
-export async function resolveEmbedder(cfg?: OpenLoreConfig | null): Promise<Embedder | null> {
+export async function resolveEmbedder(
+  cfg?: OpenLoreConfig | null,
+  /**
+   * The analysis directory being queried. Given, an unconfigured repository whose index
+   * carries background-built local vectors resolves to the local embedder that built them.
+   */
+  outputDir?: string,
+): Promise<Embedder | null> {
+  // An explicit opt-out wins over everything, ambient EMBED_* env included.
+  if (cfg?.embedding?.provider === 'none') return null;
   // Explicit local provider takes precedence over ambient EMBED_* env: it is a
   // deliberate, written-down choice, and a stale env var must not silently turn a
   // requested local index into a remote one (which would also mismatch dimensions).
@@ -80,7 +97,44 @@ export async function resolveEmbedder(cfg?: OpenLoreConfig | null): Promise<Embe
   }
   // Remote (or unconfigured): fromConfig returns null when no remote endpoint
   // is set, which is the first-class keyword default.
-  return cfg ? EmbeddingService.fromConfig(cfg) : null;
+  const remote = cfg ? EmbeddingService.fromConfig(cfg) : null;
+  if (remote) return remote;
+  if (outputDir && backgroundSemanticAllowed(cfg) && indexCarriesLocalVectors(outputDir) && localEmbedderInstalled()) {
+    const { LocalEmbeddingService } = await import('./local-embedding-service.js');
+    return LocalEmbeddingService.shared();
+  }
+  return null;
+}
+
+/**
+ * May OpenLore add local vectors in the background (change:
+ * enable-local-semantic-search-in-background)? Only when the repository names no provider
+ * at all: `embedding.provider: "none"`, `embed --off` (a `null` block) and any configured
+ * provider each decide for themselves.
+ */
+export function backgroundSemanticAllowed(cfg?: OpenLoreConfig | null): boolean {
+  if (cfg?.embedding === null || cfg?.embedding?.provider) return false;
+  return !semanticProviderConfigured(cfg);
+}
+
+/** True when the optional on-device embedder package can be loaded. Resolves, never imports. */
+export function localEmbedderInstalled(): boolean {
+  try {
+    createRequire(import.meta.url).resolve('@huggingface/transformers');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Does the code index carry vectors a local model built? */
+export function indexCarriesLocalVectors(outputDir: string): boolean {
+  try {
+    const meta = JSON.parse(readFileSync(join(outputDir, CODE_INDEX_META), 'utf-8')) as { hasEmbeddings?: boolean; model?: unknown };
+    return meta.hasEmbeddings === true && String(meta.model ?? '').startsWith('local:');
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -123,6 +177,7 @@ export function indexCarriesVectors(outputDir: string, kind: 'code' | 'spec' = '
  * produced") to detect a configured-but-unrealized semantic index.
  */
 export function semanticProviderConfigured(cfg?: OpenLoreConfig | null): boolean {
+  if (cfg?.embedding?.provider === 'none') return false;
   if (cfg?.embedding?.provider === 'local') return true;
   if (process.env.EMBED_BASE_URL && process.env.EMBED_MODEL) return true;
   return Boolean(cfg?.embedding?.baseUrl && cfg?.embedding?.model);
@@ -153,6 +208,8 @@ export function indexCapabilityAgreement(
   const configured = semanticProviderConfigured(cfg);
   const realized = indexCarriesVectors(outputDir, kind);
   if (configured === realized) return { agrees: true };
+  // Vectors the background pass added for an unconfigured repository are the default.
+  if (realized && backgroundSemanticAllowed(cfg) && indexCarriesLocalVectors(outputDir)) return { agrees: true };
   return configured
     ? { agrees: false, mismatch: 'configured-but-unrealized' }
     : { agrees: false, mismatch: 'vectors-without-provider' };

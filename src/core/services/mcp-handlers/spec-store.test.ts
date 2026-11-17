@@ -162,7 +162,7 @@ describe('handleSpecStoreStatus', () => {
   it('a stale target index yields exactly one index-stale finding and does not block', async () => {
     const api = makeRepo('api', 'hash-v1');
     addRepo(home, api, { name: 'api' }); // registry captures hash-v1
-    rewriteFingerprint(api, 'hash-v2'); // working tree drifts
+    rewriteFingerprint(api, 'hash-v2'); // the target's index changed after registration
     const store = makeRepo('plans', null);
     writeBinding({ name: 'plans', path: store, targets: ['api'] });
 
@@ -171,6 +171,23 @@ describe('handleSpecStoreStatus', () => {
     expect(stale).toHaveLength(1);
     expect(stale[0].severity).toBe('warn');
     expect(report.sound).toBe(true); // a warning does not make the binding unsound
+  });
+
+  it('index-stale names a remediation that actually clears it (re-baseline, not re-analyze)', async () => {
+    const api = makeRepo('api', 'hash-v1');
+    addRepo(home, api, { name: 'api' });
+    rewriteFingerprint(api, 'hash-v2'); // the target was re-analyzed after registration
+    const store = makeRepo('plans', null);
+    writeBinding({ name: 'plans', path: store, targets: ['api'] });
+
+    const [stale] = (await handleSpecStoreStatus(home)).findings.filter(f => f.code === 'index-stale');
+    expect(stale.message).toMatch(/changed since it was registered/);
+    expect(stale.message).not.toMatch(/working tree/);
+    expect(stale.remediation).toMatch(/openlore federation add \S*api --name api$/);
+
+    // Re-analyzing again would only move the index further; following the remediation clears it.
+    addRepo(home, api, { name: 'api' });
+    expect((await handleSpecStoreStatus(home)).findings.filter(f => f.code === 'index-stale')).toHaveLength(0);
   });
 
   it('an unindexed target yields an index-missing finding', async () => {
