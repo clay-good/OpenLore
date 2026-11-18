@@ -13,6 +13,7 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { Command } from 'commander';
 import { logger } from '../../utils/logger.js';
+import { hideConsoleWindow } from '../../utils/console-window.js';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -165,6 +166,8 @@ async function runAnalyzeFix(cwd: string): Promise<number> {
     const child = spawn(process.execPath, [process.argv[1], 'analyze', '--reanalyze'], {
       cwd,
       stdio: 'inherit',
+      // A hook runs preflight with no console; without this the analyze fix opens a window.
+      windowsHide: hideConsoleWindow(),
     });
     child.on('exit', (code) => resolveProm(code ?? 1));
     child.on('error', () => resolveProm(1));

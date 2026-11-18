@@ -245,6 +245,7 @@ export class ClaudeCodeProvider implements LLMProvider {
     try {
       raw = withIsolatedCliCwd((cwd) => execFileSync('claude', args, {
         encoding: 'utf8',
+        windowsHide: true, // MCP/Pi daemons have no console: never open one
         maxBuffer: LLM_CLI_MAX_BUFFER_BYTES,
         timeout: LLM_CLI_TIMEOUT_MS,
         env,
@@ -323,6 +324,7 @@ export class CodexCLIProvider implements LLMProvider {
         args.push(sanitizeCliPrompt(fullPrompt));
         execFileSync(bin, args, {
           encoding: 'utf8',
+          windowsHide: true, // MCP/Pi daemons have no console: never open one
           maxBuffer: LLM_CLI_MAX_BUFFER_BYTES,
           timeout: LLM_CLI_TIMEOUT_MS,
           cwd,
@@ -392,6 +394,7 @@ export class MistralVibeProvider implements LLMProvider {
     try {
       raw = withIsolatedCliCwd((cwd) => execFileSync(mistralVibeBin, args, {
         encoding: 'utf8',
+        windowsHide: true, // MCP/Pi daemons have no console: never open one
         maxBuffer: LLM_CLI_MAX_BUFFER_BYTES,
         timeout: LLM_CLI_TIMEOUT_MS,
         cwd,
@@ -1497,6 +1500,7 @@ export class GeminiCLIProvider implements LLMProvider {
         if (this.model) args.push('-m', this.model);
         return execFileSync(geminiCLIBin, args, {
           encoding: 'utf8',
+          windowsHide: true, // MCP/Pi daemons have no console: never open one
           maxBuffer: 50 * 1024 * 1024,
           timeout: 300_000,
           cwd,
@@ -1579,6 +1583,7 @@ export class AntigravityCLIProvider implements LLMProvider {
     try {
       content = withIsolatedCliCwd((cwd) => execFileSync(bin, args, {
         encoding: 'utf8',
+        windowsHide: true, // MCP/Pi daemons have no console: never open one
         maxBuffer: LLM_CLI_MAX_BUFFER_BYTES,
         timeout: LLM_CLI_TIMEOUT_MS,
         cwd,
@@ -1644,6 +1649,7 @@ export class CursorAgentProvider implements LLMProvider {
     try {
       raw = withIsolatedCliCwd((cwd) => execFileSync(bin, args, {
         encoding: 'utf8',
+        windowsHide: true, // MCP/Pi daemons have no console: never open one
         maxBuffer: LLM_CLI_MAX_BUFFER_BYTES,
         timeout: LLM_CLI_TIMEOUT_MS,
         cwd,

@@ -24,6 +24,7 @@ import { getHeapStatistics } from 'node:v8';
 import { totalmem } from 'node:os';
 import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { hideConsoleWindow } from '../utils/console-window.js';
 
 const MB = 1024 * 1024;
 
@@ -371,6 +372,9 @@ export async function maybeReexecForHeap(): Promise<void> {
     const child = spawn(process.execPath, childArgs, {
       stdio: 'inherit',
       env: { ...process.env, [HEAP_REEXEC_MARKER_ENV]: '1' },
+      // The self-heal `analyze` an MCP server or Pi daemon starts has no console; without this,
+      // its re-exec opens an empty console window on Windows on every index repair.
+      windowsHide: hideConsoleWindow(),
     });
     // While the child runs, this process is only its supervisor: a directed signal is passed on.
     // A terminal Ctrl-C reaches the child itself through the foreground process group, so a SIGINT

@@ -16,6 +16,7 @@ import { createRequire } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { logger } from '../../utils/logger.js';
+import { hideConsoleWindow } from '../../utils/console-window.js';
 import {
   formatPlatformCommand,
   resolvePlatformCommand,
@@ -202,7 +203,7 @@ async function versionOnPath(platform: NodeJS.Platform): Promise<string | null> 
 
 function runCommand(cmd: string, args: string[]): Promise<number> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { stdio: 'inherit' });
+    const child = spawn(cmd, args, { stdio: 'inherit', windowsHide: hideConsoleWindow() });
     child.on('error', () => resolve(127));
     child.on('close', (code) => resolve(code ?? 1));
   });
