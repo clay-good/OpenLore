@@ -182,13 +182,18 @@ each changed symbol's strongest class in `symbolEvidence` (change: add-test-evid
 The selection itself does not change. The class is computed without running anything: each linked
 test file is parsed, its test cases found, and the def-use overlay of the test body traced from the
 call to the assertion's value arguments (never a message argument). One helper in the same file is
-followed. A call counts as a call to the symbol only when it provably is one: a bare call the test
-file does not shadow with its own declaration; a method call on an instance of the symbol's class
-(`new C()`, a variable assigned from one); or a call through a namespace imported from the symbol's
-own file (a relative specifier in JS/TS, a dotted module in Python, a module path in Go, never a
-package of the same name). An assertion consuming a mock of the symbol (`vi.mock`, `spyOn`, `patch`)
-is `exercises`, not `asserts-on`. A test whose value flows into an assertion-like call this analysis
-does not know (`should(r)`, a testify suite's `s.Equal`) is a disclosed gap, not `exercises`. The
+followed (a function at module level, never one nested in another test). A call counts as a call to
+the symbol only when it provably is one: a bare call by a name the test file imports the symbol as
+(`import { add as plus } from './math'`, `from shop import price`, the same Go package) and never
+declares itself; a method call on an instance the same test binds to the symbol's class once
+(`const c = new C()`); or a call through a namespace imported from the symbol's own file. A symbol the
+file does not import that way is not matched, an under-claim, never an over-claim. An assertion that a
+call raises (`toThrow`, `pytest.raises`) counts only when the symbol is the raising call itself; an
+assertion inside a callback that may not run (`setTimeout`, `.then`) does not count; a mock-call
+matcher (`toHaveBeenCalledWith`) asserts no value of the symbol. An assertion consuming a mock of the
+symbol (`vi.mock`, `spyOn`, `sinon.stub`, `patch`, `monkeypatch.setattr`) is `exercises`. A test whose
+value flows into an assertion-like call this analysis does not know (`should(r)`, a testify suite's
+`s.Equal`) is a disclosed gap, not `exercises`. The
 recognized frameworks are listed under `assertionRecognition` in [language support](language-support.md).
 `verify_claim` kind `tested` and the `changed-symbol-no-asserting-test` finding of `verify_change`
 use the same classes; the finding is raised only when every linked test file was classified and
@@ -199,14 +204,14 @@ answer):
 
 | Strongest class | Symbols |
 |---|---:|
-| `asserts-on` | 1,393 (21%) |
-| `exercises` | 124 (2%) |
-| `reaches` | 3,928 (59%) |
+| `asserts-on` | 1,362 (20%) |
+| `exercises` | 145 (2%) |
+| `reaches` | 3,938 (59%) |
 | no test relates to it | 1,268 (19%) |
 
-For 228 of them some linked test was not classed (assertions not recognized, or the file uses the
+For 248 of them some linked test was not classed (assertions not recognized, or the file uses the
 symbol only outside test cases), so no finding is raised for them. Classification adds no analysis
 time: it runs when an answer is asked for. Over 60 simulated diffs (up to 20 changed symbols from one
-to three files, each answer starting with an empty cache) one answer took 66 ms at the median, 354 ms
-at the 95th percentile, and about 1 s at most. One answer parses at most 6 MB of test source; a file
+to three files, each answer starting with an empty cache) one answer took 25 ms at the median, 135 ms
+at the 95th percentile, and 0.4 s at most. One answer parses at most 6 MB of test source; a file
 past that is listed as not assessed, never classed.

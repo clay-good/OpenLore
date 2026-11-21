@@ -55,7 +55,7 @@ describe('math', () => {
 `;
 
   it('classes each case by what its assertions consume', async () => {
-    const { parsed, cases } = await classifyTestSource('TypeScript', 'math.test.ts', src, ADD);
+    const { parsed, cases } = await classifyTestSource('TypeScript', 'src/math.test.ts', src, ADD);
     expect(parsed).toBe(true);
     expect(byTest(cases)).toEqual({
       'math > direct return': 'asserts-on',
@@ -71,7 +71,7 @@ describe('math', () => {
   });
 
   it('cites the assertion line, and says why a weaker class was given', async () => {
-    const { cases } = await classifyTestSource('TypeScript', 'math.test.ts', src, ADD);
+    const { cases } = await classifyTestSource('TypeScript', 'src/math.test.ts', src, ADD);
     const direct = cases.find(c => c.test === 'math > direct return')!;
     expect(direct.line).toBe(src.split('\n').findIndex(l => l.includes('expect(r).toBe(3)')) + 1);
     expect(cases.find(c => c.test === 'math > stopped helper')!.reason).toMatch(/helper logAll/);
@@ -87,8 +87,9 @@ const calc = require('./math.js');
 test('node assert', () => { assert.strictEqual(calc.add(1, 2), 3); });
 `, ADD);
     expect(byTest(cases)).toEqual({ 'node assert': 'asserts-on' });
-    const ctor = await classifyTestSource('JavaScript', 'm.test.js', `
+    const ctor = await classifyTestSource('JavaScript', 'src/m.test.js', `
 const assert = require('node:assert');
+const { Counter } = require('./counter.js');
 test('constructor', () => { const c = new Counter(); assert.ok(c); });
 `, { name: 'Counter', filePath: 'src/counter.js' });
     expect(byTest(ctor.cases)).toEqual({ constructor: 'asserts-on' });
@@ -115,7 +116,7 @@ it('other module', () => { expect(util.delete('k')).toBe(true); });
 
 describe('classifyTestSource — guards', () => {
   it('an assertion call is never a call to a production symbol of the same name', async () => {
-    const src = `it('x', () => { expect(parse('a')).toBe(1); assert.ok(true); });\n`;
+    const src = `import { expect as e, ok } from './parser';\nit('x', () => { expect(parse('a')).toBe(1); assert.ok(true); });\n`;
     expect((await classifyTestSource('TypeScript', 'p.test.ts', src, { name: 'expect', filePath: 'src/parser.ts' })).cases).toEqual([]);
     expect((await classifyTestSource('TypeScript', 'p.test.ts', src, { name: 'ok', filePath: 'src/parser.ts' })).cases).toEqual([]);
   });
@@ -123,7 +124,7 @@ describe('classifyTestSource — guards', () => {
   it('a file past the answer\'s parse budget is not parsed, so not classed', async () => {
     const cache = newEvidenceCache();
     cache.parsedBytes = MAX_PARSE_BYTES_PER_ANSWER;
-    expect(await classifyTestSource('TypeScript', 'big.test.ts', `it('x', () => { expect(add(1, 2)).toBe(3); });`, ADD, cache))
+    expect(await classifyTestSource('TypeScript', 'src/big.test.ts', `import { add } from './math';\nit('x', () => { expect(add(1, 2)).toBe(3); });`, ADD, cache))
       .toEqual({ parsed: false, cases: [] });
   });
 });
@@ -199,7 +200,7 @@ func TestPriceCalled(t *testing.T) {
 `;
 
   it('classes an if-guarded t.Error, an initializer, and testify', async () => {
-    const { cases } = await classifyTestSource('Go', 'shop_test.go', src, { name: 'Price', filePath: 'shop/shop.go' });
+    const { cases } = await classifyTestSource('Go', 'shop/shop_test.go', src, { name: 'Price', filePath: 'shop/shop.go' });
     expect(byTest(cases)).toEqual({
       TestPriceIf: 'asserts-on',
       TestPriceInit: 'asserts-on',
@@ -255,9 +256,9 @@ describe('classifyTestSource — never a false asserts-on', () => {
   });
 
   it('a local binding shadows the symbol, in JS, Python and Go', async () => {
-    expect(await cls('TypeScript', 'src/a.test.ts', `it('x', () => { const add = () => 1; expect(add()).toBe(1); });`, ADD)).toEqual({});
-    expect(await cls('Python', 'test_a.py', `def test_x():\n    add = lambda: 1\n    assert add() == 1\n`, { name: 'add', filePath: 'a.py' })).toEqual({});
-    expect(await cls('Go', 'a_test.go', `package a\nfunc TestX(t *testing.T) {\n  Sym := func() int { return 1 }\n  if Sym() != 1 { t.Fatal("x") }\n}\n`, { name: 'Sym', filePath: 'a/a.go' })).toEqual({});
+    expect(await cls('TypeScript', 'src/a.test.ts', `import { add } from './math';\nit('x', () => { const add = () => 1; expect(add()).toBe(1); });`, ADD)).toEqual({});
+    expect(await cls('Python', 'test_a.py', `from a import add\ndef test_x():\n    add = lambda: 1\n    assert add() == 1\n`, { name: 'add', filePath: 'a.py' })).toEqual({});
+    expect(await cls('Go', 'a/a_test.go', `package a\nfunc TestX(t *testing.T) {\n  Sym := func() int { return 1 }\n  if Sym() != 1 { t.Fatal("x") }\n}\n`, { name: 'Sym', filePath: 'a/a.go' })).toEqual({});
   });
 
   it('a module receiver must resolve to the symbol\'s own file, never a package of the same stem', async () => {
@@ -270,42 +271,117 @@ describe('classifyTestSource — never a false asserts-on', () => {
   });
 
   it('only the variable the call is bound to is tainted, not its neighbours on the line', async () => {
-    expect(await cls('TypeScript', 'src/a.test.ts', `it('x', () => { const r = add(1, 2), other = 7; expect(other).toBe(7); });`, ADD)).toEqual({ x: 'exercises' });
-    expect(await cls('Python', 'test_a.py', `def test_x():\n    r, other = add(1), 7\n    assert other == 7\n`, { name: 'add', filePath: 'a.py' })).toEqual({ test_x: 'exercises' });
-    expect(await cls('Go', 'a_test.go', `package a\nfunc TestX(t *testing.T) {\n  got, want := Sym(), 3\n  _ = got\n  if want != 3 { t.Fatal("x") }\n}\n`, { name: 'Sym', filePath: 'a/a.go' })).toEqual({ TestX: 'exercises' });
-    expect(await cls('TypeScript', 'src/a.test.ts', `it('x', () => { let r = add(); r = 5; expect(r).toBe(5); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `import { add } from './math';\nit('x', () => { const r = add(1, 2), other = 7; expect(other).toBe(7); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('Python', 'test_a.py', `from a import add\ndef test_x():\n    r, other = add(1), 7\n    assert other == 7\n`, { name: 'add', filePath: 'a.py' })).toEqual({ test_x: 'exercises' });
+    expect(await cls('Go', 'a/a_test.go', `package a\nfunc TestX(t *testing.T) {\n  got, want := Sym(), 3\n  _ = got\n  if want != 3 { t.Fatal("x") }\n}\n`, { name: 'Sym', filePath: 'a/a.go' })).toEqual({ TestX: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `import { add } from './math';\nit('x', () => { let r = add(); r = 5; expect(r).toBe(5); });`, ADD)).toEqual({ x: 'exercises' });
   });
 
   it('a message argument is not an asserted value', async () => {
-    expect(await cls('JavaScript', 'src/a.test.js', `test('x', () => { assert.ok(true, String(add())); assert.equal(1, 1, \`\${add()}\`); });`, ADD)).toEqual({ x: 'exercises' });
-    expect(await cls('TypeScript', 'src/a.test.ts', `it('x', () => { expect(1, String(add())).toBe(1); });`, ADD)).toEqual({ x: 'exercises' });
-    expect(await cls('Python', 'test_a.py', `class T:\n    def test_x(self):\n        self.assertEqual(1, 1, str(add(1)))\n        self.assertEqual(1, 1, msg=str(add(1)))\n`, { name: 'add', filePath: 'a.py' })).toEqual({ 'T.test_x': 'exercises' });
+    expect(await cls('JavaScript', 'src/a.test.js', `const { add } = require('./math');\ntest('x', () => { assert.ok(true, String(add())); assert.equal(1, 1, \`\${add()}\`); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `import { add } from './math';\nit('x', () => { expect(1, String(add())).toBe(1); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('Python', 'test_a.py', `from a import add\nclass T:\n    def test_x(self):\n        self.assertEqual(1, 1, str(add(1)))\n        self.assertEqual(1, 1, msg=str(add(1)))\n`, { name: 'add', filePath: 'a.py' })).toEqual({ 'T.test_x': 'exercises' });
   });
 
   it('a Go failure counts only on the test\'s own *testing.T', async () => {
     const src = `package a\nfunc TestX(t *testing.T) {\n  v := Sym()\n  if v == nil { _ = fmt.Errorf("skip"); log.Fatal("x") }\n  t.Log("ok")\n}\n`;
-    expect(await cls('Go', 'a_test.go', src, { name: 'Sym', filePath: 'a/a.go' })).toEqual({ TestX: 'reaches' });
+    expect(await cls('Go', 'a/a_test.go', src, { name: 'Sym', filePath: 'a/a.go' })).toEqual({ TestX: 'reaches' });
   });
 
   it('a mocked symbol is at most exercised: the assertion consumes the mock', async () => {
     const src = `import { add } from './math';\nvi.mock('./math', () => ({ add: vi.fn(() => 99) }));\nit('x', () => { expect(add()).toBe(99); });\n`;
     expect(await cls('TypeScript', 'src/m.test.ts', src, ADD)).toEqual({ x: 'exercises' });
-    expect(await cls('Python', 'test_a.py', `@patch("shop.price")\ndef test_x(p):\n    assert price(1) == 2\n`, { name: 'price', filePath: 'shop.py' })).toEqual({ test_x: 'exercises' });
+    expect(await cls('Python', 'test_a.py', `from shop import price\n@patch("shop.price")\ndef test_x(p):\n    assert price(1) == 2\n`, { name: 'price', filePath: 'shop.py' })).toEqual({ test_x: 'exercises' });
   });
 
   it('only the last statement of a pytest.raises block is asserted on', async () => {
-    const src = `def test_x():\n    with pytest.raises(ValueError):\n        v = add(1)\n        parse("bad")\n`;
+    const src = `from a import add\ndef test_x():\n    with pytest.raises(ValueError):\n        v = add(1)\n        parse("bad")\n`;
     expect(await cls('Python', 'test_a.py', src, { name: 'add', filePath: 'a.py' })).toEqual({ test_x: 'exercises' });
   });
 
   it('testify assert.New receivers are recognized; an unknown assertion-like call is a gap, not exercises', async () => {
-    expect(await cls('Go', 'a_test.go', `package a\nfunc TestX(t *testing.T) {\n  a := assert.New(t)\n  a.Equal(3, Sym())\n}\n`, { name: 'Sym', filePath: 'a/a.go' })).toEqual({ TestX: 'asserts-on' });
-    const suite = await classifyTestSource('Go', 'a_test.go', `package a\nfunc TestX(t *testing.T) {\n  assert.True(t, true)\n  s.Equal(3, Sym())\n}\n`, { name: 'Sym', filePath: 'a/a.go' });
+    expect(await cls('Go', 'a/a_test.go', `package a\nfunc TestX(t *testing.T) {\n  a := assert.New(t)\n  a.Equal(3, Sym())\n}\n`, { name: 'Sym', filePath: 'a/a.go' })).toEqual({ TestX: 'asserts-on' });
+    const suite = await classifyTestSource('Go', 'a/a_test.go', `package a\nfunc TestX(t *testing.T) {\n  assert.True(t, true)\n  s.Equal(3, Sym())\n}\n`, { name: 'Sym', filePath: 'a/a.go' });
     expect(suite.cases.map(c => [c.class, c.recognized])).toEqual([['reaches', false]]);
   });
 
   it('a test that calls the symbol and asserts nothing, in a recognized file, is exercises', async () => {
-    const src = `it('a', () => { expect(1).toBe(1); });\nit('b', () => { add(1, 2); });\n`;
+    const src = `import { add } from './math';\nit('a', () => { expect(1).toBe(1); });\nit('b', () => { add(1, 2); });\n`;
     expect(await cls('TypeScript', 'src/a.test.ts', src, ADD)).toEqual({ b: 'exercises' });
+  });
+});
+
+// Adversarial review round 2 of PR #799: each shape once gave a false `asserts-on`.
+describe('classifyTestSource — never a false asserts-on (round 2)', () => {
+  const cls = async (language: string, path: string, src: string, symbol: { name: string; filePath: string; className?: string }) =>
+    byTest((await classifyTestSource(language, path, src, symbol)).cases);
+  const IMPORT = `import { add } from './math';\n`;
+
+  it('a helper nested in one test is never resolved by name from another', async () => {
+    const src = `${IMPORT}it('a', () => { const run = () => add(1); expect(run()).toBe(2); });\nit('b', () => { const run = () => 5; expect(run()).toBe(5); });\n`;
+    expect((await cls('TypeScript', 'src/a.test.ts', src, ADD)).b).toBeUndefined();
+    const py = `from a import add\ndef test_a():\n    def run():\n        return add(1)\n    assert run() == 2\ndef test_b():\n    def run():\n        return 5\n    assert run() == 5\n`;
+    expect((await cls('Python', 'test_a.py', py, { name: 'add', filePath: 'a.py' })).test_b).toBeUndefined();
+  });
+
+  it('an instance name bound in one test, or reassigned, is not proof in another', async () => {
+    const calc = { name: 'add', filePath: 'src/calc.ts', className: 'Calc' };
+    const src = `it('a', () => { const c = new Calc(); c.add(1); });\nit('b', () => { const c = new Other(); expect(c.add(1)).toBe(1); });\nit('c', () => { let c = new Calc(); c = makeOther(); expect(c.add()).toBe(1); });\n`;
+    expect(await cls('TypeScript', 'src/c.test.ts', src, calc)).toEqual({ a: 'exercises' });
+  });
+
+  it('a bare call never matches a method, and must be imported from the symbol\'s module', async () => {
+    expect(await cls('TypeScript', 'src/c.test.ts', `import { add } from './math';\nit('x', () => { expect(add(1, 2)).toBe(3); });`, { name: 'add', filePath: 'src/calc.ts', className: 'Calc' })).toEqual({});
+    expect(await cls('TypeScript', 'src/a.test.ts', `import { sum as add } from './other';\nit('x', () => { expect(add(1)).toBe(1); });`, ADD)).toEqual({});
+    expect(await cls('TypeScript', 'src/u.test.ts', `import { format } from 'date-fns';\nit('x', () => { expect(format(1)).toBe('1'); });`, { name: 'format', filePath: 'src/util.ts' })).toEqual({});
+    expect(await cls('Python', 'test_a.py', `from json import loads\ndef test_x():\n    assert loads('1') == 1\n`, { name: 'loads', filePath: 'a.py' })).toEqual({});
+    // An alias of the real import counts.
+    expect(await cls('TypeScript', 'src/a.test.ts', `import { add as plus } from './math';\nit('x', () => { expect(plus(1)).toBe(1); });`, ADD)).toEqual({ x: 'asserts-on' });
+  });
+
+  it('for-of, catch, with-as, except-as and comprehension bindings shadow the symbol', async () => {
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { for (const add of fns) expect(add()).toBe(1); });`, ADD)).toEqual({});
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { try { f(); } catch (add) { expect(add()).toBe(1); } });`, ADD)).toEqual({});
+    expect(await cls('Python', 'test_a.py', `from a import add\ndef test_x():\n    with ctx() as add:\n        assert add() == 1\n`, { name: 'add', filePath: 'a.py' })).toEqual({});
+    expect(await cls('Python', 'test_a.py', `from a import add\ndef test_x():\n    assert all(add() for add in fns)\n`, { name: 'add', filePath: 'a.py' })).toEqual({});
+  });
+
+  it('destructuring binds only the paired element, and a line of several definitions does not spread taint', async () => {
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { const [r, other] = [add(1), 7]; expect(other).toBe(7); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { const { a, b } = { a: add(1), b: 2 }; expect(b).toBe(2); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => {\n  const r = add(1);\n  const a = r, b = 5;\n  expect(b).toBe(5);\n});`, ADD)).toEqual({ x: 'exercises' });
+  });
+
+  it('more mock forms are detected', async () => {
+    expect(await cls('TypeScript', 'src/m.test.ts', `${IMPORT}vi.mock('@/math');\nit('x', () => { expect(add()).toBe(9); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('TypeScript', 'src/m.test.ts', `${IMPORT}import * as m from './math';\nsinon.stub(m, 'add').returns(9);\nit('x', () => { expect(add()).toBe(9); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('Python', 'test_a.py', `from a import add\ndef test_x(monkeypatch):\n    monkeypatch.setattr('a.add', lambda: 9)\n    assert add() == 9\n`, { name: 'add', filePath: 'a.py' })).toEqual({ test_x: 'exercises' });
+  });
+
+  it('a Go failure inside a nested if or closure does not credit the outer condition', async () => {
+    const src = `package a\nfunc TestX(t *testing.T) {\n  if cfg := Sym(); cfg != nil {\n    if Other() != 1 { t.Errorf("x") }\n  }\n}\n`;
+    expect((await cls('Go', 'a/a_test.go', src, { name: 'Sym', filePath: 'a/a.go' })).TestX).not.toBe('asserts-on');
+  });
+
+  it('message, logger, options and mock-call arguments are not asserted values', async () => {
+    expect(await cls('JavaScript', 'src/a.test.js', `const { add } = require('./math');\ntest('x', () => { assert.fail(add(1)); });`, ADD)).not.toEqual({ x: 'asserts-on' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { expect(spy).toHaveBeenCalledWith(add(1)); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('Python', 'test_a.py', `from a import add\nclass T:\n    def test_x(self):\n        m.assert_called_with(add(1))\n        assert True\n`, { name: 'add', filePath: 'a.py' })).toEqual({ 'T.test_x': 'exercises' });
+  });
+
+  it('an assertion in a callback that may never run does not count; a raises block counts only the outermost call', async () => {
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { setTimeout(() => expect(add()).toBe(1)); expect(true).toBe(true); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('Python', 'test_a.py', `from a import add\ndef test_x():\n    with pytest.raises(E):\n        parse(add(1))\n    assert True\n`, { name: 'add', filePath: 'a.py' })).toEqual({ test_x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { expect(() => parse(add(1))).toThrow(); });`, ADD)).toEqual({ x: 'exercises' });
+    // The symbol itself raising still counts.
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { expect(() => add(NaN)).toThrow(); });`, ADD)).toEqual({ x: 'asserts-on' });
+  });
+
+  it('a file of many cases classifies in time linear in its size', async () => {
+    const cases = (n: number) => IMPORT + Array.from({ length: n }, (_, i) => `it('c${i}', () => { expect(add(${i})).toBe(${i}); });`).join('\n');
+    const t1 = performance.now(); await classifyTestSource('TypeScript', 'src/big1.test.ts', cases(500), ADD); const small = performance.now() - t1;
+    const t2 = performance.now(); await classifyTestSource('TypeScript', 'src/big2.test.ts', cases(2000), ADD); const large = performance.now() - t2;
+    // 4× the cases: well under 16× (quadratic) the time.
+    expect(large).toBeLessThan(small * 10 + 200);
   });
 });

@@ -617,6 +617,10 @@ export async function computeBlastRadius(
   // The counts (tests.count / memory.* / specs.willGoStale / decisions.affected+orphaned /
   // impact.analyzedSymbolCount) remain authoritative and uncapped.
   const capped: string[] = [];
+  const partialEvidence = (testEvidence ?? []).filter(e => e.strongestEvidence !== null && !e.complete).map(e => e.symbol);
+  if (partialEvidence.length > 0) {
+    caveats.push(`Test evidence is partial for ${partialEvidence.slice(0, 5).join(', ')}${partialEvidence.length > 5 ? ` and ${partialEvidence.length - 5} more` : ''} (a linked test file was past a cap, unreadable, or in a form not recognized); no changed-symbol-no-asserting-test finding is raised for them.`);
+  }
   if (testEvidenceOmitted > 0) {
     caveats.push(`Test evidence was not assessed for ${testEvidenceOmitted} changed symbol(s) past the first ${MAX_EVIDENCE_SYMBOLS}; no changed-symbol-no-asserting-test finding is raised for them.`);
   }

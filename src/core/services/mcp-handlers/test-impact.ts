@@ -1001,7 +1001,9 @@ export function evidenceForSelectedTest(t: { test: string; file: string; viaPath
   }
   // A file-level link describes some test in the file; it is this test's only when this test has a
   // reaching path of its own (a same-file fallback or a tier pick has none).
-  if (fileLevel.length > 0 && (t.viaPath?.length ?? 0) > 0) return 'reaches';
+  // A same-file fallback's path is a marker (`(same file as X)`), not a call path.
+  const reached = (t.viaPath ?? []).length > 0 && !(t.viaPath ?? []).some(p => p.startsWith('(same file as'));
+  if (fileLevel.length > 0 && reached) return 'reaches';
   return 'not-assessed';
 }
 

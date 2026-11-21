@@ -594,9 +594,9 @@ describe('verify_claim — tested', () => {
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'claim-tested-'));
     await mkdir(join(dir, 'src'), { recursive: true });
-    await writeFile(join(dir, 'src/asserts.test.ts'), `it('prices', () => {\n  const p = price(2);\n  expect(p).toBe(4);\n});\n`);
-    await writeFile(join(dir, 'src/calls.test.ts'), `it('calls', () => { discount(1); expect(true).toBe(true); });\n`);
-    await writeFile(join(dir, 'src/odd.test.ts'), `it('odd', () => { const r = vat(1); should(r).equal(1); });\n`);
+    await writeFile(join(dir, 'src/asserts.test.ts'), `import { price } from './shop';\nit('prices', () => {\n  const p = price(2);\n  expect(p).toBe(4);\n});\n`);
+    await writeFile(join(dir, 'src/calls.test.ts'), `import { discount } from './shop';\nit('calls', () => { discount(1); expect(true).toBe(true); });\n`);
+    await writeFile(join(dir, 'src/odd.test.ts'), `import { vat } from './shop';\nit('odd', () => { const r = vat(1); should(r).equal(1); });\n`);
     await writeFile(join(dir, 'src/Total.java'), `class TotalTest { @Test void t() { assertEquals(1, net(1)); } }\n`);
     useGraph(
       [prod('price'), prod('discount'), prod('vat'), prod('net'), prod('wrap'), prod('lonely'), node({ id: 'src/x.test.ts::helper', isTest: true })],
@@ -619,8 +619,8 @@ describe('verify_claim — tested', () => {
   it('is confirmed only with an asserting test, citing file, test name and assertion line', async () => {
     const r = await claim('price');
     expect(r.verdict).toBe('confirmed');
-    expect(r.testEvidence.citation).toEqual({ testFile: 'src/asserts.test.ts', test: 'prices', line: 3 });
-    expect(r.reason).toContain('src/asserts.test.ts, line 3');
+    expect(r.testEvidence.citation).toEqual({ testFile: 'src/asserts.test.ts', test: 'prices', line: 4 });
+    expect(r.reason).toContain('src/asserts.test.ts, line 4');
   });
 
   it('is unverifiable, naming the class, when tests only call it', async () => {

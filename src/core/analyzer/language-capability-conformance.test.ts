@@ -261,18 +261,18 @@ describe('language conformance — error propagation overlay', () => {
 
 // ── (4b) Assertion recognition: each claimed language classes an asserted call; others unsupported ──
 describe('language conformance — assertion recognition', () => {
-  const FIX: Array<[string, string, string]> = [
-    ['TypeScript', 'a.test.ts', `it('x', () => { expect(add(1, 2)).toBe(3); });`],
-    ['JavaScript', 'a.test.js', `test('x', () => { assert.equal(add(1, 2), 3); });`],
-    ['Python', 'test_a.py', `def test_x():\n    assert add(1, 2) == 3\n`],
-    ['Go', 'a_test.go', `package a\nfunc TestX(t *testing.T) {\n  if add(1, 2) != 3 {\n    t.Fatal("bad")\n  }\n}\n`],
+  const FIX: Array<[string, string, string, string]> = [
+    ['TypeScript', 'src/a.test.ts', `import { add } from './a';\nit('x', () => { expect(add(1, 2)).toBe(3); });`, 'src/a.ts'],
+    ['JavaScript', 'src/a.test.js', `const { add } = require('./a');\ntest('x', () => { assert.equal(add(1, 2), 3); });`, 'src/a.js'],
+    ['Python', 'test_a.py', `from a import add\ndef test_x():\n    assert add(1, 2) == 3\n`, 'a.py'],
+    ['Go', 'a/a_test.go', `package a\nfunc TestX(t *testing.T) {\n  if add(1, 2) != 3 {\n    t.Fatal("bad")\n  }\n}\n`, 'a/a.go'],
   ];
   it('the fixture set is exactly the claimed set', () => {
     expect(new Set(FIX.map(f => f[0]))).toEqual(ASSERTION_RECOGNITION_LANGUAGES);
   });
-  for (const [language, path, source] of FIX) {
+  for (const [language, path, source, symbolFile] of FIX) {
     it(`${language} classes an asserted call asserts-on`, async () => {
-      const r = await classifyTestSource(language, path, source, { name: 'add', filePath: 'src/a.ts' });
+      const r = await classifyTestSource(language, path, source, { name: 'add', filePath: symbolFile });
       expect(r.parsed).toBe(true);
       expect(r.cases.map(c => c.class)).toEqual(['asserts-on']);
     });
