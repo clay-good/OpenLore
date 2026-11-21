@@ -11,7 +11,7 @@
  */
 
 import { readFile, readdir } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -263,7 +263,9 @@ export async function parseScenarios(opts: {
       continue;
     }
 
-    const specFileRel = specPath.replace(resolve(rootPath) + '/', '');
+    // relative(), not a '/'-suffixed prefix strip: that never matched a Windows path, so the
+    // served specFile stayed absolute there. POSIX on every OS, like every path OpenLore serves.
+    const specFileRel = relative(resolve(rootPath), specPath).split(sep).join('/');
 
     // Split into requirement sections (### Requirement: <name>)
     const reqSections = content.split(/^###\s+Requirement:\s*/m);
