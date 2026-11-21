@@ -18,6 +18,7 @@ import {
   type Capability,
 } from './language-support.js';
 import { cfgSupportsLanguage, CFG_LANGUAGES } from './cfg.js';
+import { ASSERTION_RECOGNITION_LANGUAGES } from './test-evidence.js';
 import { isIacLanguage, IAC_LANGUAGES } from './iac/types.js';
 import { isContractLanguage, CONTRACT_LANGUAGES } from './contract/types.js';
 import { IAC_CODE_BINDING_LANGUAGES } from './iac/deploy-binding.js';
@@ -89,6 +90,13 @@ describe('language-support registry — faithful to live extractor sources', () 
     for (const lang of ALL_LANGUAGES) {
       const claims = languageSupport(lang).capabilities.includes('errorPropagation');
       expect(claims, `errorPropagation mismatch for ${lang}`).toBe(ERRP.has(lang));
+    }
+  });
+
+  it('assertionRecognition cell === ASSERTION_RECOGNITION_LANGUAGES membership for EVERY language (exact, drift-proof)', () => {
+    for (const lang of ALL_LANGUAGES) {
+      const claims = languageSupport(lang).capabilities.includes('assertionRecognition');
+      expect(claims, `assertionRecognition mismatch for ${lang}`).toBe(ASSERTION_RECOGNITION_LANGUAGES.has(lang));
     }
   });
 

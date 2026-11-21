@@ -8467,6 +8467,58 @@ name, callee name or signature.
 - **WHEN** it is analyzed
 - **THEN** the parsed text is the original text
 
+### Requirement: TestRelationshipsCarryAnEvidenceClass
+
+A relationship between a test and a production symbol SHALL carry an evidence class computed from
+the test's body without running the test: `asserts-on` when a recognized assertion in a test that
+runs consumes the symbol's own result along the value's spine (the call itself, through `await`, a
+cast, a comparison, a member read or a method call on the result — never only as an argument to
+another call), `exercises` when the test calls the symbol and no such assertion exists (including a
+skipped test, or an assertion whose failure the test swallows), and `reaches` when the symbol is
+only in the test's transitive call graph. A call SHALL count as a call to the symbol only when its
+identity is proven (imported from the symbol's own module, or on an instance of its imported class);
+where it is not, the relationship SHALL be under-claimed, never over-claimed.
+The order SHALL be `asserts-on` > `exercises` > `reaches`, and a relationship SHALL carry the
+strongest class its evidence supports. `asserts-on` SHALL be described as "an assertion consumed
+this symbol's output," never as proof of correct behavior.
+
+#### Scenario: A direct assertion on a return value
+
+- **WHEN** a test calls a function and asserts on the value it returned
+- **THEN** the relationship is `asserts-on` and cites the assertion line
+
+#### Scenario: A call with no consuming assertion
+
+- **WHEN** a test calls a function for its side effect and asserts only on an unrelated value
+- **THEN** the relationship is `exercises`
+
+#### Scenario: A transitive reach
+
+- **WHEN** a test reaches a symbol only through other functions
+- **THEN** the relationship is `reaches`
+
+#### Scenario: The strongest class wins
+
+- **WHEN** one test asserts on a symbol and another only reaches it
+- **THEN** the symbol's strongest class is `asserts-on` and both relationships stay listed
+
+### Requirement: AssertionRecognitionIsDeclaredPerFramework
+
+Assertion recognition SHALL be declared per test framework in the language-support registry, and
+SHALL be declared supported only where a recognizer identifies the framework's assertion calls and
+their asserted arguments. A relationship in an unrecognized framework SHALL be classed `reaches`
+with the reason stated, and its symbol SHALL NOT be described as untested.
+
+#### Scenario: An unsupported framework reports the gap
+
+- **WHEN** the registry is read for a language whose test framework has no recognizer
+- **THEN** `assertionRecognition` is false
+
+#### Scenario: An unrecognized assertion is disclosed
+
+- **WHEN** a test uses an assertion form no recognizer knows
+- **THEN** the class is `reaches` and the answer says the framework's assertions were not recognized
+
 ## Sub-components
 
 > `SignatureExtractor` is an orchestrator. Each sub-component below implements one logical block.

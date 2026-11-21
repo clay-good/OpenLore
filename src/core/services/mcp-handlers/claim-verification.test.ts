@@ -584,3 +584,80 @@ describe('verify_claim — a negative verdict is capped at a dynamic boundary', 
     expect(kinds).toContain('dynamic-boundary');
   });
 });
+
+// change: add-test-evidence-claims
+describe('verify_claim — tested', () => {
+  let dir: string;
+  const prod = (name: string) => node({ id: `src/shop.ts::${name}` });
+  const testedBy = (name: string, file: string) => edge(`src/shop.ts::${name}`, `${file}::*`, { kind: 'tested_by', calleeName: file });
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'claim-tested-'));
+    await mkdir(join(dir, 'src'), { recursive: true });
+    await writeFile(join(dir, 'src/asserts.test.ts'), `import { price } from './shop';\nit('prices', () => {\n  const p = price(2);\n  expect(p).toBe(4);\n});\n`);
+    await writeFile(join(dir, 'src/calls.test.ts'), `import { discount } from './shop';\nit('calls', () => { discount(1); expect(true).toBe(true); });\n`);
+    await writeFile(join(dir, 'src/odd.test.ts'), `import { vat } from './shop';\nit('odd', () => { const r = vat(1); should(r).equal(1); });\n`);
+    await writeFile(join(dir, 'src/Total.java'), `class TotalTest { @Test void t() { assertEquals(1, net(1)); } }\n`);
+    useGraph(
+      [prod('price'), prod('discount'), prod('vat'), prod('net'), prod('wrap'), prod('lonely'), node({ id: 'src/x.test.ts::helper', isTest: true })],
+      [
+        testedBy('price', 'src/asserts.test.ts'),
+        testedBy('discount', 'src/calls.test.ts'),
+        testedBy('vat', 'src/odd.test.ts'),
+        testedBy('net', 'src/Total.java'),
+        edge('src/shop.ts::wrap', 'src/shop.ts::price'),
+        edge('src/x.test.ts::helper', 'src/shop.ts::wrap'),
+      ],
+    );
+  });
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  const claim = async (subject: string) => await handleVerifyClaim({ directory: dir, kind: 'tested', subject }) as {
+    verdict: string; reason: string; testEvidence: { strongestEvidence: string | null; citation?: { testFile: string; test: string; line: number } };
+  };
+
+  it('is confirmed only with an asserting test, citing file, test name and assertion line', async () => {
+    const r = await claim('price');
+    expect(r.verdict).toBe('confirmed');
+    expect(r.testEvidence.citation).toEqual({ testFile: 'src/asserts.test.ts', test: 'prices', line: 4 });
+    expect(r.reason).toContain('src/asserts.test.ts, line 4');
+  });
+
+  it('is unverifiable, naming the class, when tests only call it', async () => {
+    const r = await claim('discount');
+    expect(r.verdict).toBe('unverifiable');
+    expect(r.testEvidence.strongestEvidence).toBe('exercises');
+    expect(r.reason).toContain('"exercises"');
+  });
+
+  it('is unverifiable, naming the class, when tests only reach it', async () => {
+    const r = await claim('wrap');
+    expect(r.verdict).toBe('unverifiable');
+    expect(r.testEvidence.strongestEvidence).toBe('reaches');
+    expect(r.reason).toContain('"reaches"');
+  });
+
+  it('is unverifiable, naming the gap, when the assertions are not recognized', async () => {
+    const odd = await claim('vat');
+    expect(odd.verdict).toBe('unverifiable');
+    expect(odd.reason).toMatch(/not all recognized/);
+    const java = await claim('net');
+    expect(java.verdict).toBe('unverifiable');
+    expect(java.reason).toMatch(/Java tests are not recognized/);
+  });
+
+  it('is refuted only when no test relates to the symbol at all', async () => {
+    const r = await claim('lonely');
+    expect(r.verdict).toBe('refuted');
+    expect(r.testEvidence.strongestEvidence).toBeNull();
+  });
+
+  it('never says "tested" as a guarantee, nor "untested"', async () => {
+    for (const s of ['price', 'discount', 'wrap', 'vat', 'net', 'lonely']) {
+      const { reason } = await claim(s);
+      expect(reason, s).not.toMatch(/\buntested\b/i);
+      expect(reason, s).not.toMatch(/\b(?:is|are|was|fully|well)\s+tested\b/i);
+    }
+    expect((await claim('price')).reason).toContain('not that its behavior is correct');
+  });
+});

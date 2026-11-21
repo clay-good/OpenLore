@@ -51,6 +51,11 @@ Shipped since 3.6.0 for the same reason:
 - **Dogfooding `blast_radius`:** an empty ADR `**Domains**:` line no longer names `## Context`
   (#787); domain-level ADR matches are one line, not one per ADR (#788); the diff itself is not
   reported as index staleness (#789).
+- **Test evidence (#799):** each test-to-symbol link says whether a test asserts on the symbol's own
+  result, only calls it, or only reaches it, without running anything; `verify_claim` kind `tested`
+  is confirmed only with an asserting test (file, test, line), and `verify_change` flags a changed
+  symbol no recognized test asserts on. A hand-read check on this repository found 257 of 257
+  `asserts-on` links correct ([`2026-11-21-add-test-evidence-claims`](openspec/changes/archive/2026-11-21-add-test-evidence-claims)).
 - **Hook findings and health:** a swallowed error moved across files counts as moved, and its
   fallback is named (#777); a failed hook run records why (#778).
 
@@ -78,7 +83,7 @@ that carries it today, or what it builds on.
 | Item (no folder yet) | What it does for the agent | Carried by |
 |------|----------------------------|------------|
 | `stop-hook-speaks-to-agent` | The before-stop receipt reaches the agent, not only the user, and is silent when nothing is new | `add-verification-feedback-loop` |
-| `intent-check-at-stop` | Before stop, the change is checked against the intent it touches: requirements, asserting tests, decisions | `add-test-evidence-claims`, `adopt-spec-link-status-vocabulary` |
+| `intent-check-at-stop` | Before stop, the change is checked against the intent it touches: requirements, asserting tests, decisions | `add-test-evidence-claims` (shipped, #799), `adopt-spec-link-status-vocabulary` |
 | `test-failure-localization` | A failed test or command points at the line that emitted the error and the changed code that reaches it | `add-log-anchor-conclusions` |
 | `first-session-experience` | The first prompt in a repo gets a short digest; a plan prompt is oriented. Build progress is `hook-reliability` group 9 | `adopt-agent-context-interop`, `add-openspec-proposal-orientation` |
 | `proven-fact-memory` | Durable facts are kept because a session proved them (a failing test and the change that fixed it, a recorded decision, a reverted change), not only when an agent calls `remember`; each is kept or retired by whether later sessions use it. Today memory is code-anchored and goes stale on its own, but what is remembered depends on an opt-in tool | builds on `remember`/`recall` (memory triggers, claim verdicts, anchor verdicts) and the session ledger |
@@ -86,7 +91,6 @@ that carries it today, or what it builds on.
 | Change | Why it helps the agent |
 |--------|------------------------|
 | [`add-verification-feedback-loop`](openspec/changes/add-verification-feedback-loop) | One receipt names every break the diff causes, with proof, while the agent can still fix it |
-| [`add-test-evidence-claims`](openspec/changes/add-test-evidence-claims) | Before it says "this is tested," it knows if a test asserts on the symbol, only calls it, or only reaches it |
 | [`adopt-spec-link-status-vocabulary`](openspec/changes/adopt-spec-link-status-vocabulary) | It sees when it touches code that a requirement covers but no test reaches, or that no requirement asks for |
 | [`add-log-anchor-conclusions`](openspec/changes/add-log-anchor-conclusions) | It starts at the line that emitted an error instead of grepping fragments of a message |
 | [`adopt-agent-context-interop`](openspec/changes/adopt-agent-context-interop) | A few lines of repository shape once per session and five short skills, not a long file every turn |

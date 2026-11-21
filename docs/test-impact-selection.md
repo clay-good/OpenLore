@@ -164,3 +164,58 @@ and the response-level `confidenceBoundary` is unchanged.
 `flakiness: { assessed: false }` states that no test-outcome history is read, so no test is labeled
 flaky. A reader that flags a test only when runs at identical tree-hash inputs disagreed is deferred:
 no local source records per-test outcomes against a tree hash.
+
+## Test evidence: what a selected test does with the change
+
+Selection answers "what do I run". It does not answer "is this verified": a test that reaches a
+function through six layers and asserts on something else is selected the same way as one that
+calls it and checks the result. So each selected test also carries `evidence`, and the answer lists
+each changed symbol's strongest class in `symbolEvidence` (change: add-test-evidence-claims):
+
+| Class | Meaning |
+|---|---|
+| `asserts-on` | A recognized assertion in the test consumes a value from a call to the symbol. Not proof that the behavior is correct. |
+| `exercises` | The test calls the symbol, and no recognized assertion uses a value from that call. |
+| `reaches` | The symbol is only in the test's transitive call graph, or the test's assertions were not recognized (said so in the reason). |
+| `not-assessed` | The test was selected without a link this analysis classes (a tier, a same-file fallback, a symbol past the first 20). |
+
+The selection itself does not change. The class is computed without running anything: each linked
+test file is parsed, its test cases found, and the def-use overlay of the test body traced from the
+call to the assertion's value arguments (never a message argument). One helper in the same file is
+followed (a function at module level, never one nested in another test). A value counts only along
+its spine (the call itself, through `await`, a cast, a comparison, a member read or a method call on
+the result), never as an argument to another call: in `expect(render(add(1)))` the assertion checks
+`render`. A skipped test (`it.skip`, `@pytest.mark.skip`, `t.Skip()`) and an assertion in a `try`
+that swallows its failure check nothing. A call counts as a call to
+the symbol only when it provably is one: a bare call by a name the test file imports the symbol as
+(`import { add as plus } from './math'`, `from shop import price`, the same Go package) and never
+declares itself; a method call on an instance the same test binds to the symbol's class once
+(`const c = new C()`); or a call through a namespace imported from the symbol's own file. A symbol the
+file does not import that way is not matched, an under-claim, never an over-claim. An assertion that a
+call raises (`toThrow`, `pytest.raises`) counts only when the symbol is the raising call itself; an
+assertion inside a callback that may not run (`setTimeout`, `.then`) does not count; a mock-call
+matcher (`toHaveBeenCalledWith`) asserts no value of the symbol. An assertion consuming a mock of the
+symbol (`vi.mock`, `spyOn`, `sinon.stub`, `patch`, `monkeypatch.setattr`) is `exercises`. A test whose
+value flows into an assertion-like call this analysis does not know (`should(r)`, a testify suite's
+`s.Equal`) is a disclosed gap, not `exercises`. The
+recognized frameworks are listed under `assertionRecognition` in [language support](language-support.md).
+`verify_claim` kind `tested` and the `changed-symbol-no-asserting-test` finding of `verify_change`
+use the same classes; the finding is raised only when every linked test file was classified and
+recognized.
+
+Measured on this repository (commit `263ae3c56`, 6,713 production symbols, each classified as its own
+answer):
+
+| Strongest class | Symbols |
+|---|---:|
+| `asserts-on` | 1,307 (19%) |
+| `exercises` | 212 (3%) |
+| `reaches` | 3,926 (58%) |
+| no test relates to it | 1,268 (19%) |
+
+For 236 of them some linked test was not classed (assertions not recognized, or the file uses the
+symbol only outside test cases), so no finding is raised for them. Classification adds no analysis
+time: it runs when an answer is asked for. Over 60 simulated diffs (up to 20 changed symbols from one
+to three files, each answer starting with an empty cache) one answer took 29 ms at the median, 137 ms
+at the 95th percentile, and 0.4 s at most. One answer parses at most 6 MB of test source; a file
+past that is listed as not assessed, never classed.

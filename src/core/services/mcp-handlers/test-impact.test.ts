@@ -26,7 +26,7 @@ vi.mock('../../../utils/git-exec.js', async (importOriginal) => ({
   execFileGit: vi.fn(async () => ({ stdout: '', stderr: '' })),
 }));
 
-import { handleSelectTests, seedsFromSymbols, seedsFromFiles } from './test-impact.js';
+import { handleSelectTests, seedsFromSymbols, seedsFromFiles, evidenceForSelectedTest } from './test-impact.js';
 import { handleReportCoverageGaps } from './coverage-gaps.js';
 import { readCachedContext } from './utils.js';
 import { getChangedFiles } from '../../drift/git-diff.js';
@@ -189,11 +189,28 @@ describe('handleSelectTests', () => {
   // confidenceBoundary wiring (spec: add-confidence-boundary-disclosure). The fixture
   // dir has no fingerprint artifact → staleness silent, so `complete` tracks the basis.
   it('attaches a complete confidenceBoundary on an all-direct selection', async () => {
-    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['bar'] }) as {
-      confidenceBoundary: { complete: boolean; basis: { directEdges: number; synthesizedEdges: number } };
+    // The linked test file is on disk, so its evidence is classified too (an unreadable one would be
+    // a disclosed gap, and the boundary would say so).
+    const dir = await mkdtemp(join(tmpdir(), 'select-complete-'));
+    try {
+      await mkdir(join(dir, 'src'), { recursive: true });
+      await writeFile(join(dir, 'src/bar.test.ts'), `import { bar } from './foo';\nfunction testBar() { expect(bar()).toBe(1); }\nit('bar', () => testBar());\n`);
+      const r = await handleSelectTests({ directory: dir, changedSymbols: ['bar'] }) as {
+        confidenceBoundary: { complete: boolean; basis: { directEdges: number; synthesizedEdges: number } };
+      };
+      expect(r.confidenceBoundary.complete).toBe(true);
+      expect(r.confidenceBoundary.basis.synthesizedEdges).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('discloses test evidence it could not assess, so the boundary is not complete beside the gap', async () => {
+    const r = await handleSelectTests({ directory: '/p-does-not-exist', changedSymbols: ['bar'] }) as {
+      confidenceBoundary: { complete: boolean; incompleteBecause?: Array<{ channel: string; detail: string }> };
     };
-    expect(r.confidenceBoundary.complete).toBe(true);
-    expect(r.confidenceBoundary.basis.synthesizedEdges).toBe(0);
+    expect(r.confidenceBoundary.complete).toBe(false);
+    expect(r.confidenceBoundary.incompleteBecause?.some(x => x.channel === 'disclosures' && /Test evidence is partial/.test(x.detail))).toBe(true);
   });
 
   it('reports incomplete when a test reaches the change through a synthesized edge', async () => {
@@ -798,5 +815,59 @@ describe('select_tests safeguard tiers', () => {
   it('discloses flakiness as not assessed on the nothing-to-select return too', async () => {
     const r = await handleSelectTests({ directory: '/p', changedSymbols: ['noSuchSymbol'] }) as Result;
     expect(r.flakiness.assessed).toBe(false);
+  });
+});
+
+// change: add-test-evidence-claims — each selected test says what it does with the changed symbol.
+describe('handleSelectTests — test evidence', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'select-evidence-'));
+    await mkdir(join(dir, 'src'), { recursive: true });
+    await writeFile(join(dir, 'src/math.test.ts'), `import { add } from './math';\nit('adds', () => { expect(add(1, 2)).toBe(3); });\n`);
+    await writeFile(join(dir, 'src/calls.test.ts'), `import { add } from './math';\nit('calls', () => { add(1, 2); expect(true).toBe(true); });\n`);
+    await writeFile(join(dir, 'src/total.test.ts'), `import { total } from './total';\nit('totals', () => { expect(total()).toBe(3); });\n`);
+    const nodes = [node({ id: 'src/math.ts::add' }), node({ id: 'src/total.ts::total' })];
+    const edges = [
+      edge('src/total.ts::total', 'src/math.ts::add'),
+      edge('src/math.ts::add', 'src/math.test.ts::*', 'tested_by', 'math.test'),
+      edge('src/math.ts::add', 'src/calls.test.ts::*', 'tested_by', 'calls.test'),
+      edge('src/total.ts::total', 'src/total.test.ts::*', 'tested_by', 'total.test'),
+    ];
+    vi.mocked(readCachedContext).mockResolvedValue({ callGraph: graph(nodes, edges) } as never);
+  });
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  it('classes each selected test, and the strongest class per changed symbol, without changing the selection', async () => {
+    const r = await handleSelectTests({ directory: dir, changedSymbols: ['add'] }) as {
+      selectedTests: Array<{ file: string; evidence: string }>;
+      symbolEvidence: Array<{ symbol: string; strongestEvidence: string; relationships: Array<{ testFile: string; class: string; line: number | null }> }>;
+    };
+    expect(Object.fromEntries(r.selectedTests.map(t => [t.file, t.evidence]))).toEqual({
+      'src/math.test.ts': 'asserts-on',
+      'src/calls.test.ts': 'exercises',
+      'src/total.test.ts': 'reaches',
+    });
+    expect(r.symbolEvidence).toHaveLength(1);
+    expect(r.symbolEvidence[0]).toMatchObject({ symbol: 'add', strongestEvidence: 'asserts-on', allRecognized: true });
+    expect(r.symbolEvidence[0].relationships[0]).toMatchObject({ testFile: 'src/math.test.ts', class: 'asserts-on', line: 2 });
+  });
+});
+
+describe('evidenceForSelectedTest', () => {
+  const rel = (testFile: string, test: string | null, cls: 'asserts-on' | 'exercises' | 'reaches') =>
+    ({ testFile, test, class: cls, line: null, recognized: true, reason: '' });
+  const ev = (relationships: ReturnType<typeof rel>[]) => [{ relationships }] as unknown as Parameters<typeof evidenceForSelectedTest>[1];
+
+  it('a Go or Python test case takes its own class; a same-file fallback pick is not assessed', () => {
+    const e = ev([rel('a/a_test.go', 'TestAdd', 'asserts-on'), rel('a/a_test.go', null, 'reaches')]);
+    expect(evidenceForSelectedTest({ test: 'TestAdd', file: 'a/a_test.go', viaPath: ['TestAdd', 'Add'] }, e)).toBe('asserts-on');
+    expect(evidenceForSelectedTest({ test: 'TestMul', file: 'a/a_test.go', viaPath: ['TestMul', '(same file as Untested)'] }, e)).toBe('not-assessed');
+    expect(evidenceForSelectedTest({ test: 'TestNorm', file: 'a/a_test.go', viaPath: ['TestNorm', 'helper', 'Normalize'] }, e)).toBe('reaches');
+  });
+
+  it('a same-named method in two classes is claimed at the weaker class', () => {
+    const e = ev([rel('test_a.py', 'A.test_x', 'asserts-on'), rel('test_a.py', 'B.test_x', 'exercises')]);
+    expect(evidenceForSelectedTest({ test: 'test_x', file: 'test_a.py', viaPath: ['test_x', 'f'] }, e)).toBe('exercises');
   });
 });

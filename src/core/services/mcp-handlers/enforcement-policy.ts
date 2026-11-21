@@ -393,6 +393,14 @@ export const FINDING_CODE_REGISTRY: Record<string, FindingCodeSpec> = {
     description: 'A diff edits a generated or vendored file (recognized header marker, .gitattributes linguist attribute, or excluded path pattern) without also changing its known source or the config entry that regenerates it, or changes a lockfile without a manifest of its ecosystem. A newly added generated file does not fire it.',
     remediation: 'Generated file {subject} was edited without its source; edit the source and regenerate, or record why the hand edit is intended.',
   },
+  // ── test evidence (change: add-test-evidence-claims) ──
+  // Returned by verify_change (so on the before-stop receipt); `openlore enforce` does not collect it.
+  'changed-symbol-no-asserting-test': {
+    defaultClass: 'advisory',
+    source: 'test-evidence',
+    description: 'A symbol the diff changed has tests in a recognized framework, and none of them asserts on its output: they only call it or reach it. Never raised when a related test\'s assertions were not recognized.',
+    remediation: '{subject} has no test that asserts on its output; write the assertion, or record why not.',
+  },
   // ── check weakening (add-check-weakening-findings) ──
   // Returned by structural_diff and verify_change, listed by `openlore review`; `openlore enforce` does not collect them.
   'test-removed': {
