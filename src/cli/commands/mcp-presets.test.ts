@@ -708,8 +708,10 @@ describe('tools/list payload budget (spec-28)', () => {
     // Substrate adds three governance reads plus the two spec-workflow composites to the
     // navigation core. The 19_000 → 21_000 bump is the measured cost of making Generate
     // and Repair available to a default capable MCP host, with no internal LLM calls.
+    // 21_000 → 21_100: verify_claim's `tested` kind (change: add-test-evidence-claims), measured
+    // 21,053 B; the wording was kept short first.
     expect(payloadBytes({})).toBe(payloadBytes({ preset: 'substrate' }));
-    expect(payloadBytes({})).toBeLessThan(21_000);
+    expect(payloadBytes({})).toBeLessThan(21_100);
     expect(payloadBytes({})).toBeLessThan(payloadBytes({ preset: 'full' }));
   });
 
@@ -727,7 +729,7 @@ describe('tools/list payload budget (spec-28)', () => {
   // the full surface (governance reads only, no inventories/specs/coordination), so
   // an out-of-box agent on the default surface still pays only a small prefix.
   it('substrate preset (navigation + spec workflows + governance reads) stays well under the full surface', () => {
-    expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(21_000);
+    expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(21_100);
     expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(payloadBytes({ preset: 'full' }));
     expect(payloadBytes({ preset: 'substrate' })).toBeGreaterThan(payloadBytes({ preset: 'navigation' }));
   });

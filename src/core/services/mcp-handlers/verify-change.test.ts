@@ -68,6 +68,47 @@ describe('projectVerifyReceipt', () => {
     expect(r.items).toEqual([]);
   });
 
+  // change: add-test-evidence-claims
+  it('raises changed-symbol-no-asserting-test for a changed symbol whose recognized tests do not assert on it', () => {
+    const testEvidence = [
+      { symbol: 'f', file: 'src/a.ts', strongestEvidence: 'reaches', allRecognized: true },
+      { symbol: 'g', file: 'src/a.ts', strongestEvidence: 'asserts-on', allRecognized: true },
+      { symbol: 'h', file: 'src/b.ts', strongestEvidence: 'exercises', allRecognized: true },
+      { symbol: 'k', file: 'src/c.ts', strongestEvidence: null, allRecognized: true },
+    ];
+    const toRun = [{ test: 'a.test', file: 'src/a.test.ts', confidence: 'high', evidence: 'reaches' }];
+    const b = briefing({ changed: { files: 3, symbols: 4, symbolNames: ['f', 'g', 'h', 'k'], testEvidence }, tests: { count: 1, toRun, files: ['src/a.test.ts'], soundness: null } });
+    const r = projectVerifyReceipt(b, {}) as unknown as Receipt & { findings: Array<{ code: string; subject: string; location?: { path: string } }> };
+    expect(r.findings.map(f => [f.code, f.subject])).toEqual([
+      ['changed-symbol-no-asserting-test', 'f (src/a.ts)'],
+      ['changed-symbol-no-asserting-test', 'h (src/b.ts)'],
+    ]);
+    expect(r.findings[0].location).toEqual({ path: 'src/a.ts' });
+    expect(r.items.filter(i => i.check === 'test_evidence').map(i => i.subject)).toEqual([
+      'f changed; its tests only reach it through other functions',
+      'h changed; its tests call it, but no recognized assertion uses its output',
+    ]);
+    expect(r.summary.changedSymbolsWithoutAssertingTest).toBe(2);
+    // The tests to run are the selection, unchanged, each with its evidence.
+    expect(r.testsToRun.toRun).toEqual(toRun);
+  });
+
+  it('never raises the finding when a related test framework was not recognized, and says so', () => {
+    const testEvidence = [{ symbol: 'f', file: 'src/a.ts', strongestEvidence: 'reaches', allRecognized: false }];
+    const b = briefing({ changed: { files: 1, symbols: 1, symbolNames: ['f'], testEvidence } });
+    const r = projectVerifyReceipt(b, {}) as unknown as Receipt & { findings?: unknown[] };
+    expect(r.findings).toBeUndefined();
+    expect(r.boundaries.some(x => /not all recognized/.test(x) && x.includes('f'))).toBe(true);
+  });
+
+  it('an enforcement policy can turn the finding off', () => {
+    const testEvidence = [{ symbol: 'f', file: 'src/a.ts', strongestEvidence: 'reaches', allRecognized: true }];
+    const b = briefing({ changed: { files: 1, symbols: 1, symbolNames: ['f'], testEvidence } });
+    const r = projectVerifyReceipt(b, {}, undefined, { 'changed-symbol-no-asserting-test': 'off' } as never) as unknown as Receipt & { findings?: unknown[] };
+    expect(r.findings).toBeUndefined();
+    expect(r.items.some(i => i.check === 'test_evidence')).toBe(false);
+  });
+
   it('surfaces tests-unavailable honestly', () => {
     const b = briefing({ tests: { count: 0, toRun: [], soundness: null, unavailable: 'select_tests threw' } });
     const r = projectVerifyReceipt(b, {}) as unknown as Receipt;

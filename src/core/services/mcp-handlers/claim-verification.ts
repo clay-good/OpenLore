@@ -8,7 +8,7 @@
  * checked-or-flagged, and makes the agent's output auditable.
  *
  *   claim   = { kind: 'calls'|'reaches'|'dead'|'impacts'|'safe-to-change'|'decision-current'
- *              |'decision-governed'|'endpoint-implemented'|'endpoint-consumed'|'lease-current', subject, object? }
+ *              |'decision-governed'|'endpoint-implemented'|'endpoint-consumed'|'lease-current'|'tested', subject, object? }
  *   verdict = { verdict: 'confirmed'|'refuted'|'unverifiable', reason, receipt?, confidenceBoundary }
  *
  * Every verdict is a deterministic computation, never an LLM judgement and never a
@@ -23,6 +23,9 @@
  *                        separate truly-unreached from reached-only-via-heuristic.
  *   - `safe-to-change` → no internal caller depends on subject (blast radius is
  *                        empty by directly-resolved edges).
+ *   - `tested`         → a test's recognized assertion consumes subject's output
+ *                        (change: add-test-evidence-claims); a test that only calls
+ *                        or reaches it is `unverifiable`, never `confirmed`.
  * The decision kind computes over the recorded decision store instead (change:
  * add-decision-reference-claim-verification):
  *   - `decision-current` → the subject decision id is recorded and neither
@@ -66,13 +69,14 @@ import { buildRetirementGraph } from './stale-decision-reference.js';
 import { ARTIFACT_FINGERPRINT, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../../constants.js';
 import type { SerializedCallGraph, FunctionNode } from '../../analyzer/call-graph.js';
 import { MESSAGE_TOPOLOGY_RULE } from '../../analyzer/message-topology.js';
+import { symbolTestEvidence } from '../../analyzer/test-evidence.js';
 import type { GroundingCertificate, StructuralAnchor, PendingDecision } from '../../../types/index.js';
 
 export type ClaimKind = 'calls' | 'reaches' | 'dead' | 'impacts' | 'safe-to-change' | 'decision-current'
-  | 'decision-governed' | 'endpoint-implemented' | 'endpoint-consumed' | 'lease-current';
+  | 'decision-governed' | 'endpoint-implemented' | 'endpoint-consumed' | 'lease-current' | 'tested';
 const CLAIM_KINDS: ReadonlySet<string> = new Set<ClaimKind>([
   'calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current',
-  'decision-governed', 'endpoint-implemented', 'endpoint-consumed', 'lease-current',
+  'decision-governed', 'endpoint-implemented', 'endpoint-consumed', 'lease-current', 'tested',
 ]);
 /** Kinds over contracts and governance, evaluated in `claim-kinds-graph.ts` (change: add-graph-claim-kinds). */
 const GRAPH_KINDS: ReadonlySet<ClaimKind> = new Set<ClaimKind>(['decision-governed', 'endpoint-implemented', 'endpoint-consumed', 'lease-current']);
@@ -121,6 +125,8 @@ interface ClaimResult {
   basisEdges?: BoundaryEdge[];
   /** Symbol-name chain to surface in the receipt (reaches/impacts paths). */
   receiptVia?: string[];
+  /** Fields a kind adds to the answer beside the verdict (the `tested` kind's evidence). */
+  extra?: Record<string, unknown>;
 }
 
 /** A code node we can reason about (not an external symbol). */
@@ -420,6 +426,68 @@ async function verifyDead(absDir: string, cg: SerializedCallGraph, subject: Func
  * resolved backward caller set is empty; unverifiable when subject is called via
  * synthesized dynamic dispatch (callers cannot be fully enumerated).
  */
+/**
+ * `tested` (change: add-test-evidence-claims): `confirmed` only when a test's assertion consumes the
+ * subject's output, citing the test file, test name and assertion line; `refuted` only when no test
+ * relates to it at all and nothing could hide one; `unverifiable` otherwise, naming the strongest
+ * class found or the unrecognized framework. "An assertion consumed its output" is not a claim that
+ * its behavior is correct, and no answer here says it is.
+ */
+async function verifyTested(absDir: string, cg: SerializedCallGraph, subject: FunctionNode): Promise<ClaimResult> {
+  const ev = await symbolTestEvidence(absDir, cg, subject);
+  const listed = ev.relationships.slice(0, 10);
+  const extra = {
+    testEvidence: {
+      strongestEvidence: ev.strongest,
+      allRecognized: ev.allRecognized,
+      relationships: listed,
+      ...(ev.relationships.length - listed.length + ev.omittedRelationships > 0
+        ? { omittedRelationships: ev.relationships.length - listed.length + ev.omittedRelationships } : {}),
+      ...(ev.omittedFiles > 0 ? { omittedFiles: ev.omittedFiles } : {}),
+      ...(ev.notAssessed.length > 0 ? { notAssessed: ev.notAssessed } : {}),
+    },
+  };
+  const name = subject.name;
+  if (ev.strongest === 'asserts-on') {
+    const cite = ev.relationships.find(r => r.class === 'asserts-on')!;
+    return {
+      verdict: 'confirmed',
+      reason: `An assertion consumes the output of "${name}": test "${cite.test}" in ${cite.testFile}, line ${cite.line}. `
+        + 'This shows an assertion uses its output, not that its behavior is correct.',
+      extra: { ...extra, testEvidence: { ...extra.testEvidence, citation: { testFile: cite.testFile, test: cite.test, line: cite.line } } },
+    };
+  }
+  if (ev.strongest === null) {
+    const graphHasTests = cg.nodes.some(n => n.isTest) || cg.edges.some(e => e.kind === 'tested_by');
+    if (!graphHasTests) {
+      return { verdict: 'unverifiable', reason: `No test was detected anywhere in the index, so whether a test relates to "${name}" is not known; check test detection for this language.`, extra };
+    }
+    if (ev.reachTruncated) {
+      return { verdict: 'unverifiable', reason: `No test relates to "${name}" within the walk's depth cap; a test further up its callers may exist.`, extra };
+    }
+    const hit = await dynamicHitFor(absDir, subject);
+    if (hit) {
+      return { verdict: 'unverifiable', reason: `No test relates to "${name}" in the graph, but ${qualificationReason(hit)}, so a test could reach it without an edge.`, extra };
+    }
+    return { verdict: 'refuted', reason: `No test calls or reaches "${name}" in the indexed call graph.`, extra };
+  }
+  if (!ev.allRecognized) {
+    const gaps = ev.relationships.filter(r => !r.recognized).map(r => r.reason);
+    return {
+      verdict: 'unverifiable',
+      reason: `Tests relate to "${name}", but their assertions were not all recognized (${[...new Set(gaps)].slice(0, 2).join('; ')}), so whether one asserts on its output is not known. The strongest class found is "${ev.strongest}".`,
+      extra,
+    };
+  }
+  return {
+    verdict: 'unverifiable',
+    reason: ev.strongest === 'exercises'
+      ? `The strongest test evidence for "${name}" is "exercises": a test calls it, but no recognized assertion uses its output.`
+      : `The strongest test evidence for "${name}" is "reaches": tests reach it only through other functions, and none calls it and asserts on the result.`,
+    extra,
+  };
+}
+
 function verifySafeToChange(cg: SerializedCallGraph, subject: FunctionNode): ClaimResult {
   const directCallers = new Set<string>();
   let synthesizedCallers = 0;
@@ -707,6 +775,7 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
     case 'impacts':       result = verifyReach(cg, subject, objNode!, 'impacts'); break;
     case 'dead':          result = await verifyDead(absDir, cg, subject); break;
     case 'safe-to-change': result = verifySafeToChange(cg, subject); break;
+    case 'tested':        result = await verifyTested(absDir, cg, subject); break;
     default:              return { error: `Unhandled claim kind "${input.kind}".` };
   }
 
@@ -779,6 +848,7 @@ export async function handleVerifyClaim(input: VerifyClaimInput): Promise<unknow
     verdict: result.verdict,
     reason: result.reason,
     ...(receipt ? { receipt } : {}),
+    ...(result.extra ?? {}),
     confidenceBoundary,
   };
 }

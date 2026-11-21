@@ -34,7 +34,8 @@ import {
   hasPushableMemory, hasSpecDomainTrigger, injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW,
   type InjectedMemory, type StaleTriggeredMemory,
 } from './memory-triggers.js';
-import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols } from './test-impact.js';
+import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols, type SymbolEvidenceSummary, type TestEvidence } from './test-impact.js';
+import type { EvidenceClass } from '../../analyzer/test-evidence.js';
 import {
   carriedCaveat,
   granularityCaveat,
@@ -161,6 +162,12 @@ export interface BlastRadiusBriefing {
     symbolNames: string[];
     /** Seeded because they name a changed symbol, or hold a dynamic-dispatch site — not changed. */
     alsoSeeded?: number;
+    /**
+     * Each changed symbol's strongest test evidence (change: add-test-evidence-claims): `asserts-on`
+     * means an assertion consumed its output, not that its behavior is correct; null means no test
+     * relates to it. `allRecognized` is false when some related test's assertions were not recognized.
+     */
+    testEvidence?: Array<{ symbol: string; file: string; strongestEvidence: EvidenceClass | null; allRecognized: boolean }>;
   };
   /**
    * How precisely the changed symbols were identified (change: add-symbol-content-hashes): files
@@ -182,7 +189,8 @@ export interface BlastRadiusBriefing {
   };
   tests: {
     count: number;
-    toRun: Array<{ test: string; file: string; confidence: string }>;
+    /** `evidence`: what the test does with the changed symbols (change: add-test-evidence-claims). */
+    toRun: Array<{ test: string; file: string; confidence: string; evidence?: TestEvidence }>;
     /**
      * Every test file the selection names, most confident first: what to pass to the test runner.
      * `toRun` lists single tests and is cut at 15; this list is cut only at {@link MAX_TEST_FILES}.
@@ -414,7 +422,8 @@ export async function computeBlastRadius(
 
   // ── 3. Tests to run (reuse select_tests over the same diff) ─────────────────
   let testCount = 0;
-  let testToRun: Array<{ test: string; file: string; confidence: string }> = [];
+  let testToRun: Array<{ test: string; file: string; confidence: string; evidence?: TestEvidence }> = [];
+  let testEvidence: SymbolEvidenceSummary[] | undefined;
   let testFiles: string[] = [];
   let testSoundness: unknown;
   let testsTruncatedAtDepth: number | undefined;
@@ -430,7 +439,8 @@ export async function computeBlastRadius(
       ...(input.federationRepos ? { federationRepos: input.federationRepos } : {}),
     // Reuse the changed-set computed above: same base ref, same diff, provably the same answer.
     }, { changedSet: narrowed.set }) as {
-      selectedTests?: Array<{ test: string; file: string; confidence: string }>;
+      selectedTests?: Array<{ test: string; file: string; confidence: string; evidence?: TestEvidence }>;
+      symbolEvidence?: SymbolEvidenceSummary[];
       soundness?: unknown;
       truncatedAtDepth?: number;
       federation?: Record<string, unknown>;
@@ -441,6 +451,7 @@ export async function computeBlastRadius(
     // select_tests ranks by confidence, then file: the first sighting of a file is its best rank.
     testFiles = [...new Set(tests.map(t => t.file))];
     testSoundness = sel.soundness;
+    testEvidence = sel.symbolEvidence;
     testsTruncatedAtDepth = sel.truncatedAtDepth;
     federationResult = sel.federation;
   } catch (err) {
@@ -670,6 +681,12 @@ export async function computeBlastRadius(
       symbols: seeds.length - (narrowed.seededUnchanged ?? 0),
       symbolNames: seeds.filter(s => !narrowed.unchangedSeedIds?.has(s.id)).slice(0, 30).map(s => s.name),
       ...((narrowed.seededUnchanged ?? 0) > 0 ? { alsoSeeded: narrowed.seededUnchanged } : {}),
+      ...(testEvidence ? {
+        testEvidence: testEvidence
+          // A seed kept for another reason did not change: its evidence is not this change's.
+          .filter(e => !seeds.some(s => narrowed.unchangedSeedIds?.has(s.id) && s.name === e.symbol && s.filePath === e.file))
+          .map(e => ({ symbol: e.symbol, file: e.file, strongestEvidence: e.strongestEvidence, allRecognized: e.allRecognized })),
+      } : {}),
     },
     ...(changeGranularity ? { changeGranularity } : {}),
     impact: {
