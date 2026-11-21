@@ -1,7 +1,7 @@
 /** Where this project's spec files are, from its configured `openspecPath`. */
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { relative } from 'node:path';
 import { OPENSPEC_DIR } from '../../../constants.js';
-import { resolveOpenspecDir } from '../../../utils/openspec-dir.js';
+import { readerOpenspecDir, resolveOpenspecDir } from '../../../utils/openspec-dir.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { indexedSpecContentProvenance } from '../served-content.js';
 
@@ -16,24 +16,16 @@ export async function configuredSpecRoot(
   absDir: string,
   options: {
     /**
-     * For callers that only read. A root whose path stays in the project but whose real
-     * location does not (a corpus folder symlinked from elsewhere in a monorepo) makes the
-     * confined resolution throw; a reader then gets the in-project path, as it did before it
-     * followed `openspecPath`. Writers leave this off, so they still refuse such a root.
+     * For callers that wrote nothing outside the project before they followed `openspecPath`
+     * (readers, and `digest --save`, which joined without confinement). When the confined
+     * resolution fails — a corpus folder symlinked from elsewhere in a monorepo — they get the
+     * in-project path (`readerOpenspecDir`). Writers that refused such a root leave this off.
      */
     readOnly?: boolean;
   } = {},
 ): Promise<{ absolute: string; relative: string }> {
   const configured = (await readOpenLoreConfig(absDir).catch(() => null))?.openspecPath ?? OPENSPEC_DIR;
-  let absolute: string;
-  try {
-    absolute = resolveOpenspecDir(absDir, configured);
-  } catch (error) {
-    if (!options.readOnly) throw error;
-    const lexical = resolve(absDir, configured);
-    const inside = relative(resolve(absDir), lexical);
-    absolute = inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside) ? resolve(absDir, OPENSPEC_DIR) : lexical;
-  }
+  const absolute = options.readOnly ? readerOpenspecDir(absDir, configured) : resolveOpenspecDir(absDir, configured);
   const relativePath = relative(absDir, absolute).replaceAll('\\', '/');
   return { absolute, relative: relativePath || '.' };
 }

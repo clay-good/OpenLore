@@ -12,10 +12,11 @@
  * command and several times within one, and repeating the line would bury it.
  */
 
-import { relative } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { colorForStderr } from './colors.js';
 import { logger } from './logger.js';
 import { sanitizeForTerminal } from './misc.js';
+import { OPENSPEC_DIR } from '../constants.js';
 import { safeOpenspecDir } from './path-confinement.js';
 
 const disclosed = new Set<string>();
@@ -35,10 +36,27 @@ export function resolveOpenspecDir(absRoot: string, configuredPath: string | und
 }
 
 /**
- * {@link resolveOpenspecDir}, as a repository-relative POSIX path (`.` for the root itself),
- * for callers that pass the spec root on as a relative path. Passing the raw config value
- * instead read outside the project (`../x/specs`) or threw on it.
+ * {@link resolveOpenspecDir} for readers, which must not fail where a plain join did not. When
+ * the confined resolution fails — the corpus folder's path stays in the project but its real
+ * location does not (a folder symlinked from elsewhere in a monorepo), or it cannot be resolved —
+ * this returns the in-project path, or the default when even that escapes. A writer uses
+ * {@link resolveOpenspecDir} and is refused instead.
+ */
+export function readerOpenspecDir(absRoot: string, configuredPath: string | undefined): string {
+  try {
+    return resolveOpenspecDir(absRoot, configuredPath);
+  } catch {
+    const lexical = resolve(absRoot, configuredPath || OPENSPEC_DIR);
+    const inside = relative(resolve(absRoot), lexical);
+    return inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside) ? resolve(absRoot, OPENSPEC_DIR) : lexical;
+  }
+}
+
+/**
+ * {@link readerOpenspecDir} as a repository-relative POSIX path (`.` for the root itself), for
+ * readers that pass the spec root on as a relative path. Passing the raw config value instead
+ * read outside the project (`../x/specs`).
  */
 export function confinedOpenspecRel(absRoot: string, configuredPath: string | undefined): string {
-  return relative(absRoot, resolveOpenspecDir(absRoot, configuredPath)).replaceAll('\\', '/') || '.';
+  return relative(absRoot, readerOpenspecDir(absRoot, configuredPath)).replaceAll('\\', '/') || '.';
 }

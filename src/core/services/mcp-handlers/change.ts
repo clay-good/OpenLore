@@ -2,7 +2,8 @@
  * MCP tool handler: generate_change_proposal
  *
  * Given a story description (BMAD story, free-form intent, or spec delta request),
- * produces a populated OpenSpec change proposal at openspec/changes/{slug}/proposal.md.
+ * produces a populated OpenSpec change proposal at <spec root>/changes/{slug}/proposal.md
+ * (the spec root is the configured `openspecPath`, default `openspec`).
  *
  * The proposal is built from pure structural analysis — no LLM required:
  *   - orient()        → affected functions, spec domains, insertion points
