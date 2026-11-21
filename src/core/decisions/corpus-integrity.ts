@@ -815,7 +815,7 @@ async function readADRDecisions(
   try {
     const entries = await readdir(safeJoin(rootPath, relative(rootPath, decisionsDir)));
     if (entries.length > CORPUS_RESOURCE_LIMITS.directoryEntries) {
-      throw new Error(`openspec/decisions exceeds corpus directory-entry limit (${CORPUS_RESOURCE_LIMITS.directoryEntries})`);
+      throw new Error(`${relative(rootPath, decisionsDir).split(sep).join('/')} exceeds corpus directory-entry limit (${CORPUS_RESOURCE_LIMITS.directoryEntries})`);
     }
     files = entries.filter((name) => name.endsWith('.md')).sort(stableCompare);
   } catch (error) {

@@ -633,7 +633,7 @@ async function createADR(
   try {
     decisionsDir = safeJoin(options.rootPath, join(options.openspecPath, 'decisions'));
   } catch {
-    logger.warning('openspec/decisions resolves outside the project — skipping ADR creation');
+    logger.warning(`${join(options.openspecPath, 'decisions')} resolves outside the project — skipping ADR creation`);
     return null;
   }
   await mkdir(decisionsDir, { recursive: true });

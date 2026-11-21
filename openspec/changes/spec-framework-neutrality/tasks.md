@@ -74,19 +74,29 @@ builders edit `src/`, `docs/`, `skills/`, `examples/`, `plugin/` later. Lines ar
 
 ## 5. Hard-coded `openspec` sites honor `openspecPath`
 
-- [ ] 5.1 Handlers `orient.ts`, `blast-radius.ts`, `semantic.ts`, `change.ts`, `working-set.ts`.
+- [x] 5.1 Handlers `orient.ts`, `blast-radius.ts`, `semantic.ts`, `change.ts`, `working-set.ts`.
   Tests: beside. Done when: `openspecPath: "docs"` serves `docs/specs/<domain>/spec.md` from all 5.
-  Progress (2026-11-15): `orient`, `blast-radius` and `semantic` (search_specs, search_unified) read
-  the configured root for spec paths and provenance (#771, #773). Open: `change.ts` (proposal
-  writing) and `working-set.ts` (the spec store's own layout).
-- [ ] 5.2 CLI and Pi: `src/cli/commands/{change-status,test,analyze,digest,import,doctor,refresh-stories}.ts`,
+  Built: `orient`, `blast-radius`, `semantic` (#771, #773); `generate_change_proposal` writes
+  `<spec root>/changes/<slug>/proposal.md`; `working_set_context` reads the store's own `openspecPath`.
+- [x] 5.2 CLI and Pi: `src/cli/commands/{change-status,test,analyze,digest,import,doctor,refresh-stories}.ts`,
   `src/cli/manifest/emit.ts`, `src/pi/extension.ts`. Tests: beside. Done when: the `docs` fixture
   gives the same results as the default layout for each command.
-- [ ] 5.3 Core: `codebase-digest.ts`, `scenario-parser.ts`, `corpus-intent-review.ts`, `git-diff.ts`,
+  Built: `change-status` reads the moved corpus and reports the OpenSpec CLI check as not assessed
+  there (the CLI finds only `openspec/`); `digest` reads and `--save`s at the root; `doctor`,
+  `refresh-stories`, `import`, `manifest emit` and Pi's spec index use it. `analyze` already did;
+  `test` reads specs through `scenario-parser` (5.3). `analyze`'s `defaultSpecsDir` stays the
+  default on purpose (an empty folder there is OpenLore's own).
+- [x] 5.3 Core: `codebase-digest.ts`, `scenario-parser.ts`, `corpus-intent-review.ts`, `git-diff.ts`,
   `decisions/extractor.ts`, `verification-engine.ts`, `artifact-generator.ts`, `adr-generator.ts`.
   Tests: beside. Done when: `grep -rn "'openspec/\|\"openspec/\|\`openspec/" src --include="*.ts"`
   outside tests, the OpenSpec adapter, the generator and `src/constants.ts` returns 0 lines.
-  Progress (2026-11-15): `codebase-digest.ts` lists spec domains from the configured root (#773).
+  Built: `codebase-digest` (#773), `scenario-parser`, `extractor`, `verification-engine`,
+  `artifact-generator` follow the root. `git-diff` and `corpus-intent-review` key corpus files
+  under `openspec/` on purpose (a canonical namespace mapped to the configured root on disk), and
+  `adr-generator` paths are mapped the same way by the spec writer. The grep now finds no path
+  OpenLore reads or writes: comments, the `test` help example, the uninstall note (11.1), the
+  text saying the OpenSpec CLI looks for `openspec/` (`spec-workflow.ts`), and the unused
+  `errors.openspecExists` message.
 
 ## 6. Adapter: Spec Kit
 

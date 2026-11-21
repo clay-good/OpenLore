@@ -48,6 +48,12 @@ vi.mock('./graph.js', () => ({
   handleAnalyzeImpact: vi.fn(async () => ({ error: 'no cache' })),
 }));
 
+// The configured spec root (`openspecPath`); a test sets it to check a moved corpus.
+let mockSpecRoot = 'openspec';
+vi.mock('./spec-paths.js', () => ({
+  configuredSpecRoot: vi.fn(async (absDir: string) => ({ absolute: `${absDir}/${mockSpecRoot}`, relative: mockSpecRoot })),
+}));
+
 type AnyFn = (...args: any[]) => any;
 const mockFs = {
   mkdir: vi.fn() as ReturnType<typeof vi.fn<AnyFn>>,
@@ -79,6 +85,7 @@ const mockImpact = vi.mocked(handleAnalyzeImpact);
 describe('handleGenerateChangeProposal', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSpecRoot = 'openspec';
     mockOrient.mockResolvedValue({ relevantFunctions: [], specDomains: [], insertionPoints: [] });
     mockSearchSpecs.mockResolvedValue({ results: [] });
     mockImpact.mockResolvedValue({ error: 'no cache' });
@@ -101,6 +108,20 @@ describe('handleGenerateChangeProposal', () => {
     const result = await handleGenerateChangeProposal('/proj', 'desc', 'Add Payment RETRY') as Record<string, unknown>;
     expect(result.slug).toBe('add-payment-retry');
     expect(result.proposalPath).toBe('openspec/changes/add-payment-retry/proposal.md');
+  });
+
+  it('writes the proposal under the configured openspecPath, not a fixed openspec/', async () => {
+    mockSpecRoot = 'docs';
+    const result = await handleGenerateChangeProposal('/proj', 'Add payment retry', 'add-payment-retry') as Record<string, unknown>;
+    expect(result.proposalPath).toBe('docs/changes/add-payment-retry/proposal.md');
+    expect(result.nextStep).toContain('docs/changes/add-payment-retry/proposal.md');
+    expect(mockFs.mkdir).toHaveBeenCalledWith(resolve('/proj', 'docs', 'changes', 'add-payment-retry'), { recursive: true });
+  });
+
+  it('a spec root of "." keeps changes in changes/ at the repository root', async () => {
+    mockSpecRoot = '.';
+    const result = await handleGenerateChangeProposal('/proj', 'Add payment retry', 'add-payment-retry') as Record<string, unknown>;
+    expect(result.proposalPath).toBe('changes/add-payment-retry/proposal.md');
   });
 
   it('writes proposal.md to the correct path', async () => {

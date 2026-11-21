@@ -109,6 +109,21 @@ describe('runManifestEmit (end-to-end)', () => {
     expect(manifest.languages).toEqual([{ name: 'typescript', files: 2, functions: 2 }]);
   });
 
+  it('counts specs at the configured openspecPath', async () => {
+    write('docs/specs/billing/spec.md', '# Billing\n');
+    write('docs/specs/payments/spec.md', '# Payments\n');
+    write('.openlore/config.json', JSON.stringify({
+      version: '1.0.0', projectType: 'unknown', openspecPath: 'docs',
+      analysis: { maxFiles: 1000, includePatterns: [], excludePatterns: [] },
+      generation: { model: 'x', domains: 'auto' },
+      createdAt: new Date().toISOString(), lastRun: null,
+    }));
+    expect(await runManifestEmit({ projectRoot: dir })).toBe(0);
+    const manifest = JSON.parse(readFileSync(join(dir, '.well-known', 'openlore.json'), 'utf-8'));
+    // Two specs under docs/, not the one under the unconfigured default openspec/.
+    expect(manifest.specs.count).toBe(2);
+  });
+
   it('defaults output to .well-known/openlore.json and stays valid without a git repo', async () => {
     const code = await runManifestEmit({ projectRoot: dir });
     expect(code).toBe(0);

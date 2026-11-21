@@ -1106,6 +1106,21 @@ it('uses the current before-agent context root instead of the session-start root
   }
 });
 
+it('lists spec domains from the configured openspecPath', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-spec-root-'));
+  try {
+    await mkdir(join(dir, 'docs', 'specs', 'billing'), { recursive: true });
+    await mkdir(join(dir, 'openspec', 'specs', 'stale'), { recursive: true });
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({ openspecPath: 'docs' }));
+    const index = await readSpecIndex(dir);
+    expect(index).toContain('- billing');
+    expect(index).not.toContain('stale');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 it('bounds and sorts the Pi spec-domain index with an explicit overflow receipt', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-spec-index-'));
   try {

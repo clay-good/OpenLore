@@ -38,6 +38,13 @@ vi.mock('../drift/drift-detector.js', () => ({
   isSpecRelevantChange: vi.fn().mockReturnValue(true),
 }));
 
+// The configured spec root (`openspecPath`); a test moves it to check the corpus filter.
+let mockSpecRoot = 'openspec';
+vi.mock('../services/mcp-handlers/spec-paths.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/mcp-handlers/spec-paths.js')>()),
+  configuredSpecRoot: vi.fn(async () => ({ absolute: `/project/${mockSpecRoot}`, relative: mockSpecRoot })),
+}));
+
 vi.mock('./store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./store.js')>();
   return { ...actual };
@@ -98,6 +105,21 @@ describe('extractFromDiff', () => {
     getFileDiff.mockReset();
     matchFileToDomains.mockReset();
     isSpecRelevantChange.mockReturnValue(true);
+    mockSpecRoot = 'openspec';
+  });
+
+  it('never mines decisions from the spec corpus at the configured openspecPath', async () => {
+    mockSpecRoot = 'docs';
+    getChangedFiles.mockResolvedValue({
+      files: [{ path: 'docs/config.yaml', status: 'modified' }, { path: 'docs/changes/x/schema.ts', status: 'added' }],
+    });
+    const llm = makeLLM([]);
+
+    const result = await extractFromDiff({ rootPath: '/project', specMap: makeSpecMap(), sessionId: 's', llm: llm as never });
+
+    expect(result).toEqual([]);
+    expect(getFileDiff).not.toHaveBeenCalled();
+    expect(llm.complete).not.toHaveBeenCalled();
   });
 
   it('returns empty array when no relevant files changed', async () => {

@@ -14,6 +14,8 @@ import { fileExists } from '../../utils/command-helpers.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { execFileGitSync } from '../../utils/git-exec.js';
 import { handleAnnotateStory } from '../../core/services/mcp-handlers/change.js';
+import { configuredSpecRoot, isUnderSpecRoot } from '../../core/services/mcp-handlers/spec-paths.js';
+import { OPENSPEC_DIR } from '../../constants.js';
 import {
   displayHookPath,
   hookManagerWarning,
@@ -223,6 +225,24 @@ function extractStoryDescription(content: string): string {
 // COMMAND
 // ============================================================================
 
+/**
+ * Whether a changed file is source code a story can be refreshed for: not docs, stories, or the
+ * spec corpus at `specRoot` (the configured `openspecPath`, repository-relative).
+ */
+export function isStorySourceChange(file: string, specRoot: string): boolean {
+  const lower = file.toLowerCase();
+  return (
+    !isUnderSpecRoot(file, specRoot) &&
+    !lower.startsWith(`${OPENSPEC_DIR}/`) &&
+    !lower.startsWith('bmad/') &&
+    !lower.startsWith('docs/') &&
+    !lower.endsWith('.md') &&
+    !lower.endsWith('.json') &&
+    !lower.endsWith('.yaml') &&
+    !lower.endsWith('.yml')
+  );
+}
+
 export const refreshStoriesCommand = new Command('refresh-stories')
   .description('Refresh stale risk_context in story files after code changes')
   .option(
@@ -303,18 +323,8 @@ Examples:
       changedFiles = getLastCommitChangedFiles(rootPath);
 
       // Filter to source files only (skip docs, specs, stories themselves)
-      changedFiles = changedFiles.filter(f => {
-        const lower = f.toLowerCase();
-        return (
-          !lower.startsWith('openspec/') &&
-          !lower.startsWith('bmad/') &&
-          !lower.startsWith('docs/') &&
-          !lower.endsWith('.md') &&
-          !lower.endsWith('.json') &&
-          !lower.endsWith('.yaml') &&
-          !lower.endsWith('.yml')
-        );
-      });
+      const specRoot = (await configuredSpecRoot(rootPath)).relative;
+      changedFiles = changedFiles.filter(f => isStorySourceChange(f, specRoot));
 
       if (changedFiles.length === 0) {
         logger.discovery('No source file changes in last commit. Nothing to refresh.');

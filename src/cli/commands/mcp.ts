@@ -1265,7 +1265,7 @@ export const TOOL_DEFINITIONS = [
       'USE THIS WHEN: you have a BMAD story, a feature description, or a spec delta request, ' +
       'and want to create a structured OpenSpec change proposal before writing any code. ' +
       'Combines orient + search_specs + analyze_impact to produce a pre-filled ' +
-      'openspec/changes/{slug}/proposal.md — no LLM required. ' +
+      '<spec root>/changes/{slug}/proposal.md (spec root = openspecPath, default openspec) — no LLM required. ' +
       'Output includes affected domains, touched requirements, risk scores, and insertion points. ' +
       'Run analyze_codebase first; spec index optional (degrades gracefully).',
     inputSchema: {

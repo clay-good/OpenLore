@@ -11,6 +11,7 @@ import {
   DECISIONS_EXTRACTION_MAX_FILES,
   DECISIONS_DIFF_MAX_CHARS,
   DECISIONS_CONSOLIDATION_MAX_TOKENS,
+  OPENSPEC_DIR,
 } from '../../constants.js';
 import { getChangedFiles, getFileDiff, resolveBaseRef } from '../drift/git-diff.js';
 import { gitPathArgs } from '../../utils/git-args.js';
@@ -21,6 +22,7 @@ import { makeDecisionId } from './store.js';
 import { parseJSON } from '../../utils/misc.js';
 import { createPromptBoundary } from '../../utils/prompt-boundary.js';
 import { logger } from '../../utils/logger.js';
+import { configuredSpecRoot, isUnderSpecRoot } from '../services/mcp-handlers/spec-paths.js';
 import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
 const SYSTEM_PROMPT = `You are an architectural decision extractor for a software project.
@@ -86,10 +88,10 @@ export interface ExtractFromDiffOptions {
   llm: LLMService;
 }
 
-function isRelevantStagedFile(filePath: string): boolean {
+function isRelevantStagedFile(filePath: string, specRoot: string): boolean {
   const ext = filePath.includes('.') ? filePath.slice(filePath.lastIndexOf('.')) : '';
   if (ext === '.md' || ext === '.txt' || ext === '.json' || ext === '.lock') return false;
-  if (filePath.startsWith('openspec/') || filePath.startsWith('.openlore/')) return false;
+  if (isUnderSpecRoot(filePath, specRoot) || filePath.startsWith(`${OPENSPEC_DIR}/`) || filePath.startsWith('.openlore/')) return false;
   if (filePath.includes('.test.') || filePath.includes('.spec.') || filePath.includes('/__tests__/')) return false;
   if (filePath.includes('/dist/') || filePath.includes('/node_modules/')) return false;
   return true;
@@ -135,8 +137,10 @@ export async function extractFromDiff(options: ExtractFromDiffOptions): Promise<
     getDiff = (f) => getFileDiff(rootPath, f, baseRef, DECISIONS_DIFF_MAX_CHARS);
   }
 
+  // The spec corpus is not code a decision is mined from, wherever `openspecPath` puts it.
+  const specRoot = (await configuredSpecRoot(rootPath)).relative;
   const relevant = files
-    .filter((f) => isRelevantStagedFile(f.path))
+    .filter((f) => isRelevantStagedFile(f.path, specRoot))
     .slice(0, DECISIONS_EXTRACTION_MAX_FILES);
 
   if (relevant.length === 0) return [];

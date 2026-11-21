@@ -30,6 +30,7 @@ import { readFileConfined } from '../../../utils/path-confinement.js';
 import { validateDirectory, safeJoin } from './utils.js';
 import { handleSpecStoreStatus, type SpecStoreStatusReport } from './spec-store.js';
 import { handleOrient } from './orient.js';
+import { configuredSpecRoot } from './spec-paths.js';
 import { applyTokenBudget, omissionNote } from './progressive.js';
 import { estimateTokens } from '../llm-service.js';
 import type { ServedContentProvenance } from '../served-content.js';
@@ -326,6 +327,11 @@ export function extractIntent(proposalText: string, changeId: string): string {
   return sliced;
 }
 
+/** The store's `changes/` folder, store-relative, under the spec root its own config names. */
+async function storeChangesRel(storeDir: string): Promise<string> {
+  return join((await configuredSpecRoot(storeDir)).relative, 'changes');
+}
+
 /** Find the change directory under a store path; returns its proposal text + declared scope. */
 async function readChange(
   storeDir: string,
@@ -338,7 +344,8 @@ async function readChange(
   // caught and degraded to "no such change under the store" (change-not-found).
   let changeDir: string;
   try {
-    changeDir = safeJoin(storeDir, join('openspec', 'changes', changeId));
+    // The store's own `openspecPath` says where its changes live (default `openspec/`).
+    changeDir = safeJoin(storeDir, join(await storeChangesRel(storeDir), changeId));
   } catch {
     return null;
   }
@@ -446,7 +453,7 @@ export async function handleWorkingSetContext(
     findings.push({
       code: 'change-not-found', severity: 'error', subject: id,
       message: `No proposal found for change "${id}" under the spec store.`,
-      remediation: `Expected ${join(storeDir, 'openspec', 'changes', id, 'proposal.md')}; check the change id and the store path.`,
+      remediation: `Expected ${join(storeDir, await storeChangesRel(storeDir).catch(() => join('openspec', 'changes')), id, 'proposal.md')}; check the change id and the store path.`,
     });
     return {
       bound: true, store, change: { id, intent: '' },

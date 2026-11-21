@@ -67,6 +67,38 @@ describe('change evidence audit', () => {
     expect(renderStatusTable([unassessed])).toContain('validates not assessed (the openspec CLI is not on PATH)');
   });
 
+  it('reads changes under a configured openspecPath; the openspec CLI cannot validate there', async () => {
+    const root = await fixture();
+    await addChange(root, 'built', 'cli', '### Requirement: Synced');
+    await writeFile(join(root, 'src', 'markers.ts'), '// change: built\n');
+    const [atDefault] = await auditChangeStatuses({ rootPath: root, validateChange: validate });
+
+    // Move the whole corpus to docs/ and say so in the config.
+    const { rename } = await import('node:fs/promises');
+    await rename(join(root, 'openspec'), join(root, 'docs'));
+    await mkdir(join(root, 'openspec', 'changes', 'decoy'), { recursive: true });
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'config.json'), JSON.stringify({
+      version: '1.0.0', projectType: 'unknown', openspecPath: 'docs',
+      analysis: { maxFiles: 1000, includePatterns: [], excludePatterns: [] },
+      generation: { model: 'x', domains: 'auto' },
+      createdAt: new Date().toISOString(), lastRun: null,
+    }));
+    const validator = vi.fn(validate);
+    const results = await auditChangeStatuses({ rootPath: root, validateChange: validator });
+    expect(results.map((r) => r.name)).toEqual(['built']);
+    const [moved] = results;
+    expect(moved.verdict).toBe(atDefault.verdict);
+    expect(moved.tasks).toEqual(atDefault.tasks);
+    expect(moved.requirementsSynced.synced).toBe(atDefault.requirementsSynced.synced);
+    expect(moved.requirementsSynced.requirements[0].deltaFile).toBe('docs/changes/built/specs/cli/spec.md');
+    expect(validator).not.toHaveBeenCalled();
+    expect(moved.validates).toEqual({
+      passes: false, assessed: false, reason: "the openspec CLI reads only an openspec/ folder; this project's specs are in docs/",
+    });
+    expect(moved.archivableCandidate).toBe(false);
+  });
+
   it('computes every verdict from marker and domain-scoped requirement evidence', async () => {
     const root = await fixture();
     await addChange(root, 'built', 'cli', '### Requirement: Synced');

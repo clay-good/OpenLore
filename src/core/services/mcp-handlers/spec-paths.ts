@@ -21,7 +21,22 @@ export async function configuredSpecRoot(absDir: string): Promise<{ absolute: st
 
 /** `<spec root>/specs/<domain>/spec.md`, repository-relative, for a spec root from `configuredSpecRoot`. */
 export function specFileRel(specRootRel: string, domain: string): string {
-  return `${specRootRel === '.' ? '' : `${specRootRel}/`}specs/${domain}/spec.md`;
+  return specRootPath(specRootRel, `specs/${domain}/spec.md`);
+}
+
+/** `<spec root>/<sub>`, repository-relative and POSIX-separated, for a spec root from `configuredSpecRoot`. */
+export function specRootPath(specRootRel: string, sub: string): string {
+  return specRootRel === '.' ? sub : `${specRootRel}/${sub}`;
+}
+
+/**
+ * Whether a repository-relative, POSIX-separated path is inside the spec root `specRootRel`
+ * (from `configuredSpecRoot`). A root of `.` holds its corpus in `specs/`, `changes/` and
+ * `decisions/` beside the code, so only those folders count — not every file in the repository.
+ */
+export function isUnderSpecRoot(repoPath: string, specRootRel: string): boolean {
+  if (specRootRel === '.') return /^(?:specs|changes|decisions)\//.test(repoPath);
+  return repoPath.startsWith(`${specRootRel}/`);
 }
 
 /** The configured spec root, repository-relative, or null when it cannot be resolved. */

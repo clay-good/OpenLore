@@ -78,6 +78,7 @@ import { describeExclusions, totalExcluded, type ParseHealthReport } from '../..
 import { describeScriptContainerBoundaries } from '../../core/analyzer/sfc-script-extractor.js';
 import { describeMemoryDegradation } from '../../core/analyzer/memory-strategy.js';
 import type { GovernanceFinding } from '../../core/services/mcp-handlers/enforcement-policy.js';
+import { configuredSpecRoot, isUnderSpecRoot } from '../../core/services/mcp-handlers/spec-paths.js';
 import { detectCorpusIntegrity } from '../../core/decisions/corpus-integrity.js';
 import { detectInjectionShapes, INJECTION_SHAPE_LIMITS } from '../../core/services/served-content.js';
 import { redactSecretTextWithKnownValues } from '../../core/services/secret-redaction.js';
@@ -417,6 +418,8 @@ export async function checkServedContentTrust(
     toRepositoryPath(join(OPENLORE_DIR, 'decisions', 'pending.json')),
   ]);
   if (!explicitFiles) {
+    // Changed spec and decision files are those under this project's spec root (`openspecPath`).
+    const specRoot = (await configuredSpecRoot(rootPath)).relative;
     try {
       const { stdout } = await execFileAsync(
         'git',
@@ -426,7 +429,7 @@ export async function checkServedContentTrust(
       for (const record of stdout.split('\0')) {
         if (record.length < 4) continue;
         const path = record.slice(3);
-        if (path.startsWith('openspec/') && path.endsWith('.md')) {
+        if (isUnderSpecRoot(path, specRoot) && path.endsWith('.md')) {
           candidates.add(path);
         }
       }
