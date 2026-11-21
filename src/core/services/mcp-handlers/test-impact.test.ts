@@ -189,11 +189,28 @@ describe('handleSelectTests', () => {
   // confidenceBoundary wiring (spec: add-confidence-boundary-disclosure). The fixture
   // dir has no fingerprint artifact → staleness silent, so `complete` tracks the basis.
   it('attaches a complete confidenceBoundary on an all-direct selection', async () => {
-    const r = await handleSelectTests({ directory: '/p', changedSymbols: ['bar'] }) as {
-      confidenceBoundary: { complete: boolean; basis: { directEdges: number; synthesizedEdges: number } };
+    // The linked test file is on disk, so its evidence is classified too (an unreadable one would be
+    // a disclosed gap, and the boundary would say so).
+    const dir = await mkdtemp(join(tmpdir(), 'select-complete-'));
+    try {
+      await mkdir(join(dir, 'src'), { recursive: true });
+      await writeFile(join(dir, 'src/bar.test.ts'), `function testBar() { expect(bar()).toBe(1); }\nit('bar', () => testBar());\n`);
+      const r = await handleSelectTests({ directory: dir, changedSymbols: ['bar'] }) as {
+        confidenceBoundary: { complete: boolean; basis: { directEdges: number; synthesizedEdges: number } };
+      };
+      expect(r.confidenceBoundary.complete).toBe(true);
+      expect(r.confidenceBoundary.basis.synthesizedEdges).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('discloses test evidence it could not assess, so the boundary is not complete beside the gap', async () => {
+    const r = await handleSelectTests({ directory: '/p-does-not-exist', changedSymbols: ['bar'] }) as {
+      confidenceBoundary: { complete: boolean; incompleteBecause?: Array<{ channel: string; detail: string }> };
     };
-    expect(r.confidenceBoundary.complete).toBe(true);
-    expect(r.confidenceBoundary.basis.synthesizedEdges).toBe(0);
+    expect(r.confidenceBoundary.complete).toBe(false);
+    expect(r.confidenceBoundary.incompleteBecause?.some(x => x.channel === 'disclosures' && /Test evidence is partial/.test(x.detail))).toBe(true);
   });
 
   it('reports incomplete when a test reaches the change through a synthesized edge', async () => {

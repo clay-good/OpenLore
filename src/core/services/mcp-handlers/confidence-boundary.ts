@@ -683,6 +683,10 @@ export const NON_DISCLOSURE_RESPONSE_FIELDS: Readonly<Record<string, string>> = 
   // forever. The handlers that put live disclosures in prose declare them explicitly
   // through `assembleBoundary({ disclosures })` instead.
   caveats: 'Mixes standing methodology with live disclosure; handlers declare the live part via assembleBoundary({ disclosures }).',
+  // change: add-test-evidence-claims — a listing cap on test relationships per changed symbol. Every
+  // omitted relationship still counts in `strongestEvidence`, so the class the answer states is
+  // complete; the evidence an answer could NOT assess is declared via assembleBoundary({ disclosures }).
+  omittedRelationships: 'A listing cap: omitted relationships still count in strongestEvidence; unassessed evidence is declared via assembleBoundary({ disclosures }).',
   note: 'Overloaded: explains a conclusion as often as it qualifies one. Declared via assembleBoundary({ disclosures }) when it discloses.',
   notes: 'Standing methodology prose, like `caveats`.',
   hint: 'A next-step suggestion, not a statement about this answer\'s coverage.',

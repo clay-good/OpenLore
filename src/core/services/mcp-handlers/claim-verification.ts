@@ -467,7 +467,20 @@ async function verifyTested(absDir: string, cg: SerializedCallGraph, subject: Fu
     }
     const hit = await dynamicHitFor(absDir, subject);
     if (hit) {
-      return { verdict: 'unverifiable', reason: `No test relates to "${name}" in the graph, but ${qualificationReason(hit)}, so a test could reach it without an edge.`, extra };
+      const crossing: KnownUnknowableCrossing = {
+        kind: 'dynamic-boundary',
+        count: 1,
+        sites: [{ file: hit.file, line: hit.site.line, kind: hit.site.kind }],
+        detail: 'A dispatch the call graph cannot follow — '
+          + `${describeSite({ file: hit.file, line: hit.site.line, kind: hit.site.kind })} — `
+          + `can reach "${name}" without a graph edge, so the absence of a test is not established.`,
+      };
+      return {
+        verdict: 'unverifiable',
+        reason: `No test relates to "${name}" in the graph, but ${qualificationReason(hit)}, so a test could reach it without an edge.`,
+        extraCrossings: [crossing],
+        extra,
+      };
     }
     return { verdict: 'refuted', reason: `No test calls or reaches "${name}" in the indexed call graph.`, extra };
   }

@@ -98,7 +98,7 @@ describe('projectVerifyReceipt', () => {
     const b = briefing({ changed: { files: 1, symbols: 1, symbolNames: ['f'], testEvidence } });
     const r = projectVerifyReceipt(b, {}) as unknown as Receipt & { findings?: unknown[] };
     expect(r.findings).toBeUndefined();
-    expect(r.boundaries.some(x => /not all recognized/.test(x) && x.includes('f'))).toBe(true);
+    expect(r.boundaries.some(x => /partial/.test(x) && x.includes('f'))).toBe(true);
   });
 
   it('an enforcement policy can turn the finding off', () => {

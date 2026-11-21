@@ -70,6 +70,12 @@ export interface SymbolEvidence {
   notAssessed: string[];
   /** The backward walk to reaching tests stopped at its depth or node cap. */
   reachTruncated: boolean;
+  /**
+   * Every linked test file was classified and every test's assertions recognized. False when a file
+   * was past a cap, could not be read or parsed, or used an unrecognized framework: then the absence
+   * of an asserting test is not established, and nothing may be concluded from it.
+   */
+  complete: boolean;
 }
 
 /** Bounds: the walk runs inside hooks, so it must stay small and predictable. */
@@ -182,6 +188,37 @@ function contains(outer: Node, inner: Node): boolean {
 
 // ── Per-language shapes ─────────────────────────────────────────────────────────
 
+interface FileContext {
+  /** Identifiers whose method calls are assertions (`assert`, `require`, `a := assert.New(t)`). */
+  assertReceivers: Set<string>;
+  /** Go: parameters typed `*testing.T` / `*testing.B` / `*testing.F`. */
+  testingParams: Set<string>;
+  /** Names the test file declares itself (variables, functions, parameters): never the symbol. */
+  localNames: Set<string>;
+}
+
+/** Identifier texts under `n` (a declaration's name or pattern). */
+function identifiersIn(n: Node | null | undefined, types: ReadonlySet<string>): string[] {
+  if (!n) return [];
+  return [...walk(n)].filter(d => types.has(d.type)).map(d => d.text);
+}
+
+/** Assertion forms whose only asserted value is the first argument. */
+const ONE_VALUE_ASSERTS = new Set([
+  // Node assert / Chai assert
+  'ok', 'isOk', 'isNotOk', 'isTrue', 'isFalse', 'isNull', 'isNotNull', 'isUndefined', 'isDefined',
+  'exists', 'notExists', 'ifError', 'throws', 'doesNotThrow', 'rejects', 'doesNotReject', 'isEmpty', 'isNotEmpty',
+  // unittest
+  'assertTrue', 'assertFalse', 'assertIsNone', 'assertIsNotNone',
+  // testify
+  'True', 'False', 'Nil', 'NotNil', 'NoError', 'Error', 'Empty', 'NotEmpty', 'Zero', 'NotZero', 'Panics', 'NotPanics',
+]);
+
+/** The asserted value positions of an assertion called `name`: the first one, or the first two. */
+function valuePositions(name: string): number[] {
+  return ONE_VALUE_ASSERTS.has(name) ? [0] : [0, 1];
+}
+
 /** One test case: its name, the function node holding its body, and the body. */
 interface Case { name: string; fn: Node; body: Node }
 
@@ -198,14 +235,24 @@ interface Lang {
   callee(n: Node): { name: string; receiver: Node | null } | null;
   /** The call's argument nodes (a call node from `callee`). */
   callArgs(n: Node): Node[];
+  /** File facts the recognizers need (assertion receivers, `*testing.T` parameters, local names). */
+  context(root: Node): FileContext;
   /** The call is itself a recognized assertion (never a call to the symbol under test). */
-  isAssertionCall(name: string, receiver: Node | null): boolean;
-  /** Recognized assertions within `body`: each asserted value node, with the assertion's line. */
-  assertions(body: Node): Array<{ value: Node; line: number }>;
+  isAssertionCall(name: string, receiver: Node | null, ctx: FileContext): boolean;
+  /**
+   * Recognized assertions within `body`: each asserted VALUE node (never a message argument), with
+   * the assertion's line.
+   */
+  assertions(body: Node, ctx: FileContext): Array<{ value: Node; line: number }>;
+  /**
+   * The variables a source call's value is bound to, with the statement's line span: only the
+   * pattern element whose initializer holds the call (`const r = add(1), other = 7` binds `r`).
+   */
+  bindings(source: Node, body: Node): { names: string[]; from: number; to: number } | null;
+  /** A call that looks like an assertion this analysis does not recognize (`should(x)`, `s.Equal`). */
+  looksLikeAssertion(name: string, receiver: Node | null, ctx: FileContext): boolean;
   /** Return statements' values in a function body. */
   returns(body: Node): Node[];
-  /** The statement that defines a variable from `n`, if `n` sits in one (its start line is the def line). */
-  defStatement(n: Node, body: Node): Node | null;
   identifierTypes: ReadonlySet<string>;
 }
 
@@ -231,10 +278,47 @@ function jsTitle(n: Node | undefined): string | null {
   return null;
 }
 
+const JS_DECL_NAME_TYPES: ReadonlySet<string> = new Set(['identifier', 'shorthand_property_identifier_pattern']);
+
 const JS: Lang = {
   identifierTypes: new Set(['identifier', 'shorthand_property_identifier']),
+  context(root) {
+    const localNames = new Set<string>();
+    for (const n of walk(root)) {
+      if (n.type === 'variable_declarator') {
+        // `const { add } = await import('./m')` / `require('./m')` binds the symbol, not a local.
+        const value = n.childForFieldName('value');
+        if (value && /^(?:await\s+)?(?:import|require)\s*\(/.test(value.text)) continue;
+        for (const id of identifiersIn(n.childForFieldName('name'), JS_DECL_NAME_TYPES)) localNames.add(id);
+      } else if (n.type === 'function_declaration' || n.type === 'class_declaration' || n.type === 'method_definition') {
+        const name = n.childForFieldName('name')?.text;
+        if (name) localNames.add(name);
+      } else if (n.type === 'formal_parameters') {
+        for (const id of identifiersIn(n, JS_DECL_NAME_TYPES)) localNames.add(id);
+      } else if (n.type === 'arrow_function') {
+        const p = n.childForFieldName('parameter');
+        if (p?.type === 'identifier') localNames.add(p.text);
+      }
+    }
+    return { assertReceivers: new Set(['assert', 'expect']), testingParams: new Set(), localNames };
+  },
   isAssertionCall: (name, receiver) => (receiver === null && JS_ASSERT_ROOTS.has(name))
     || (receiver?.type === 'identifier' && (JS_ASSERT_ROOTS.has(receiver.text) || receiver.text === 'chai')),
+  looksLikeAssertion: (name, receiver) => /^(?:should|check|verify|validate|ensure|must|expectThat|assertThat)/i.test(name)
+    || (receiver?.type === 'identifier' && /^should$/i.test(receiver.text)),
+  bindings(source, body) {
+    for (let p: Node | null = source; p && p.id !== body.id; p = p.parent) {
+      if (JS_FN_TYPES.has(p.type) && p.id !== source.id) return null;
+      if (p.type === 'variable_declarator') {
+        return { names: identifiersIn(p.childForFieldName('name'), JS_DECL_NAME_TYPES), from: line(p), to: p.endPosition.row + 1 };
+      }
+      if (p.type === 'assignment_expression' || p.type === 'augmented_assignment_expression') {
+        const left = p.childForFieldName('left');
+        return { names: left?.type === 'identifier' ? [left.text] : identifiersIn(left, JS_DECL_NAME_TYPES), from: line(p), to: p.endPosition.row + 1 };
+      }
+    }
+    return null;
+  },
   cases(root) {
     const out: Case[] = [];
     for (const n of walk(root)) {
@@ -299,8 +383,13 @@ const JS: Lang = {
       const isMember = obj?.type === 'identifier' && (JS_ASSERT_ROOTS.has(obj.text)
         || (obj.text === 'chai' && JS_ASSERT_ROOTS.has(fn!.childForFieldName('property')?.text ?? '')));
       if (!isRoot && !isMember) continue;
-      // `expect(actual)…toBe(expected)`: the actual value and every chained matcher argument.
-      for (const a of this.callArgs(n)) out.push({ value: a, line: line(n) });
+      const args = this.callArgs(n);
+      const method = isRoot ? fn!.text : fn!.childForFieldName('property')?.text ?? '';
+      // `expect(actual, message)` / `assert(value, message)`: the value only. `assert.equal(a, b, msg)`:
+      // the compared values, never the message.
+      const positions = method === 'expect' || method === 'assert' ? [0] : valuePositions(method);
+      for (const i of positions) if (args[i]) out.push({ value: args[i], line: line(n) });
+      // `expect(actual)…toBe(expected)`: every chained matcher argument is an expected value.
       let cur: Node = n;
       while (cur.parent && (cur.parent.type === 'member_expression'
         || (cur.parent.type === 'call_expression' && cur.parent.childForFieldName('function')?.id === cur.id)
@@ -317,19 +406,49 @@ const JS: Lang = {
     for (const n of walk(body)) if (n.type === 'return_statement' && n.namedChildren[0]) out.push(n.namedChildren[0]);
     return out;
   },
-  defStatement(n, body) {
-    for (let p: Node | null = n; p && p.id !== body.id; p = p.parent) {
-      if (p.type === 'lexical_declaration' || p.type === 'variable_declaration') return p;
-      if (p.type === 'assignment_expression' || p.type === 'augmented_assignment_expression') return p;
-      if (JS_FN_TYPES.has(p.type) && p.id !== n.id) return null;
-    }
-    return null;
-  },
 };
+
+const PY_IDS: ReadonlySet<string> = new Set(['identifier']);
 
 const PY: Lang = {
   identifierTypes: new Set(['identifier']),
+  context(root) {
+    const localNames = new Set<string>();
+    for (const n of walk(root)) {
+      if (n.type === 'assignment' || n.type === 'augmented_assignment') {
+        for (const id of identifiersIn(n.childForFieldName('left'), PY_IDS)) localNames.add(id);
+      } else if (n.type === 'function_definition' || n.type === 'class_definition') {
+        const name = n.childForFieldName('name')?.text;
+        if (name) localNames.add(name);
+      } else if (n.type === 'parameters' || n.type === 'lambda_parameters') {
+        for (const id of identifiersIn(n, PY_IDS)) localNames.add(id);
+      } else if (n.type === 'for_statement') {
+        for (const id of identifiersIn(n.childForFieldName('left'), PY_IDS)) localNames.add(id);
+      }
+    }
+    return { assertReceivers: new Set(), testingParams: new Set(), localNames };
+  },
   isAssertionCall: (name) => /^assert/.test(name),
+  looksLikeAssertion: (name) => /^(?:should|check|verify|validate|ensure|expect|must)/i.test(name),
+  bindings(source, body) {
+    for (let p: Node | null = source; p && p.id !== body.id; p = p.parent) {
+      if (p.type === 'function_definition' || p.type === 'lambda') return null;
+      if (p.type === 'assignment' || p.type === 'augmented_assignment') {
+        const left = p.childForFieldName('left');
+        const right = p.childForFieldName('right');
+        const span = { from: line(p), to: p.endPosition.row + 1 };
+        // `r, other = add(1), 7` pairs element by element; `a, b = add(1)` binds both.
+        const lefts = left && (left.type === 'pattern_list' || left.type === 'tuple_pattern') ? left.namedChildren : null;
+        const rights = right && (right.type === 'expression_list' || right.type === 'tuple') ? right.namedChildren : null;
+        if (lefts && rights && lefts.length === rights.length) {
+          const i = rights.findIndex(r => contains(r, source));
+          if (i >= 0) return { names: identifiersIn(lefts[i], PY_IDS), ...span };
+        }
+        return { names: identifiersIn(left, PY_IDS), ...span };
+      }
+    }
+    return null;
+  },
   cases(root) {
     const out: Case[] = [];
     for (const n of walk(root)) {
@@ -376,13 +495,23 @@ const PY: Lang = {
       } else if (n.type === 'call') {
         const fn = n.childForFieldName('function');
         const last = fn?.type === 'attribute' ? fn.childForFieldName('attribute')?.text : fn?.type === 'identifier' ? fn.text : undefined;
-        if (last && /^assert/.test(last)) for (const a of this.callArgs(n)) out.push({ value: a, line: line(n) });
+        if (!last || !/^assert/.test(last)) continue;
+        // Positional values only: a `msg=` keyword or a trailing message is not an asserted value.
+        const positional = (n.childForFieldName('arguments')?.namedChildren ?? []).filter(a => a.type !== 'keyword_argument');
+        // `assertRaises(E, f, *args)` asserts on the call `f(*args)`; a mock's `assert_called_with`
+        // compares every argument.
+        const positions = /^assert(?:Raises|Warns)/.test(last) ? positional.map((_, i) => i).slice(1)
+          : last.startsWith('assert_') ? positional.map((_, i) => i)
+          : valuePositions(last);
+        for (const i of positions) if (positional[i]) out.push({ value: positional[i], line: line(n) });
       } else if (n.type === 'with_statement') {
-        // `with pytest.raises(E): subject()` asserts on what the block does.
+        // `with pytest.raises(E): subject()` asserts on what the block's LAST statement does; earlier
+        // statements in the block are setup.
         const items = n.namedChildren.find(c => c.type === 'with_clause');
-        const raises = items && /\bpytest\.(?:raises|warns)\s*\(/.test(items.text);
+        const raises = items && /\b(?:pytest\.(?:raises|warns)|self\.assert(?:Raises|Warns)\w*)\s*\(/.test(items.text);
         const block = n.childForFieldName('body');
-        if (raises && block) out.push({ value: block, line: line(n) });
+        const last = block?.namedChildren.filter(c => c.type !== 'comment').at(-1);
+        if (raises && last) out.push({ value: last, line: line(n) });
       }
     }
     return out;
@@ -392,20 +521,56 @@ const PY: Lang = {
     for (const n of walk(body)) if (n.type === 'return_statement' && n.namedChildren[0]) out.push(n.namedChildren[0]);
     return out;
   },
-  defStatement(n, body) {
-    for (let p: Node | null = n; p && p.id !== body.id; p = p.parent) {
-      if (p.type === 'assignment' || p.type === 'augmented_assignment') return p;
-      if (p.type === 'function_definition' || p.type === 'lambda') return null;
-    }
-    return null;
-  },
 };
 
 const GO_FAIL = /^(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)$/;
 
+const GO_IDS: ReadonlySet<string> = new Set(['identifier']);
+const GO_TESTIFY_METHODS = /^(?:Equal|NotEqual|EqualValues|Exactly|Same|NotSame|Contains|NotContains|ElementsMatch|Len|True|False|Nil|NotNil|NoError|Error|ErrorIs|ErrorContains|Empty|NotEmpty|Zero|NotZero|Greater|GreaterOrEqual|Less|LessOrEqual|InDelta|Panics|NotPanics|JSONEq|Regexp)$/;
+
 const GO: Lang = {
   identifierTypes: new Set(['identifier']),
-  isAssertionCall: (_name, receiver) => receiver?.type === 'identifier' && (receiver.text === 'assert' || receiver.text === 'require'),
+  context(root) {
+    const localNames = new Set<string>();
+    const testingParams = new Set<string>();
+    const assertReceivers = new Set<string>(['assert', 'require']);
+    for (const n of walk(root)) {
+      if (n.type === 'parameter_declaration') {
+        const names = n.childrenForFieldName?.('name') ?? [];
+        const typed = /^\*testing\.[TBF]$/.test(n.childForFieldName('type')?.text ?? '');
+        for (const nm of names) { localNames.add(nm.text); if (typed) testingParams.add(nm.text); }
+      } else if (n.type === 'short_var_declaration' || n.type === 'assignment_statement') {
+        const left = identifiersIn(n.childForFieldName('left'), GO_IDS);
+        for (const id of left) localNames.add(id);
+        // `a := assert.New(t)`: `a.Equal(…)` is a testify assertion without `t`.
+        if (/^(?:assert|require)\.New\s*\(/.test(n.childForFieldName('right')?.text ?? '')) for (const id of left) assertReceivers.add(id);
+      } else if (n.type === 'var_spec') {
+        for (const nm of n.childrenForFieldName?.('name') ?? []) localNames.add(nm.text);
+      }
+    }
+    return { assertReceivers, testingParams, localNames };
+  },
+  isAssertionCall: (_name, receiver, ctx) => receiver?.type === 'identifier' && ctx.assertReceivers.has(receiver.text),
+  looksLikeAssertion: (name, receiver, ctx) => GO_TESTIFY_METHODS.test(name) && !(receiver?.type === 'identifier' && ctx.assertReceivers.has(receiver.text)),
+  bindings(source, body) {
+    for (let p: Node | null = source; p && p.id !== body.id; p = p.parent) {
+      if (p.type === 'func_literal') return null;
+      if (p.type === 'short_var_declaration' || p.type === 'assignment_statement' || p.type === 'var_spec') {
+        const left = p.childForFieldName('left') ?? null;
+        const right = p.childForFieldName('right') ?? p.childForFieldName('value');
+        const span = { from: line(p), to: p.endPosition.row + 1 };
+        const lefts = left ? left.namedChildren : (p.childrenForFieldName?.('name') ?? []);
+        const rights = right ? (right.type === 'expression_list' ? right.namedChildren : [right]) : [];
+        // `got, want := Sym(), 3` pairs element by element; `x, err := Sym()` binds both.
+        if (rights.length > 1 && lefts.length === rights.length) {
+          const i = rights.findIndex(r => contains(r, source));
+          if (i >= 0) return { names: identifiersIn(lefts[i], GO_IDS), ...span };
+        }
+        return { names: lefts.flatMap(l => identifiersIn(l, GO_IDS)), ...span };
+      }
+    }
+    return null;
+  },
   cases(root) {
     const out: Case[] = [];
     for (const n of root.namedChildren) {
@@ -436,21 +601,28 @@ const GO: Lang = {
   callArgs(n) {
     return n.childForFieldName('arguments')?.namedChildren ?? [];
   },
-  assertions(body) {
+  assertions(body, ctx) {
     const out: Array<{ value: Node; line: number }> = [];
     for (const n of walk(body)) {
       if (n.type === 'call_expression') {
         const fn = n.childForFieldName('function');
         const operand = fn?.type === 'selector_expression' ? fn.childForFieldName('operand') : null;
-        if (operand?.type === 'identifier' && (operand.text === 'assert' || operand.text === 'require')) {
-          for (const a of this.callArgs(n).slice(1)) out.push({ value: a, line: line(n) }); // skip `t`
+        if (operand?.type === 'identifier' && ctx.assertReceivers.has(operand.text)) {
+          // `assert.Equal(t, want, got, msg…)` skips `t`; `a := assert.New(t); a.Equal(want, got)` does not.
+          const args = this.callArgs(n);
+          const values = operand.text === 'assert' || operand.text === 'require' ? args.slice(1) : args;
+          for (const i of valuePositions(fn!.childForFieldName('field')?.text ?? '')) if (values[i]) out.push({ value: values[i], line: line(n) });
         }
       } else if (n.type === 'if_statement') {
-        // `if got != want { t.Errorf(…) }`: the condition (and its initializer) is what is asserted.
+        // `if got != want { t.Errorf(…) }`: the condition (and its initializer) is what is asserted —
+        // only when the failure is reported on the test's own `*testing.T` (never `fmt.Errorf`, `log.Fatal`).
         const consequence = n.childForFieldName('consequence');
-        const fails = consequence && [...walk(consequence)].some(c => c.type === 'call_expression'
-          && c.childForFieldName('function')?.type === 'selector_expression'
-          && GO_FAIL.test(c.childForFieldName('function')!.childForFieldName('field')?.text ?? ''));
+        const fails = consequence && [...walk(consequence)].some(c => {
+          if (c.type !== 'call_expression') return false;
+          const f = c.childForFieldName('function');
+          const recv = f?.type === 'selector_expression' ? f.childForFieldName('operand') : null;
+          return recv?.type === 'identifier' && ctx.testingParams.has(recv.text) && GO_FAIL.test(f!.childForFieldName('field')?.text ?? '');
+        });
         if (!fails) continue;
         const cond = n.childForFieldName('condition');
         const init = n.childForFieldName('initializer');
@@ -465,13 +637,6 @@ const GO: Lang = {
     for (const n of walk(body)) if (n.type === 'return_statement' && n.namedChildren[0]) out.push(n.namedChildren[0]);
     return out;
   },
-  defStatement(n, body) {
-    for (let p: Node | null = n; p && p.id !== body.id; p = p.parent) {
-      if (p.type === 'short_var_declaration' || p.type === 'assignment_statement' || p.type === 'var_spec') return p;
-      if (p.type === 'func_literal') return null;
-    }
-    return null;
-  },
 };
 
 const LANGS: Record<string, Lang> = { TypeScript: JS, JavaScript: JS, Python: PY, Go: GO };
@@ -479,11 +644,13 @@ const LANGS: Record<string, Lang> = { TypeScript: JS, JavaScript: JS, Python: PY
 // ── Classifying one test body ───────────────────────────────────────────────────
 
 /**
- * Which calls in one test file are calls to the symbol. A bare call by name is (the file is already
- * linked to the symbol by the index). A member call (`x.name(…)`) is only when its receiver can be
- * the symbol's: the file names the symbol's class, for a method; or the receiver is a namespace the
- * file imports from the symbol's own module, for a module function. A same-named method on another
- * object (`map.delete(k)` against a production `delete`) is not a call to the symbol.
+ * Which calls in one test file are calls to the symbol. A bare call by name is, unless the test file
+ * declares that name itself (a local function, variable or parameter shadows it); the file is already
+ * linked to the symbol by the index. A member call (`x.name(…)`) is only when its receiver is provably
+ * the symbol's: an instance of its class (`new C()`, a variable assigned from one, `C.` for a static),
+ * or a namespace the file imports from the symbol's own module. A same-named method on another object
+ * (`map.delete(k)` against a production `delete`) is not a call to the symbol, and neither is an
+ * assertion call (`expect(…)` against a production `expect`).
  */
 interface CallTarget { name: string; receiverOk(receiver: Node): boolean }
 
@@ -493,11 +660,16 @@ interface CallTarget { name: string; receiverOk(receiver: Node): boolean }
  * so classifying the file against many changed symbols costs lookups, not re-walks.
  */
 interface FileAnalysis {
+  ctx: FileContext;
   cases: Case[];
   helpers: Map<string, FileFn>;
   assertingParams: Map<string, Set<number>>;
+  /** Some test case or helper in the file makes an assertion a recognizer knows. */
+  recognized: boolean;
   callsIn(body: Node, target: CallTarget): Node[];
   bareCallsIn(body: Node, name: string): Node[];
+  /** Every call in `body`, with its name and receiver. */
+  allCallsIn(body: Node): Array<{ node: Node; name: string; receiver: Node | null }>;
   assertionsOf(body: Node): Array<{ value: Node; line: number }>;
   cfgOf(fn: Node): FunctionCfg | undefined;
 }
@@ -507,10 +679,14 @@ const fileAnalyses = new WeakMap<Node, FileAnalysis>();
 function analyzeFile(lang: Lang, language: string, root: Node): FileAnalysis {
   const cached = fileAnalyses.get(root);
   if (cached) return cached;
+  const ctx = lang.context(root);
+  const calls: Array<{ node: Node; name: string; receiver: Node | null }> = [];
   const callsByName = new Map<string, Array<{ node: Node; receiver: Node | null }>>();
   for (const n of walk(root)) {
     const c = lang.callee(n);
-    if (c) (callsByName.get(c.name) ?? callsByName.set(c.name, []).get(c.name)!).push({ node: n, receiver: c.receiver });
+    if (!c) continue;
+    calls.push({ node: n, name: c.name, receiver: c.receiver });
+    (callsByName.get(c.name) ?? callsByName.set(c.name, []).get(c.name)!).push({ node: n, receiver: c.receiver });
   }
   const cfgs = new Map<number, FunctionCfg | undefined>();
   const cfgOf = (fn: Node): FunctionCfg | undefined => {
@@ -519,7 +695,7 @@ function analyzeFile(lang: Lang, language: string, root: Node): FileAnalysis {
   };
   const assertionCache = new Map<number, Array<{ value: Node; line: number }>>();
   const assertionsOf = (body: Node): Array<{ value: Node; line: number }> => {
-    if (!assertionCache.has(body.id)) assertionCache.set(body.id, lang.assertions(body));
+    if (!assertionCache.has(body.id)) assertionCache.set(body.id, lang.assertions(body, ctx));
     return assertionCache.get(body.id)!;
   };
   const cases = lang.cases(root);
@@ -542,19 +718,20 @@ function analyzeFile(lang: Lang, language: string, root: Node): FileAnalysis {
   }
 
   const analysis: FileAnalysis = {
+    ctx,
     cases,
     helpers,
     assertingParams,
-    // A bare call by name is a call to the symbol (the file is already linked to it by the index); a
-    // member call only when its receiver can be the symbol's (see callTarget).
+    recognized: cases.some(c => assertionsOf(c.body).length > 0) || [...helpers.values()].some(h => assertionsOf(h.body).length > 0),
     callsIn: (body, target) => (callsByName.get(target.name) ?? [])
-      .filter(c => contains(body, c.node) && !lang.isAssertionCall(target.name, c.receiver)
-        && (c.receiver === null || target.receiverOk(c.receiver)))
+      .filter(c => contains(body, c.node) && !lang.isAssertionCall(target.name, c.receiver, ctx)
+        && (c.receiver === null ? !ctx.localNames.has(target.name) : target.receiverOk(c.receiver)))
       .map(c => c.node),
     // A helper in the same file is reached only by a bare call.
     bareCallsIn: (body, name) => (callsByName.get(name) ?? [])
       .filter(c => c.receiver === null && contains(body, c.node))
       .map(c => c.node),
+    allCallsIn: (body) => calls.filter(c => contains(body, c.node)),
     assertionsOf,
     cfgOf,
   };
@@ -562,71 +739,185 @@ function analyzeFile(lang: Lang, language: string, root: Node): FileAnalysis {
   return analysis;
 }
 
-function stem(path: string): string {
-  const base = path.replace(/\\/g, '/').split('/').pop() ?? path;
-  return base.replace(/\.[cm]?[jt]sx?$|\.py$|\.go$/i, '').replace(/\.(?:js|ts)$/i, '');
+const posixPath = (p: string): string => p.replace(/\\/g, '/');
+const withoutExt = (p: string): string => p.replace(/\.(?:[cm]?[jt]sx?|py|go)$/i, '');
+
+/** POSIX `dirname`. */
+function dirOf(p: string): string {
+  const q = posixPath(p);
+  const i = q.lastIndexOf('/');
+  return i < 0 ? '' : q.slice(0, i);
 }
 
-/** The local names this file binds to the module at `symbolFile` (namespace, default, `require`). */
-function moduleBindings(language: string, text: string, symbolFile: string): Set<string> {
-  const want = stem(symbolFile);
-  const dir = symbolFile.replace(/\\/g, '/').split('/').slice(-2, -1)[0] ?? '';
+/** Resolve a relative module specifier against the test file's directory (POSIX, no extension). */
+function resolveRelative(testPath: string, spec: string): string {
+  const parts = dirOf(testPath) ? dirOf(testPath).split('/') : [];
+  for (const seg of spec.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') parts.pop(); else parts.push(seg);
+  }
+  return withoutExt(parts.join('/'));
+}
+
+/**
+ * The local names this test file binds to the module at `symbolFile`, by import. Only a module the
+ * specifier provably names counts: a JS/TS relative specifier that resolves to the symbol's file (or
+ * its directory's index); a Python dotted module whose path ends the symbol's path (a single-segment
+ * one only from the same directory); a Go import path from a module (a dotted first segment, never
+ * the standard library) ending in the symbol's directory.
+ */
+function moduleBindings(language: string, text: string, symbolFile: string, testPath: string): Set<string> {
+  const target = withoutExt(posixPath(symbolFile));
   const names = new Set<string>();
-  const fromModule = (spec: string): boolean => {
-    const s = stem(spec);
-    return s === want || (s === 'index' && want === 'index') || (want === 'index' && spec.replace(/\/+$/, '').split('/').pop() === dir);
-  };
   if (language === 'TypeScript' || language === 'JavaScript') {
+    const fromModule = (spec: string): boolean => {
+      if (!spec.startsWith('.')) return false; // a package, never a repository file
+      const resolved = resolveRelative(testPath, spec);
+      return resolved === target || (target.endsWith('/index') && resolved === target.slice(0, -'/index'.length));
+    };
     for (const m of text.matchAll(/import\s+\*\s+as\s+([\w$]+)\s+from\s+['"]([^'"]+)['"]/g)) if (fromModule(m[2])) names.add(m[1]);
     for (const m of text.matchAll(/import\s+([\w$]+)\s*(?:,\s*\{[^}]*\})?\s+from\s+['"]([^'"]+)['"]/g)) if (fromModule(m[2])) names.add(m[1]);
     for (const m of text.matchAll(/(?:const|let|var)\s+([\w$]+)\s*=\s*(?:await\s+import|require)\s*\(\s*['"]([^'"]+)['"]\s*\)/g)) if (fromModule(m[2])) names.add(m[1]);
   } else if (language === 'Python') {
-    for (const m of text.matchAll(/^\s*import\s+([\w.]+)(?:\s+as\s+(\w+))?/gm)) {
-      if (m[1].split('.').pop() === want) names.add(m[2] ?? m[1]);
-    }
-    for (const m of text.matchAll(/^\s*from\s+[\w.]+\s+import\s+([^\n]+)/gm)) {
-      for (const part of m[1].replace(/[()]/g, '').split(',')) {
+    const testDir = dirOf(testPath);
+    const fromModule = (dotted: string): boolean => {
+      const rel = dotted.replace(/\./g, '/');
+      if (!dotted.includes('.')) return target === rel || target === (testDir ? `${testDir}/${rel}` : rel);
+      return target === rel || target.endsWith(`/${rel}`);
+    };
+    for (const m of text.matchAll(/^[ \t]*import[ \t]+([\w.]+)(?:[ \t]+as[ \t]+(\w+))?/gm)) if (fromModule(m[1])) names.add(m[2] ?? m[1]);
+    for (const m of text.matchAll(/^[ \t]*from[ \t]+(\.*)([\w.]*)[ \t]+import[ \t]+([^\n#]+)/gm)) {
+      for (const part of m[3].replace(/[()]/g, '').split(',')) {
         const [name, alias] = part.trim().split(/\s+as\s+/);
-        if (name === want) names.add(alias ?? name);
+        if (!name) continue;
+        const dotted = m[2] ? `${m[2]}.${name}` : name;
+        const ok = m[1] ? (testDir ? `${testDir}/` : '') + dotted.replace(/\./g, '/') === target : fromModule(dotted);
+        if (ok) names.add(alias ?? name);
       }
     }
   } else if (language === 'Go') {
-    // A package is referred to by its name, conventionally its directory's name.
-    if (dir) names.add(dir);
-    for (const m of text.matchAll(/(\w+)\s+"[^"]*\/([\w-]+)"/g)) if (m[2] === dir) names.add(m[1]);
+    const dir = dirOf(target).split('/').pop() ?? '';
+    for (const m of text.matchAll(/(?:^|[\s(])(?:(\w+)[ \t]+)?"([^"]+)"/gm)) {
+      const segs = m[2].split('/');
+      if (segs.length < 2 || !segs[0].includes('.') || segs.at(-1) !== dir) continue;
+      names.add(m[1] ?? dir);
+    }
   }
   return names;
 }
 
-function callTarget(language: string, text: string, symbol: { name: string; filePath: string; className?: string }): CallTarget {
+const perRootCache = new WeakMap<Node, Map<string, Set<string>>>();
+
+/** Memoize a per-tree, per-key name set (instances of a class, bindings of a module). */
+function memoOnRoot(root: Node, key: string, build: () => Set<string>): Set<string> {
+  let m = perRootCache.get(root);
+  if (!m) perRootCache.set(root, m = new Map());
+  let v = m.get(key);
+  if (!v) m.set(key, v = build());
+  return v;
+}
+
+/** Local names this file assigns from a constructor of `cls`: its instances. */
+function instancesOf(language: string, root: Node, cls: string): Set<string> {
+  const esc = cls.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // every regex metacharacter
+  const ctor = language === 'Python' ? new RegExp(`^(?:[\\w.]+\\.)?${esc}\\s*\\(`)
+    : language === 'Go' ? new RegExp(`^(?:&?(?:\\w+\\.)?${esc}\\s*\\{|(?:\\w+\\.)?New${esc}\\s*\\()`)
+    : new RegExp(`^(?:await\\s+)?new\\s+(?:[\\w$]+\\.)*${esc}\\s*[(<]`);
+  const out = new Set<string>();
+  for (const n of walk(root)) {
+    let pairs: Array<[Node | null, Node | null]> = [];
+    if (n.type === 'variable_declarator') pairs = [[n.childForFieldName('name'), n.childForFieldName('value')]];
+    else if (n.type === 'assignment_expression' || n.type === 'assignment') pairs = [[n.childForFieldName('left'), n.childForFieldName('right')]];
+    else if (n.type === 'short_var_declaration' || n.type === 'assignment_statement') {
+      const l = n.childForFieldName('left')?.namedChildren ?? [];
+      const r = n.childForFieldName('right')?.namedChildren ?? [];
+      if (l.length === r.length) pairs = l.map((x, i) => [x, r[i]] as [Node, Node]);
+    }
+    for (const [l, r] of pairs) if (l?.type === 'identifier' && r && ctor.test(r.text)) out.add(l.text);
+  }
+  return out;
+}
+
+/** The last segment of a (possibly qualified) type or constructor name. */
+const lastName = (n: Node | null | undefined): string | undefined => n?.text.split('.').pop();
+
+function callTarget(
+  language: string,
+  text: string,
+  root: Node,
+  testPath: string,
+  symbol: { name: string; filePath: string; className?: string },
+): CallTarget {
   const lang = LANGS[language];
   if (symbol.className) {
     const cls = symbol.className;
-    const named = new RegExp(`(?<![\\w$])${cls.replace(/[$]/g, '\\$')}(?![\\w$])`).test(text);
-    return { name: symbol.name, receiverOk: () => named };
+    const instances = memoOnRoot(root, `class\0${cls}`, () => instancesOf(language, root, cls));
+    const isInstance = (r: Node): boolean => {
+      if (r.type === 'identifier') return r.text === cls || instances.has(r.text);
+      if (r.type === 'new_expression') return lastName(r.childForFieldName('constructor')) === cls;
+      if (r.type === 'call') return lastName(r.childForFieldName('function')) === cls;
+      if (r.type === 'composite_literal') return lastName(r.childForFieldName('type')) === cls;
+      if (r.type === 'unary_expression' || r.type === 'parenthesized_expression') {
+        const inner = r.namedChildren.at(-1);
+        return inner ? isInstance(inner) : false;
+      }
+      return false;
+    };
+    return { name: symbol.name, receiverOk: isInstance };
   }
-  const bindings = moduleBindings(language, text, symbol.filePath);
+  const bindings = memoOnRoot(root, `module\0${symbol.filePath}\0${testPath}`, () => moduleBindings(language, text, symbol.filePath, testPath));
   return {
     name: symbol.name,
-    receiverOk: (r) => lang !== undefined && lang.identifierTypes.has(r.type) && bindings.has(r.text),
+    receiverOk: (r) => lang !== undefined && (lang.identifierTypes.has(r.type) || r.type === 'attribute') && bindings.has(r.text),
   };
+}
+
+const ASSIGN_TYPES: ReadonlySet<string> = new Set([
+  'assignment_expression', 'augmented_assignment_expression', 'assignment', 'augmented_assignment',
+  'assignment_statement', 'short_var_declaration', 'variable_declarator',
+]);
+
+/** Assignments in a tree by start row: the left side's text and where it starts. Built once per tree. */
+const assignmentRows = new WeakMap<Node, Map<number, Array<{ startIndex: number; left: string }>>>();
+
+function assignmentsOnRow(body: Node, row: number): Array<{ startIndex: number; left: string }> {
+  let root: Node = body;
+  while (root.parent) root = root.parent;
+  let rows = assignmentRows.get(root);
+  if (!rows) {
+    rows = new Map();
+    for (const n of walk(root)) {
+      if (!ASSIGN_TYPES.has(n.type)) continue;
+      const left = (n.childForFieldName('left') ?? n.childForFieldName('name'))?.text;
+      if (left === undefined) continue;
+      const r = n.startPosition.row;
+      (rows.get(r) ?? rows.set(r, []).get(r)!).push({ startIndex: n.startIndex, left });
+    }
+    assignmentRows.set(root, rows);
+  }
+  return rows.get(row) ?? [];
 }
 
 /**
  * The value-derivation test for one body: does `value` (a node in `body`) carry a value from one
  * of `sources` (call nodes in `body`)? True when the value contains a source call, or reads a
- * variable whose definition the def-use overlay traces back to a statement holding one.
+ * variable the source call's value was bound to, followed through the def-use overlay.
  */
 function derivedFrom(lang: Lang, cfg: FunctionCfg | undefined, body: Node, sources: Node[], value: Node, extraSeedVars: string[] = []): boolean {
   if (sources.some(s => contains(value, s))) return true;
   if (!cfg) return false;
-  const seedLines = new Set<number>();
-  for (const s of sources) {
-    const def = lang.defStatement(s, body);
-    if (def) seedLines.add(line(def));
-  }
   const tainted = new Set<string>();
-  for (const e of cfg.defUse) if (seedLines.has(e.defLine)) tainted.add(`${e.variable}|${e.defLine}`);
+  for (const s of sources) {
+    const b = lang.bindings(s, body);
+    if (!b) continue;
+    for (const name of b.names) {
+      // `let r = add(); r = 5;` on one line: the overlay is line-granular, so a reassignment on the
+      // binding's own line would carry the taint past it. Such a binding is not seeded.
+      const reassigned = assignmentsOnRow(body, b.from - 1).some(a => a.startIndex >= s.endIndex && a.left === name);
+      if (reassigned) continue;
+      for (const e of cfg.defUse) if (e.variable === name && e.defLine >= b.from && e.defLine <= b.to) tainted.add(`${e.variable}|${e.defLine}`);
+    }
+  }
   for (const v of extraSeedVars) tainted.add(`${v}|${cfg.paramLine}`);
   if (tainted.size === 0) return false;
   const defVarsAtLine = new Map<number, Set<string>>();
@@ -684,6 +975,41 @@ function paramNames(fn: Node): string[] {
   return out;
 }
 
+/** What a test file mocks, read once per file: module specifiers and mocked names. */
+interface MockFacts { modules: string[]; names: Map<string, string> }
+
+const mockFacts = new WeakMap<Node, MockFacts>();
+
+function mockFactsOf(language: string, text: string, root: Node): MockFacts {
+  const hit = mockFacts.get(root);
+  if (hit) return hit;
+  const facts: MockFacts = { modules: [], names: new Map() };
+  if (language === 'TypeScript' || language === 'JavaScript') {
+    for (const m of text.matchAll(/\b(?:vi|jest)\.(?:mock|doMock)\(\s*['"](\.[^'"\n]{1,300})['"]/g)) facts.modules.push(m[1]);
+    for (const m of text.matchAll(/\b(?:vi|jest)\.mocked\(\s*([\w$]{1,200})/g)) facts.names.set(m[1], 'vi.mocked');
+    for (const m of text.matchAll(/\bspyOn\([^,\n]{1,300},\s*['"]([\w$]{1,200})['"]/g)) facts.names.set(m[1], 'spyOn');
+  } else if (language === 'Python') {
+    for (const m of text.matchAll(/\bpatch\(\s*['"][\w.]{0,300}\.(\w{1,200})['"]/g)) facts.names.set(m[1], 'patch');
+    for (const m of text.matchAll(/\bpatch\.object\([^,\n]{1,300},\s*['"](\w{1,200})['"]/g)) facts.names.set(m[1], 'patch.object');
+  }
+  mockFacts.set(root, facts);
+  return facts;
+}
+
+/**
+ * How the test file replaces the symbol with a mock, or null: `vi.mock`/`jest.mock` of its module,
+ * `vi.mocked(name)`, `spyOn(x, 'name')`, Python `patch('….name')` / `patch.object(x, 'name')`.
+ */
+function mocksSymbol(language: string, text: string, root: Node, testPath: string, symbol: { name: string; filePath: string }): string | null {
+  const facts = mockFactsOf(language, text, root);
+  const target = withoutExt(posixPath(symbol.filePath));
+  for (const spec of facts.modules) {
+    const resolved = resolveRelative(testPath, spec);
+    if (resolved === target || (target.endsWith('/index') && resolved === target.slice(0, -'/index'.length))) return `mock('${spec}')`;
+  }
+  return facts.names.get(symbol.name) ?? null;
+}
+
 export interface CaseEvidence {
   test: string;
   class: EvidenceClass;
@@ -720,8 +1046,9 @@ export async function classifyTestSource(
   if (!root) return { parsed: false, cases: [] };
 
   const symbolName = symbol.name;
-  const target = callTarget(language, text, symbol);
+  const target = callTarget(language, text, root, path, symbol);
   const file = analyzeFile(lang, language, root);
+  const mocked = mocksSymbol(language, text, root, path, symbol);
   const { helpers, assertingParams } = file;
 
   // A value helper returns a value derived from a direct call to the symbol.
@@ -736,6 +1063,7 @@ export async function classifyTestSource(
   }
 
   const out: CaseEvidence[] = [];
+  const unrecognized = (test: string, reason: string): CaseEvidence => ({ test, class: 'reaches', line: null, recognized: false, reason });
   for (const c of file.cases) {
     const direct = file.callsIn(c.body, target);
     const viaValueHelper = [...valueHelpers].flatMap(h => file.bareCallsIn(c.body, h));
@@ -746,24 +1074,45 @@ export async function classifyTestSource(
     const assertions = file.assertionsOf(c.body);
     const assertionHelperCalls = [...assertingParams.keys()].flatMap(h => file.bareCallsIn(c.body, h).map(call => ({ h, call })));
     const callLine = line((direct[0] ?? viaValueHelper[0] ?? c.fn));
+    const cfg = sources.length > 0 ? file.cfgOf(c.fn) : undefined;
+    // A value from the call flows into a call that looks like an assertion this analysis does not
+    // know (`should(r)`, `self.check(r)`, a testify suite's `s.Equal`): not a fact either way.
+    const findUnknownForm = () => sources.length > 0 ? file.allCallsIn(c.body).find(k => lang.looksLikeAssertion(k.name, k.receiver, file.ctx)
+      && !lang.isAssertionCall(k.name, k.receiver, file.ctx)
+      && lang.callArgs(k.node).some(a => derivedFrom(lang, cfg, c.body, sources, a))) : undefined;
     if (assertions.length === 0 && assertionHelperCalls.length === 0) {
-      out.push({
-        test: c.name, class: 'reaches', line: null, recognized: false,
-        reason: `the test calls ${symbolName}, but no assertion this analysis recognizes is in it (${ASSERTION_FRAMEWORKS[language]})`,
-      });
+      const unknownForm = findUnknownForm();
+      if (unknownForm) {
+        out.push(unrecognized(c.name, `a value from ${symbolName} flows into ${unknownForm.name}, an assertion form this analysis does not recognize`));
+        continue;
+      }
+      // A file whose other tests use a recognized form: this test simply asserts nothing. A file with
+      // no recognized assertion anywhere may use a form this analysis does not know.
+      out.push(file.recognized
+        ? { test: c.name, class: 'exercises', line: callLine, recognized: true, reason: `the test calls ${symbolName} and makes no assertion` }
+        : unrecognized(c.name, `the test calls ${symbolName}, but no assertion in its file is in a form this analysis recognizes (${ASSERTION_FRAMEWORKS[language]})`));
       continue;
     }
-    const cfg = sources.length > 0 ? file.cfgOf(c.fn) : undefined;
     const hit = sources.length > 0 ? assertions.find(a => derivedFrom(lang, cfg, c.body, sources, a.value)) : undefined;
+    const viaHelper = !hit && sources.length > 0 ? assertionHelperCalls.find(({ h, call }) =>
+      lang.callArgs(call).some((arg, i) => assertingParams.get(h)!.has(i) && derivedFrom(lang, cfg, c.body, sources, arg))) : undefined;
+    if ((hit || viaHelper) && mocked) {
+      // The assertion consumes what a mock returns in place of the symbol, not the symbol's output.
+      out.push({ test: c.name, class: 'exercises', line: callLine, recognized: true, reason: `the test file mocks ${symbolName} (${mocked}), so its assertions consume the mock's output` });
+      continue;
+    }
     if (hit) {
       const helper = viaValueHelper.some(s => contains(hit.value, s)) ? ' (through a helper in the same file)' : '';
       out.push({ test: c.name, class: 'asserts-on', line: hit.line, recognized: true, reason: `an assertion consumes the output of ${symbolName}${helper}` });
       continue;
     }
-    const viaHelper = sources.length > 0 ? assertionHelperCalls.find(({ h, call }) =>
-      lang.callArgs(call).some((arg, i) => assertingParams.get(h)!.has(i) && derivedFrom(lang, cfg, c.body, sources, arg))) : undefined;
     if (viaHelper) {
       out.push({ test: c.name, class: 'asserts-on', line: line(viaHelper.call), recognized: true, reason: `the assertion helper ${viaHelper.h} in the same file asserts on the output of ${symbolName}` });
+      continue;
+    }
+    const unknownForm = findUnknownForm();
+    if (unknownForm) {
+      out.push(unrecognized(c.name, `a value from ${symbolName} flows into ${unknownForm.name}, an assertion form this analysis does not recognize`));
       continue;
     }
     out.push({
@@ -798,7 +1147,7 @@ export function newEvidenceCache(): EvidenceCache {
 
 /** Parsed test files kept across answers in one process, reused only while the text is identical. */
 const SHARED_TREES = new Map<string, { text: string; root: Node | null }>();
-const MAX_SHARED_TREES = 32;
+const MAX_SHARED_TREES = 64;
 
 async function sharedParse(language: string, path: string, text: string): Promise<Node | null> {
   const hit = SHARED_TREES.get(path);
@@ -858,8 +1207,11 @@ export async function symbolTestEvidence(
       continue;
     }
     if (result.cases.length === 0) {
+      // The index links the file to the symbol directly, but no test case calls it: it is used in
+      // setup, a fixture or a mock factory, or passed as a value. What the tests do with it is unknown.
       strongest = strongerClass(strongest, 'reaches');
-      relationships.push({ testFile: file, test: null, class: 'reaches', line: null, recognized: true, reason: `the file references ${symbol.name}, but no test case calls it by name` });
+      allRecognized = false;
+      relationships.push({ testFile: file, test: null, class: 'reaches', line: null, recognized: false, reason: `the file references ${symbol.name}, but no test case calls it directly (setup, a fixture, a mock, or a value passed on); not classed` });
       continue;
     }
     for (const c of result.cases) {
@@ -872,7 +1224,7 @@ export async function symbolTestEvidence(
     strongest = strongerClass(strongest, 'reaches');
     const recognized = ASSERTION_RECOGNITION_LANGUAGES.has(detectLanguage(file));
     if (!recognized) allRecognized = false;
-    relationships.push({ testFile: file, test: null, class: 'reaches', line: null, recognized, reason: `the test reaches ${symbol.name} only through other functions` });
+    relationships.push({ testFile: file, test: null, class: 'reaches', line: null, recognized, reason: `a test in this file reaches ${symbol.name} only through other functions` });
   }
 
   relationships.sort((a, b) => EVIDENCE_ORDER.indexOf(a.class) - EVIDENCE_ORDER.indexOf(b.class)
@@ -888,5 +1240,6 @@ export async function symbolTestEvidence(
     omittedRelationships: relationships.length - kept.length,
     notAssessed,
     reachTruncated: truncated,
+    complete: allRecognized && omittedFiles === 0 && notAssessed.length === 0,
   };
 }

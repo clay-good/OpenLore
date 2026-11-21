@@ -701,15 +701,13 @@ export async function handleSelectTests(
     [...seeds.map(s => s.filePath), ...selectedTests.map(t => t.file)],
   );
 
-  const { symbolEvidence, omittedSymbols } = await attachTestEvidence(absDir, cg, seeds, selectedTests);
-  if (omittedSymbols > 0) {
-    caveats.push(`Test evidence was classified for the first ${MAX_EVIDENCE_SYMBOLS} changed symbols; ${omittedSymbols} more are not assessed.`);
-  }
+  const { symbolEvidence, omittedSymbols, disclosures: evidenceDisclosures } = await attachTestEvidence(absDir, cg, seeds, selectedTests);
 
   return {
     changed: hasSymbols ? seeds.map(s => s.name) : changedFiles,
     seeds: seeds.map(s => ({ name: s.name, file: s.filePath })),
     symbolEvidence,
+    ...(omittedSymbols > 0 ? { symbolEvidenceOmitted: omittedSymbols } : {}),
     ...(changeGranularity ? { changeGranularity } : {}),
     selectedTests,
     ...(truncatedAtDepth !== undefined ? { truncatedAtDepth } : {}),
@@ -728,6 +726,9 @@ export async function handleSelectTests(
       staleness: await computeStaleness(absDir),
       integrity: ctx?.integrity,
       ...(dynamicCrossing ? { extraCrossings: [dynamicCrossing] } : {}),
+      // Evidence is additive (the selection does not depend on it), but an answer that classes
+      // only part of it says so, so its boundary is never complete beside the gap.
+      ...(evidenceDisclosures.length > 0 ? { disclosures: evidenceDisclosures } : {}),
     }),
   };
 }
@@ -922,10 +923,20 @@ export interface SymbolEvidenceSummary {
   strongestEvidence: EvidenceClass | null;
   /** Every related test's assertions were recognized. */
   allRecognized: boolean;
-  /** Test relationships: the strongest first, capped. */
+  /**
+   * Every linked test file was classified and recognized: only then does "no asserting test" hold.
+   * False past a cap, for an unreadable file, or for an unrecognized framework.
+   */
+  complete: boolean;
+  /** Test relationships: the strongest first, capped at {@link MAX_SERVED_RELATIONSHIPS}. */
   relationships: TestRelationship[];
+  /** Relationships past the cap, counted in `strongestEvidence` but not listed. */
+  omittedRelationships?: number;
   notAssessed?: string[];
 }
+
+/** Relationships one answer lists per changed symbol; the strongest come first. */
+const MAX_SERVED_RELATIONSHIPS = 5;
 
 /**
  * Class the selected tests against the changed symbols (change: add-test-evidence-claims). The
@@ -936,22 +947,34 @@ async function attachTestEvidence(
   cg: SerializedCallGraph,
   seeds: FunctionNode[],
   selectedTests: SelectedTest[],
-): Promise<{ symbolEvidence: SymbolEvidenceSummary[]; omittedSymbols: number }> {
+): Promise<{ symbolEvidence: SymbolEvidenceSummary[]; omittedSymbols: number; disclosures: string[] }> {
   const cache = newEvidenceCache();
   const assessed = seeds.slice(0, MAX_EVIDENCE_SYMBOLS);
   const evidence: SymbolEvidence[] = [];
   for (const seed of assessed) evidence.push(await symbolTestEvidence(absDir, cg, seed, cache));
   for (const t of selectedTests) t.evidence = evidenceForSelectedTest(t, evidence);
+  const omittedSymbols = seeds.length - assessed.length;
+  const disclosures: string[] = [];
+  if (omittedSymbols > 0) disclosures.push(`Test evidence was not assessed for ${omittedSymbols} changed symbol(s) past the first ${MAX_EVIDENCE_SYMBOLS}.`);
+  const partial = evidence.filter(e => e.strongest !== null && !e.complete).map(e => e.symbol);
+  if (partial.length > 0) disclosures.push(`Test evidence is partial for ${partial.slice(0, 5).join(', ')}${partial.length > 5 ? ` and ${partial.length - 5} more` : ''}: a linked test file was past a cap, unreadable, or in an unrecognized framework.`);
   return {
-    symbolEvidence: evidence.map(e => ({
-      symbol: e.symbol,
-      file: e.file,
-      strongestEvidence: e.strongest,
-      allRecognized: e.allRecognized,
-      relationships: e.relationships,
-      ...(e.notAssessed.length > 0 ? { notAssessed: e.notAssessed } : {}),
-    })),
-    omittedSymbols: seeds.length - assessed.length,
+    symbolEvidence: evidence.map(e => {
+      const listed = e.relationships.slice(0, MAX_SERVED_RELATIONSHIPS);
+      const omitted = e.relationships.length - listed.length + e.omittedRelationships;
+      return {
+        symbol: e.symbol,
+        file: e.file,
+        strongestEvidence: e.strongest,
+        allRecognized: e.allRecognized,
+        complete: e.complete,
+        relationships: listed,
+        ...(omitted > 0 ? { omittedRelationships: omitted } : {}),
+        ...(e.notAssessed.length > 0 ? { notAssessed: e.notAssessed } : {}),
+      };
+    }),
+    omittedSymbols,
+    disclosures,
   };
 }
 
@@ -961,14 +984,30 @@ async function attachTestEvidence(
  * file, or a helper in it) takes its file's strongest class. A test with no classified link is
  * `not-assessed`, never assumed.
  */
-export function evidenceForSelectedTest(t: { test: string; file: string }, evidence: readonly SymbolEvidence[]): TestEvidence {
+export function evidenceForSelectedTest(t: { test: string; file: string; viaPath?: readonly string[] }, evidence: readonly SymbolEvidence[]): TestEvidence {
   const rels = evidence.flatMap(e => e.relationships.filter(r => r.testFile === t.file));
   if (rels.length === 0) return 'not-assessed';
   const language = detectLanguage(t.file);
   const caseLevel = (language === 'Python' || language === 'Go') && t.test !== WHOLE_FILE_TEST;
-  const pick = caseLevel
-    ? rels.filter(r => r.test === null || r.test === t.test || r.test.endsWith(`.${t.test}`) || r.test.startsWith(`${t.test}/`))
-    : rels;
-  if (pick.length === 0) return 'reaches';
-  return pick.reduce<EvidenceClass | null>((best, r) => strongerClass(best, r.class), null) ?? 'not-assessed';
+  if (!caseLevel) return rels.reduce<EvidenceClass | null>((best, r) => strongerClass(best, r.class), null) ?? 'not-assessed';
+  const fileLevel = rels.filter(r => r.test === null);
+  const own = rels.filter(r => r.test !== null && (r.test === t.test || r.test.endsWith(`.${t.test}`) || r.test.startsWith(`${t.test}/`)));
+  // The test's own case, or the file's links; a case this analysis did not link is not assessed.
+  // Two classes with a same-named method: either may be this one, so the weaker class is the claim.
+  const ownCases = new Set(own.map(r => r.test!.split('/')[0]));
+  if (own.length > 0) {
+    const pick = ownCases.size > 1 ? weakest(own) : own.reduce<EvidenceClass | null>((b, r) => strongerClass(b, r.class), null);
+    return pick ?? 'not-assessed';
+  }
+  // A file-level link describes some test in the file; it is this test's only when this test has a
+  // reaching path of its own (a same-file fallback or a tier pick has none).
+  if (fileLevel.length > 0 && (t.viaPath?.length ?? 0) > 0) return 'reaches';
+  return 'not-assessed';
+}
+
+/** The weakest class among relationships (for an ambiguous case match). */
+function weakest(rels: readonly TestRelationship[]): EvidenceClass | null {
+  let out: EvidenceClass | null = null;
+  for (const r of rels) if (out === null || strongerClass(out, r.class) === out) out = r.class;
+  return out;
 }

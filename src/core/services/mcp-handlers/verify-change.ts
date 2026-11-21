@@ -210,8 +210,10 @@ export function projectVerifyReceipt(
   const evidenceRaw: GovernanceFinding[] = [];
   for (const e of b.changed.testEvidence ?? []) {
     if (e.strongestEvidence === null || e.strongestEvidence === 'asserts-on') continue;
-    if (!e.allRecognized) {
-      boundaries.push(`Test assertions related to ${e.symbol} were not all recognized, so whether a test asserts on it was not assessed.`);
+    // `complete`: every linked test file was classified and recognized. Past a cap, an unreadable
+    // file, or an unrecognized framework, the absence of an asserting test is not established.
+    if (!(e.complete ?? e.allRecognized)) {
+      boundaries.push(`Test evidence for ${e.symbol} is partial (a linked test file was past a cap, unreadable, or its assertions were not recognized), so whether a test asserts on it was not assessed.`);
       continue;
     }
     evidenceRaw.push({

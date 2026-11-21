@@ -34,7 +34,7 @@ import {
   hasPushableMemory, hasSpecDomainTrigger, injectionFields, makeHopProbe, maxTriggerHops, selectInjectedMemories, specDomainsForFiles, UNVERIFIABLE_VIEW,
   type InjectedMemory, type StaleTriggeredMemory,
 } from './memory-triggers.js';
-import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols, type SymbolEvidenceSummary, type TestEvidence } from './test-impact.js';
+import { seedsFromFiles, handleSelectTests, narrowToChangedSymbols, MAX_EVIDENCE_SYMBOLS, type SymbolEvidenceSummary, type TestEvidence } from './test-impact.js';
 import type { EvidenceClass } from '../../analyzer/test-evidence.js';
 import {
   carriedCaveat,
@@ -167,7 +167,7 @@ export interface BlastRadiusBriefing {
      * means an assertion consumed its output, not that its behavior is correct; null means no test
      * relates to it. `allRecognized` is false when some related test's assertions were not recognized.
      */
-    testEvidence?: Array<{ symbol: string; file: string; strongestEvidence: EvidenceClass | null; allRecognized: boolean }>;
+    testEvidence?: Array<{ symbol: string; file: string; strongestEvidence: EvidenceClass | null; allRecognized: boolean; complete: boolean }>;
   };
   /**
    * How precisely the changed symbols were identified (change: add-symbol-content-hashes): files
@@ -424,6 +424,7 @@ export async function computeBlastRadius(
   let testCount = 0;
   let testToRun: Array<{ test: string; file: string; confidence: string; evidence?: TestEvidence }> = [];
   let testEvidence: SymbolEvidenceSummary[] | undefined;
+  let testEvidenceOmitted = 0;
   let testFiles: string[] = [];
   let testSoundness: unknown;
   let testsTruncatedAtDepth: number | undefined;
@@ -441,6 +442,7 @@ export async function computeBlastRadius(
     }, { changedSet: narrowed.set }) as {
       selectedTests?: Array<{ test: string; file: string; confidence: string; evidence?: TestEvidence }>;
       symbolEvidence?: SymbolEvidenceSummary[];
+      symbolEvidenceOmitted?: number;
       soundness?: unknown;
       truncatedAtDepth?: number;
       federation?: Record<string, unknown>;
@@ -452,6 +454,7 @@ export async function computeBlastRadius(
     testFiles = [...new Set(tests.map(t => t.file))];
     testSoundness = sel.soundness;
     testEvidence = sel.symbolEvidence;
+    testEvidenceOmitted = sel.symbolEvidenceOmitted ?? 0;
     testsTruncatedAtDepth = sel.truncatedAtDepth;
     federationResult = sel.federation;
   } catch (err) {
@@ -614,6 +617,9 @@ export async function computeBlastRadius(
   // The counts (tests.count / memory.* / specs.willGoStale / decisions.affected+orphaned /
   // impact.analyzedSymbolCount) remain authoritative and uncapped.
   const capped: string[] = [];
+  if (testEvidenceOmitted > 0) {
+    caveats.push(`Test evidence was not assessed for ${testEvidenceOmitted} changed symbol(s) past the first ${MAX_EVIDENCE_SYMBOLS}; no changed-symbol-no-asserting-test finding is raised for them.`);
+  }
   if (testToRun.length < testCount) capped.push(`tests.toRun (${testToRun.length}/${testCount})`);
   if (testFiles.length > MAX_TEST_FILES) capped.push(`tests.files (${MAX_TEST_FILES}/${testFiles.length})`);
   if (memWillDrift.length > 20) capped.push(`memory.willDrift (20/${memWillDrift.length})`);
@@ -685,7 +691,7 @@ export async function computeBlastRadius(
         testEvidence: testEvidence
           // A seed kept for another reason did not change: its evidence is not this change's.
           .filter(e => !seeds.some(s => narrowed.unchangedSeedIds?.has(s.id) && s.name === e.symbol && s.filePath === e.file))
-          .map(e => ({ symbol: e.symbol, file: e.file, strongestEvidence: e.strongestEvidence, allRecognized: e.allRecognized })),
+          .map(e => ({ symbol: e.symbol, file: e.file, strongestEvidence: e.strongestEvidence, allRecognized: e.allRecognized, complete: e.complete })),
       } : {}),
     },
     ...(changeGranularity ? { changeGranularity } : {}),
