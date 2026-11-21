@@ -28,13 +28,14 @@ import { logger } from '../../utils/logger.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 import {
   OPENLORE_ANALYSIS_REL_PATH, ARTIFACT_CALL_GRAPH_DB, ARTIFACT_FINGERPRINT, DEFAULT_MAX_FILES,
-  OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, OPENSPEC_DECISIONS_SUBDIR,
+  OPENSPEC_SPECS_SUBDIR, OPENSPEC_DECISIONS_SUBDIR,
   WATCH_BULK_THRESHOLD,
 } from '../../constants.js';
 import { EdgeStore, SCHEMA_VERSION } from '../../core/services/edge-store.js';
 import { VectorIndex } from '../../core/analyzer/vector-index.js';
 import { mapFilesBounded } from '../../core/analyzer/bounded-file-scan.js';
 import { SpecVectorIndex } from '../../core/analyzer/spec-vector-index.js';
+import { configuredSpecRoot } from '../../core/services/mcp-handlers/spec-paths.js';
 import type { FileSignatureMap } from '../../core/analyzer/signature-extractor.js';
 import { computeAttestation, reconcile, writeAttestation } from '../../core/analyzer/index-attestation.js';
 import { isGitRepository, validateGitRef } from '../../core/drift/git-diff.js';
@@ -603,14 +604,16 @@ async function buildKeywordSearchIndex(rootPath: string, analysisDir: string): P
 /**
  * Rebuild the keyword (BM25) SPEC search index so `search_specs` works after import — the spec index
  * (`specs` table) shares the `vector-index/` directory that the function-index rebuild recreates, and a
- * fresh analyze builds it too. Best-effort and gated on an `openspec/specs/` directory in the checkout;
+ * fresh analyze builds it too. Best-effort and gated on a `<spec root>/specs/` directory in the checkout;
  * a missing specs dir (or any failure) simply means no spec index, exactly as on a repo without specs.
  */
-async function buildSpecSearchIndex(rootPath: string, analysisDir: string): Promise<boolean> {
-  const specsDir = join(rootPath, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR);
+export async function buildSpecSearchIndex(rootPath: string, analysisDir: string): Promise<boolean> {
+  // The spec root is this project's `openspecPath`, not a fixed `openspec/`.
+  const specRoot = (await configuredSpecRoot(rootPath, { readOnly: true })).absolute;
+  const specsDir = join(specRoot, OPENSPEC_SPECS_SUBDIR);
   if (!existsSync(specsDir)) return false;
   const mappingJsonPath = join(analysisDir, 'mapping.json');
-  const decisionsDir = join(rootPath, OPENSPEC_DIR, OPENSPEC_DECISIONS_SUBDIR);
+  const decisionsDir = join(specRoot, OPENSPEC_DECISIONS_SUBDIR);
   const { recordCount } = await SpecVectorIndex.build(analysisDir, specsDir, null, mappingJsonPath, decisionsDir);
   return recordCount > 0;
 }

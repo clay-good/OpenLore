@@ -2,7 +2,8 @@
  * MCP tool handler: generate_change_proposal
  *
  * Given a story description (BMAD story, free-form intent, or spec delta request),
- * produces a populated OpenSpec change proposal at openspec/changes/{slug}/proposal.md.
+ * produces a populated OpenSpec change proposal at <spec root>/changes/{slug}/proposal.md
+ * (the spec root is the configured `openspecPath`, default `openspec`).
  *
  * The proposal is built from pure structural analysis — no LLM required:
  *   - orient()        → affected functions, spec domains, insertion points
@@ -16,6 +17,7 @@ import { validateDirectory, safeJoin } from './utils.js';
 import { handleOrient } from './orient.js';
 import { handleSearchSpecs } from './semantic.js';
 import { handleAnalyzeImpact } from './graph.js';
+import { configuredSpecRoot, specRootPath } from './spec-paths.js';
 
 // ============================================================================
 // INTERNAL TYPES  (narrow slices of handler outputs we actually use)
@@ -287,7 +289,11 @@ export async function handleGenerateChangeProposal(
     return { error: 'Invalid slug. Use alphanumeric characters and hyphens, e.g. "add-payment-retry".' };
   }
 
-  const changeDir = safeJoin(absDir, join('openspec', 'changes', safeSlug));
+  // The change goes under this project's spec root, not a fixed `openspec/`: a repo with
+  // `openspecPath: "docs"` keeps its changes in `docs/changes/`.
+  const specRoot = await configuredSpecRoot(absDir);
+  const changeRel = specRootPath(specRoot.relative, `changes/${safeSlug}`);
+  const changeDir = safeJoin(absDir, changeRel);
   const proposalPath = join(changeDir, 'proposal.md');
 
   const generatedAt = new Date().toISOString().split('T')[0];
@@ -340,7 +346,7 @@ export async function handleGenerateChangeProposal(
     slug: safeSlug,
     // Served field — POSIX-separated on every OS, like every other path OpenLore
     // returns (a Windows agent shouldn't get `openspec\changes\…` here).
-    proposalPath: `openspec/changes/${safeSlug}/proposal.md`,
+    proposalPath: `${changeRel}/proposal.md`,
     domainsAffected: domains,
     functionsFound: (orient.relevantFunctions ?? []).length,
     requirementsTouched: (specSearch.results ?? []).length,
@@ -348,7 +354,7 @@ export async function handleGenerateChangeProposal(
     riskLevel: maxRisk !== null
       ? (maxRisk < 40 ? 'low' : maxRisk < 70 ? 'medium' : maxRisk < 85 ? 'high' : 'critical')
       : 'unknown',
-    nextStep: `Review and complete openspec/changes/${safeSlug}/proposal.md, then run: openspec specs ${safeSlug}`,
+    nextStep: `Review and complete ${changeRel}/proposal.md, then run: openspec specs ${safeSlug}`,
     orientErrors: orient.error ? [orient.error] : [],
     specSearchErrors: specSearch.error ? [specSearch.error] : [],
   };

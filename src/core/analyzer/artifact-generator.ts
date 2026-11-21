@@ -29,6 +29,7 @@ import {
   ARTIFACT_DYNAMIC_BOUNDARY,
   MAX_HTML_INLINE_SCRIPT_CHARS,
   SOURCE_SCAN_MAX_FILE_BYTES,
+  OPENSPEC_DIR,
 } from '../../constants.js';
 import { graphDigest, writeTraversalIndexArtifact } from './condensation.js';
 import { CfgSpill, sweepLeakedCfgSpills } from './cfg-spill.js';
@@ -372,6 +373,11 @@ export interface ArtifactGeneratorOptions {
    * it is asking to trust nothing.
    */
   reExtract?: boolean;
+  /**
+   * The spec root (`openspecPath`), repository-relative and POSIX-separated, that suggested spec
+   * paths are written under. Default `openspec`; `.` puts `specs/` at the repository root.
+   */
+  specRoot?: string;
 }
 
 /**
@@ -461,6 +467,7 @@ export class AnalysisArtifactGenerator {
       maxValidationFiles: options.maxValidationFiles ?? 5,
       tokensPerChar: options.tokensPerChar ?? TOKENS_PER_CHAR_DEFAULT,
       reExtract: options.reExtract ?? false,
+      specRoot: options.specRoot ?? OPENSPEC_DIR,
     };
   }
 
@@ -970,6 +977,8 @@ export class AnalysisArtifactGenerator {
       routeFiles: enrichment?.routeInventory?.routes.map(route => route.file) ?? [],
       schemaFiles: enrichment?.schemas?.map(schema => schema.file) ?? [],
     });
+    const specRoot = this.options.specRoot;
+    const specRootPrefix = specRoot === '.' ? '' : `${specRoot}/`;
     return {
       ...result,
       domains: result.domains.map(domain => {
@@ -979,7 +988,7 @@ export class AnalysisArtifactGenerator {
         const keyFile = [...defining].sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))[0];
         return {
           name: domainName,
-          suggestedSpecPath: `openspec/specs/${domainName}/spec.md`,
+          suggestedSpecPath: `${specRootPrefix}specs/${domainName}/spec.md`,
           files: [...defining, ...supporting].map(file => file.path),
           definingFiles: defining.map(file => file.path),
           supportingFiles: supporting.map(file => file.path),

@@ -582,7 +582,7 @@ describe('Write Confinement for Mutating Tools (mcp-security)', () => {
 
   it('generate_change_proposal routes its output through the symlink-aware guard', () => {
     const src = readFileSync(join(SRC, 'core', 'services', 'mcp-handlers', 'change.ts'), 'utf8');
-    expect(src).toMatch(/const changeDir = safeJoin\(absDir, join\('openspec', 'changes', safeSlug\)\)/);
+    expect(src).toMatch(/const changeDir = safeJoin\(absDir, changeRel\)/);
     expect(src).not.toMatch(/const changeDir = join\(absDir, 'openspec'/);
   });
 });

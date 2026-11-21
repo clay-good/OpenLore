@@ -1199,6 +1199,19 @@ export class PaymentService {}`;
       expect(report.domainBreakdown.find((d: any) => d.domain === 'user')).toBeDefined();
       expect(report.domainBreakdown.find((d: any) => d.domain === 'order')).toBeDefined();
     });
+
+    it('names each domain spec under the spec root it verified against', () => {
+      const engine = new SpecVerificationEngine(llmService, {
+        rootPath: testDir,
+        openspecPath: join(testDir, 'docs'),
+        outputDir,
+      });
+      const results = [
+        { overallScore: 0.8, domain: 'user', filePath: 'user/a.ts', purposeMatch: { similarity: 0.9 }, importMatch: { f1Score: 0.7 }, exportMatch: { f1Score: 0.8 }, requirementCoverage: { coverage: 0.6, relatedRequirements: [], actuallyImplements: [] }, llmConfidence: 0.8, feedback: [] },
+      ];
+      const report = (engine as any).generateReport(results, '1.0.0');
+      expect(report.domainBreakdown[0].specPath).toBe('docs/specs/user/spec.md');
+    });
   });
 
   describe('verify failure accounting', () => {

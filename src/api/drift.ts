@@ -7,7 +7,7 @@
 
 import { join, resolve } from 'node:path';
 import { noSpecSourceText } from '../core/spec-sources/state.js';
-import { DEFAULT_DRIFT_MAX_FILES, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, ARTIFACT_REPO_STRUCTURE } from '../constants.js';
+import { DEFAULT_DRIFT_MAX_FILES, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_LOGS_SUBDIR, OPENSPEC_SPECS_SUBDIR, ARTIFACT_REPO_STRUCTURE } from '../constants.js';
 import { fileExists } from '../utils/command-helpers.js';
 import { readOpenLoreConfig } from '../core/services/config-manager.js';
 import {
@@ -22,7 +22,7 @@ import { isLlmLoggingEnabled } from '../core/services/llm-logging-policy.js';
 import type { LLMService } from '../core/services/llm-service.js';
 import type { DriftResult } from '../types/index.js';
 import type { DriftApiOptions, ProgressCallback } from './types.js';
-import { resolveOpenspecDir } from '../utils/openspec-dir.js';
+import { confinedOpenspecRel, resolveOpenspecDir } from '../utils/openspec-dir.js';
 import { resolveTrustedApiBase, resolveTrustedSslVerify } from '../core/services/repo-config-trust.js';
 import { errors, isOpenLoreError } from '../utils/errors.js';
 import { withLoggerOptions } from '../utils/logger.js';
@@ -162,7 +162,7 @@ async function drift(options: DriftApiOptions): Promise<DriftResult> {
     changedFiles: gitResult.files,
     failOn,
     domainFilter: domains.length > 0 ? domains : undefined,
-    openspecRelPath: openloreConfig.openspecPath ?? OPENSPEC_DIR,
+    openspecRelPath: confinedOpenspecRel(rootPath, openloreConfig.openspecPath),
     llm,
     baseRef: gitResult.resolvedBase,
     adrMap: adrMap ?? undefined,

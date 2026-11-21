@@ -23,7 +23,6 @@ import {
   DEFAULT_VIEWER_HOST,
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_REL_PATH,
-  OPENSPEC_DIR,
   OPENSPEC_SPECS_SUBDIR,
   ARTIFACT_DEPENDENCY_GRAPH,
   ARTIFACT_LLM_CONTEXT,
@@ -41,6 +40,7 @@ import { getSkeletonContent } from '../../core/analyzer/code-shaper.js';
 import { detectLanguage } from '../../core/analyzer/language-detection.js';
 import { runChatAgent, resolveProviderConfig } from '../../core/services/chat-agent.js';
 import { collectSpecMarkdown, readConfinedFile } from './view-files.js';
+import { configuredSpecRoot } from '../../core/services/mcp-handlers/spec-paths.js';
 import { readViewerFreshness, setViewerFreshnessHeaders } from './viewer-freshness.js';
 import { loadViewerToolchain, OptionalFeatureError } from './optional-features.js';
 import {
@@ -112,17 +112,22 @@ function openBrowser(url: string): void {
   child.unref();
 }
 
+/** The spec directory to view: `--spec` when given, else `<openspecPath>/specs` (repo-relative). */
+export async function viewSpecDir(rootPath: string, spec?: string): Promise<string> {
+  return spec ?? join((await configuredSpecRoot(rootPath, { readOnly: true })).relative, OPENSPEC_SPECS_SUBDIR);
+}
+
 export const viewCommand = new Command('view')
   .description('Start an interactive graph viewer (React) for .openlore/analysis')
   .option('--analysis <path>', 'Path to analysis directory', `${OPENLORE_ANALYSIS_REL_PATH}/`)
-  .option('--spec <path>', 'Path to spec files directory', `./${OPENSPEC_DIR}/${OPENSPEC_SPECS_SUBDIR}/`)
+  .option('--spec <path>', 'Path to spec files directory (default: <openspecPath>/specs/, openspec/specs/ when unset)')
   .option('--port <n>', 'Port to run the viewer on', String(DEFAULT_VIEWER_PORT))
   .option('--host <host>', 'Host to bind (default loopback; every route requires the entry link)', DEFAULT_VIEWER_HOST)
   .option('--no-open', 'Do not open the browser automatically', false)
   .action(
     async (options: {
       analysis: string;
-      spec: string;
+      spec?: string;
       port: string;
       host: string;
       open: boolean;
@@ -133,7 +138,7 @@ export const viewCommand = new Command('view')
       const llmContextPath = join(analysisDir, ARTIFACT_LLM_CONTEXT);
       const refactorPath = join(analysisDir, ARTIFACT_REFACTOR_PRIORITIES);
       const mappingPath = join(analysisDir, ARTIFACT_MAPPING);
-      const specDir = safePath(rootPath, options.spec);
+      const specDir = safePath(rootPath, await viewSpecDir(rootPath, options.spec));
 
       if (!specDir) {
         logger.error('Spec directory resolves outside the project root');

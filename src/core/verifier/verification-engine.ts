@@ -6,7 +6,7 @@
  */
 
 import { readFile, writeFile, mkdir, access, readdir } from 'node:fs/promises';
-import { join, basename, relative } from 'node:path';
+import { join, basename, relative, sep } from 'node:path';
 import logger from '../../utils/logger.js';
 import { VERIFICATION_PREDICTION_MAX_TOKENS } from '../../constants.js';
 import type { LLMService } from '../services/llm-service.js';
@@ -1246,7 +1246,8 @@ Respond in JSON:
 
       domainBreakdown.push({
         domain,
-        specPath: `openspec/specs/${domain}/spec.md`,
+        // Repository-relative under the spec root this run verified against, POSIX on every OS.
+        specPath: relative(this.options.rootPath, join(this.options.openspecPath, 'specs', domain, 'spec.md')).split(sep).join('/'),
         filesVerified: domainRes.length,
         averageScore: avgScore,
         averageScoreBasis: 'mean-of-weighted-mixed-evidence-composites',

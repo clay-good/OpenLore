@@ -7,10 +7,11 @@
 
 import { Command } from 'commander';
 import { writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { parseList } from '../../utils/command-helpers.js';
 import { generateDigest, renderDigestMarkdown } from '../../core/digest/digest-generator.js';
+import { configuredSpecRoot, specRootPath } from '../../core/services/mcp-handlers/spec-paths.js';
+import { safeJoin } from '../../utils/path-confinement.js';
 
 export const digestCommand = new Command('digest')
   .description('Generate a plain-English digest of your specs for human review')
@@ -25,7 +26,7 @@ export const digestCommand = new Command('digest')
   )
   .option(
     '--save',
-    'Write digest to openspec/digest.md',
+    'Write digest.md to the spec root (openspecPath, default openspec/)',
     false
   )
   .addHelpText(
@@ -33,7 +34,7 @@ export const digestCommand = new Command('digest')
     `
 Examples:
   $ openlore digest                        Print digest to stdout
-  $ openlore digest --save                 Write to openspec/digest.md
+  $ openlore digest --save                 Write digest.md to the spec root
   $ openlore digest --output review.md     Write to a custom path
   $ openlore digest --domains auth,payment Only show selected domains
 `
@@ -46,9 +47,12 @@ Examples:
     const rootPath = process.cwd();
 
     try {
+      // Specs are read from, and --save writes to, this project's spec root (`openspecPath`).
+      const specRoot = await configuredSpecRoot(rootPath, { readOnly: true });
       const result = await generateDigest({
         rootPath,
         domains: options.domains,
+        openspecDir: specRoot.relative,
       });
 
       if (result.domains.length === 0) {
@@ -63,7 +67,8 @@ Examples:
       const outputPath = options.output
         ? options.output
         : options.save
-          ? join(rootPath, 'openspec', 'digest.md')
+          // A write, so confined: a spec root symlinked out of the project is refused.
+          ? safeJoin(rootPath, specRootPath(specRoot.relative, 'digest.md'))
           : null;
 
       if (outputPath) {

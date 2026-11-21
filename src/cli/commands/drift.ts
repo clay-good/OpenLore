@@ -19,7 +19,6 @@ import {
   OPENLORE_ANALYSIS_SUBDIR,
   OPENLORE_LOGS_SUBDIR,
   OPENLORE_CONFIG_REL_PATH,
-  OPENSPEC_DIR,
   OPENSPEC_SPECS_SUBDIR,
   ARTIFACT_REPO_STRUCTURE,
 } from '../../constants.js';
@@ -37,7 +36,7 @@ import { suggestTestsForDrift } from '../../core/drift/test-suggester.js';
 import { createLLMService } from '../../core/services/llm-service.js';
 import { isLlmLoggingEnabled } from '../../core/services/llm-logging-policy.js';
 import type { LLMService } from '../../core/services/llm-service.js';
-import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
+import { confinedOpenspecRel, resolveOpenspecDir } from '../../utils/openspec-dir.js';
 import { jsonOutput } from '../output.js';
 import {
   displayHookPath,
@@ -801,7 +800,7 @@ Exit codes:
         changedFiles: gitResult.files,
         failOn: opts.failOn,
         domainFilter: opts.domains.length > 0 ? opts.domains : undefined,
-        openspecRelPath: openloreConfig.openspecPath ?? OPENSPEC_DIR,
+        openspecRelPath: confinedOpenspecRel(rootPath, openloreConfig.openspecPath),
         llm,
         baseRef: gitResult.resolvedBase,
         adrMap: adrMap ?? undefined,

@@ -239,7 +239,12 @@ async function readValidatedConfig(
   try {
     parsed = await load();
   } catch (err) {
-    logger.warning(`Failed to read OpenLore configuration: ${(err as Error).message}`);
+    // Stderr, like the validation warnings below: on stdout it broke the `--json` output of
+    // every command that reads the config (change-status, test, digest).
+    if (!logger.getOptions().quiet) {
+      const prefix = `${colorForStderr().yellow('[warn]')}`;
+      process.stderr.write(`${prefix} Failed to read OpenLore configuration: ${sanitizeForTerminal((err as Error).message)}\n`);
+    }
     return null;
   }
   if (parsed === null) return null;

@@ -14,6 +14,8 @@ import { Command } from 'commander';
 import { glob } from 'glob';
 import { parse as parseYaml } from 'yaml';
 import { safeJoin } from '../../utils/path-confinement.js';
+import { OPENSPEC_DIR } from '../../constants.js';
+import { configuredSpecRoot, specRootPath } from '../../core/services/mcp-handlers/spec-paths.js';
 import { writeStdout, writeStderr } from '../output.js';
 import { execFileGit as execFileAsync } from '../../utils/git-exec.js';
 
@@ -106,13 +108,13 @@ export async function validateWithOpenSpec(rootPath: string, name: string): Prom
   }
 }
 
-async function listOpenChanges(rootPath: string): Promise<string[]> {
-  const changesRoot = safeJoin(rootPath, 'openspec/changes');
+async function listOpenChanges(rootPath: string, specRoot: string): Promise<string[]> {
+  const changesRoot = safeJoin(rootPath, specRootPath(specRoot, 'changes'));
   let entries;
   try {
     entries = await readdir(changesRoot, { withFileTypes: true });
   } catch (error) {
-    // No `openspec/changes/` is a repository with no open change — the state of every repository
+    // No `<spec root>/changes/` is a repository with no open change — the state of every repository
     // `openlore install` sets up. It crashed with a raw ENOENT instead.
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw error;
@@ -248,13 +250,14 @@ function mainRequirementNames(content: string, targetFile: string): Set<string> 
 
 async function requirementReceipts(
   rootPath: string,
+  specRoot: string,
   name: string,
   validationPasses: boolean,
 ): Promise<RequirementReceipt[]> {
-  const specsRoot = safeJoin(rootPath, `openspec/changes/${name}/specs`);
+  const specsRoot = safeJoin(rootPath, specRootPath(specRoot, `changes/${name}/specs`));
   const deltaPaths = await glob('**/spec.md', { cwd: specsRoot, nodir: true, follow: false });
   if (deltaPaths.length === 0) {
-    const metadataPath = safeJoin(rootPath, `openspec/changes/${name}/.openspec.yaml`);
+    const metadataPath = safeJoin(rootPath, specRootPath(specRoot, `changes/${name}/.openspec.yaml`));
     try {
       const metadata = parseYaml(await readFile(metadataPath, 'utf8'), { ...YAML_QUIET }) as unknown;
       if (
@@ -267,7 +270,7 @@ async function requirementReceipts(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    throw new Error(`openspec/changes/${name}/specs: no delta spec files found`);
+    throw new Error(`${specRootPath(specRoot, `changes/${name}/specs`)}: no delta spec files found`);
   }
   const mainRequirements = new Map<string, Set<string>>();
   const receipts: RequirementReceipt[] = [];
@@ -281,7 +284,7 @@ async function requirementReceipts(
     if (names.length === 0) continue;
     let targetNames = mainRequirements.get(domain);
     if (!targetNames) {
-      const targetPath = safeJoin(rootPath, `openspec/specs/${domain}/spec.md`);
+      const targetPath = safeJoin(rootPath, specRootPath(specRoot, `specs/${domain}/spec.md`));
       try {
         const target = await readFile(targetPath, 'utf8');
         const targetFile = relative(rootPath, targetPath).split(sep).join('/');
@@ -309,9 +312,9 @@ async function requirementReceipts(
   return receipts;
 }
 
-async function taskProgress(rootPath: string, name: string): Promise<TaskProgress> {
+async function taskProgress(rootPath: string, specRoot: string, name: string): Promise<TaskProgress> {
   try {
-    const path = safeJoin(rootPath, `openspec/changes/${name}/tasks.md`);
+    const path = safeJoin(rootPath, specRootPath(specRoot, `changes/${name}/tasks.md`));
     const content = await readFile(path, 'utf8');
     const boxes = [...content.matchAll(/^\s*-\s*\[([ xX])\]/gm)];
     return {
@@ -337,7 +340,9 @@ export async function auditChangeStatuses(options: AuditOptions): Promise<Change
   if (options.name && !CHANGE_NAME_PATTERN.test(options.name)) {
     throw new Error('Invalid change name; expected lowercase letters, digits, and hyphens');
   }
-  const names = await listOpenChanges(options.rootPath);
+  // Changes live under this project's spec root (`openspecPath`), not a fixed `openspec/`.
+  const specRoot = (await configuredSpecRoot(options.rootPath)).relative;
+  const names = await listOpenChanges(options.rootPath, specRoot);
   if (options.name && !names.includes(options.name)) {
     throw new Error(`Open change not found: ${options.name}`);
   }
@@ -347,12 +352,16 @@ export async function auditChangeStatuses(options: AuditOptions): Promise<Change
   const results: ChangeStatusResult[] = [];
 
   for (const name of selected) {
-    const validates = await validateChange(options.rootPath, name);
+    // The OpenSpec CLI finds its corpus only in an `openspec/` folder, so a moved corpus cannot be
+    // validated by it: that is not assessed, never a pass or a failure.
+    const validates: ValidationReceipt = specRoot === OPENSPEC_DIR
+      ? await validateChange(options.rootPath, name)
+      : { passes: false, assessed: false, reason: `the openspec CLI reads only an ${OPENSPEC_DIR}/ folder; this project's specs are in ${specRoot}/` };
     let requirements: RequirementReceipt[] = [];
     let assessmentError: string | undefined;
     try {
       // Not assessed is not a failure: the requirements are read as for a passing change.
-      requirements = await requirementReceipts(options.rootPath, name, validates.passes || validates.assessed === false);
+      requirements = await requirementReceipts(options.rootPath, specRoot, name, validates.passes || validates.assessed === false);
     } catch (error) {
       assessmentError = error instanceof Error ? error.message : String(error);
     }
@@ -370,7 +379,7 @@ export async function auditChangeStatuses(options: AuditOptions): Promise<Change
         requirements,
       },
       validates,
-      tasks: await taskProgress(options.rootPath, name),
+      tasks: await taskProgress(options.rootPath, specRoot, name),
       archivableCandidate: verdict === 'built' && validates.passes,
       ...(verdict === 'built-unmarked' ? { caveat: BUILT_UNMARKED_CAVEAT } : {}),
       ...(assessmentError ? { assessmentError } : {}),

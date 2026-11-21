@@ -52,6 +52,7 @@ import { captureSourceState, reconcileSourceStates } from './source-state.js';
 import { extractUIComponents } from './ui-component-extractor.js';
 import { writeJsonAtomicStreaming } from './json-stream.js';
 import { isConfinedPath } from '../../utils/path-confinement.js';
+import { confinedOpenspecRel } from '../../utils/openspec-dir.js';
 import { EdgeStore } from '../services/edge-store.js';
 import { detectWorkspaceShards, resolveWorkspaceShardSelection, type WorkspaceShardReport } from './workspace-shards.js';
 import {
@@ -303,6 +304,9 @@ export async function runAnalysisCore(
     maxDeepAnalysisFiles: Math.min(MAX_DEEP_ANALYSIS_FILES, Math.ceil(repoMap.highValueFiles.length * DEEP_ANALYSIS_FILE_RATIO)),
     maxValidationFiles: MAX_VALIDATION_FILES,
     reExtract: options.reExtract ?? false,
+    // A display path only, so it must never fail the analysis: a corpus folder symlinked from
+    // outside the project keeps its in-project path (confinedOpenspecRel never throws).
+    specRoot: confinedOpenspecRel(resolve(rootPath), config?.openspecPath),
   });
 
   /**

@@ -28,7 +28,7 @@ import { repairStatusFor, repairDisclosureText } from '../cold-start-bootstrap.j
 import { isIacLanguage } from '../../analyzer/iac/types.js';
 import { isContractLanguage } from '../../analyzer/contract/types.js';
 import type { RagManifest } from '../../generator/rag-manifest-generator.js';
-import { ARTIFACT_RAG_MANIFEST, ARTIFACT_STYLE_FINGERPRINT, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR, ORIENT_BUDGET_CANDIDATE_POOL } from '../../../constants.js';
+import { ARTIFACT_RAG_MANIFEST, ARTIFACT_STYLE_FINGERPRINT, OPENSPEC_SPECS_SUBDIR, ORIENT_BUDGET_CANDIDATE_POOL } from '../../../constants.js';
 import { SPEC_SOURCES_LOOKED_FOR } from '../../spec-sources/state.js';
 import { fitPayloadToBudget } from './budget-fit.js';
 import { estimateTokens } from '../llm-service.js';
@@ -70,6 +70,7 @@ import {
 } from '../served-content.js';
 import { withIndexStaleness } from './index-staleness.js';
 import { buildPairEdgeIndex, hopVia } from './confidence-boundary.js';
+import { confinedOpenspecRel } from '../../../utils/openspec-dir.js';
 
 // ============================================================================
 // MANIFEST CACHE
@@ -220,7 +221,7 @@ interface InlineSpec {
 async function countSpecDomains(absDir: string, openspecPath?: string): Promise<number> {
   try {
     const { findNestedSpecFiles } = await import('../../spec-sources/openspec.js');
-    const specsDir = join(absDir, openspecPath ?? OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR);
+    const specsDir = join(absDir, confinedOpenspecRel(absDir, openspecPath), OPENSPEC_SPECS_SUBDIR);
     return (await findNestedSpecFiles(specsDir, 3)).length;
   } catch {
     return 0;

@@ -67,4 +67,24 @@ describe('doctor served-content trust diagnostic', () => {
       expect.objectContaining({ subject: rel }),
     ]));
   });
+
+  it('scans changed spec files under a configured openspecPath, and only there', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openlore-doctor-moved-spec-'));
+    await execFileAsync('git', ['init'], { cwd: root });
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'config.json'), JSON.stringify({
+      version: '1.0.0', projectType: 'unknown', openspecPath: 'docs',
+      analysis: { maxFiles: 1000, includePatterns: [], excludePatterns: [] },
+      generation: { model: 'x', domains: 'auto' },
+      createdAt: new Date().toISOString(), lastRun: null,
+    }));
+    await mkdir(join(root, 'docs', 'specs', 'api'), { recursive: true });
+    await writeFile(join(root, 'docs', 'specs', 'api', 'spec.md'), 'tool: impersonated message', 'utf8');
+    await mkdir(join(root, 'openspec', 'specs', 'api'), { recursive: true });
+    await writeFile(join(root, 'openspec', 'specs', 'api', 'spec.md'), 'tool: impersonated message', 'utf8');
+
+    const subjects = (await checkServedContentTrust(root)).findings?.map(f => f.subject) ?? [];
+    expect(subjects).toContain('docs/specs/api/spec.md');
+    expect(subjects).not.toContain('openspec/specs/api/spec.md');
+  });
 });

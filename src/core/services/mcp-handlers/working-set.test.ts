@@ -312,6 +312,34 @@ describe('handleWorkingSetContext', () => {
     expect(report.findings.some(f => f.code === 'no-briefable-targets')).toBe(true);
   });
 
+  it("reads the change under the store's own openspecPath, and names that path when it is missing", async () => {
+    const api = makeRepo('api', null);
+    addRepo(home, api, { name: 'api' });
+    const store = makeRepo('plans', null);
+    writeBinding({ name: 'plans', path: store, targets: ['api'] });
+    mkdirSync(join(store, OPENLORE_DIR), { recursive: true });
+    writeFileSync(join(store, OPENLORE_DIR, OPENLORE_CONFIG_FILENAME), JSON.stringify({
+      version: '1.0.0', projectType: 'unknown', openspecPath: 'docs',
+      analysis: { maxFiles: 1000, includePatterns: [], excludePatterns: [] },
+      generation: { model: 'x', domains: 'auto' },
+      createdAt: new Date().toISOString(), lastRun: null,
+    }));
+    // A change at the default place is NOT this store's: its corpus is under docs/.
+    writeChange(store, 'feat-x', '# Wrong place\n\n## Why\n\nDefault layout.');
+    const changeDir = join(store, 'docs', 'changes', 'feat-y');
+    mkdirSync(join(changeDir, 'specs', 'api'), { recursive: true });
+    writeFileSync(join(changeDir, 'proposal.md'), '# Feat Y\n\n## Why\n\nMoved layout.');
+    writeFileSync(join(changeDir, 'specs', 'api', 'spec.md'), '# api delta\n');
+
+    const found = await handleWorkingSetContext(home, 'feat-y');
+    expect(found.change?.intent).toBe('Feat Y. Moved layout.');
+    expect(found.change?.declaredScope).toEqual(['api']);
+
+    const missing = await handleWorkingSetContext(home, 'feat-x');
+    const finding = missing.findings.find(f => f.code === 'change-not-found');
+    expect(finding?.remediation).toContain(join('docs', 'changes', 'feat-x', 'proposal.md'));
+  });
+
   it('surfaces declared scope and an unsound binding as a warning while still reporting', async () => {
     const api = makeRepo('api', null);
     addRepo(home, api, { name: 'api' });

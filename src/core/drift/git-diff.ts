@@ -9,7 +9,7 @@ import { lstat, opendir, realpath, stat } from 'node:fs/promises';
 import { extname, basename, posix, resolve } from 'node:path';
 import type { ChangedFile } from '../../types/index.js';
 import { logger } from '../../utils/logger.js';
-import { DIFF_MAX_CHARS } from '../../constants.js';
+import { DIFF_MAX_CHARS, OPENSPEC_DIR } from '../../constants.js';
 import { gitPathArgs } from '../../utils/git-args.js';
 import { readFileConfined, safeJoin } from '../../utils/path-confinement.js';
 import { execFileGit as execFileAsync, spawnGit } from '../../utils/git-exec.js';
@@ -265,7 +265,9 @@ export function validateGitRef(ref: string): void {
   }
 }
 
-const CORPUS_PATH_PREFIX = 'openspec/';
+// Corpus paths are keyed under the default root whatever `openspecPath` is, so baselines taken
+// before and after a move compare; `storageCorpusPath` maps a key to the configured root on disk.
+const CORPUS_PATH_PREFIX = `${OPENSPEC_DIR}/`;
 const CORPUS_MATERIALIZATION_LIMITS = {
   fileBytes: 4 * 1024 * 1024,
   totalBytes: 64 * 1024 * 1024,
@@ -298,7 +300,7 @@ function validateOpenSpecCorpusPath(filePath: string): string {
     || filePath.endsWith('/')
   ) {
     throw new Error(
-      `Invalid OpenSpec corpus path: "${filePath}". Paths must be normalized repository-relative files below "openspec/".`,
+      `Invalid OpenSpec corpus path: "${filePath}". Paths must be normalized repository-relative files below "${CORPUS_PATH_PREFIX}".`,
     );
   }
   return filePath;
@@ -312,8 +314,8 @@ function sortedUniqueCorpusPaths(paths: readonly string[]): string[] {
   return sorted;
 }
 
-function validateCorpusRoot(corpusRoot = 'openspec'): string {
-  if (corpusRoot.length === 0) return 'openspec';
+function validateCorpusRoot(corpusRoot: string = OPENSPEC_DIR): string {
+  if (corpusRoot.length === 0) return OPENSPEC_DIR;
   const normalized = corpusRoot.replace(/^\.\//, '').replace(/\/+$/, '');
   if (
     normalized.length === 0
@@ -347,7 +349,7 @@ function corpusRootFromConfig(content: string, sourceLabel: string): string {
   if (configured !== undefined && typeof configured !== 'string') {
     throw new Error(`Invalid openspecPath in OpenLore config at ${sourceLabel}.`);
   }
-  return validateCorpusRoot(configured ?? 'openspec');
+  return validateCorpusRoot(configured ?? OPENSPEC_DIR);
 }
 
 /** Resolve the corpus root from the configuration belonging to one source state. */
@@ -361,18 +363,18 @@ export async function discoverOpenSpecCorpusRoot(
       const content = await readFileConfined(directory, '.openlore/config.json', 1024 * 1024, true, true);
       return corpusRootFromConfig(content, `${source.directory}/.openlore/config.json`);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'openspec';
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return OPENSPEC_DIR;
       throw error;
     }
   }
-  if (source.revision === GIT_EMPTY_TREE_SHA) return 'openspec';
+  if (source.revision === GIT_EMPTY_TREE_SHA) return OPENSPEC_DIR;
   const commit = await resolveCommit(rootPath, source.revision);
   const listed = await execFileAsync(
     'git',
     gitPathArgs('ls-tree', '-z', '--name-only', commit, '--', '.openlore/config.json'),
     { cwd: rootPath, maxBuffer: 1024 },
   );
-  if (listed.stdout.length === 0) return 'openspec';
+  if (listed.stdout.length === 0) return OPENSPEC_DIR;
   const { stdout } = await execFileAsync(
     'git',
     ['cat-file', 'blob', `${commit}:.openlore/config.json`],
@@ -456,7 +458,7 @@ async function listDirectoryCorpusPaths(rootPath: string, corpusRoot: string): P
       if (!configStat.isFile() || configStat.isSymbolicLink()) {
         throw new Error('OpenSpec corpus entry "config.yaml" is not a regular file.');
       }
-      discovered.push('openspec/config.yaml');
+      discovered.push(`${CORPUS_PATH_PREFIX}config.yaml`);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }

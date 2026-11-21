@@ -501,6 +501,20 @@ describe('AnalysisArtifactGenerator', () => {
       }
     });
 
+    it('suggests spec paths under the configured spec root', async () => {
+      const artifacts = await generateArtifacts(createMockRepoMap(), createMockDepGraph(), {
+        rootDir: tempDir,
+        outputDir,
+        specRoot: 'docs',
+      });
+      const paths = artifacts.repoStructure.domains.map(domain => domain.suggestedSpecPath);
+      expect(paths.length).toBeGreaterThan(0);
+      for (const path of paths) expect(path).toMatch(/^docs\/specs\/[^/]+\/spec\.md$/);
+
+      const atRoot = await generateArtifacts(createMockRepoMap(), createMockDepGraph(), { rootDir: tempDir, outputDir, specRoot: '.' });
+      for (const domain of atRoot.repoStructure.domains) expect(domain.suggestedSpecPath).toMatch(/^specs\//);
+    });
+
     it('does not leak source file extensions into entity names (#138)', async () => {
       const javaFiles: ScoredFile[] = [
         createScoredFile({ name: 'VetController.java', path: 'src/main/java/com/acme/vet/VetController.java', directory: 'src/main/java/com/acme/vet', score: 70 }),

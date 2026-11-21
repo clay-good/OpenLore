@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseScenarios, toKebabCase } from './scenario-parser.js';
+import { hasSpecFiles, parseScenarios, toKebabCase } from './scenario-parser.js';
 
 // ============================================================================
 // FIXTURE SPEC
@@ -88,6 +88,24 @@ describe('parseScenarios', () => {
   it('returns empty array when no specs exist', async () => {
     const result = await parseScenarios({ rootPath: tmpDir });
     expect(result).toEqual([]);
+  });
+
+  it('reads scenarios from the configured openspecPath, not a fixed openspec/', async () => {
+    const specDir = join(tmpDir, 'docs', 'specs', 'auth');
+    await mkdir(specDir, { recursive: true });
+    await writeFile(join(specDir, 'spec.md'), AUTH_SPEC);
+    await mkdir(join(tmpDir, '.openlore'), { recursive: true });
+    await writeFile(join(tmpDir, '.openlore', 'config.json'), JSON.stringify({
+      version: '1.0.0', projectType: 'unknown', openspecPath: 'docs',
+      analysis: { maxFiles: 1000, includePatterns: [], excludePatterns: [] },
+      generation: { model: 'x', domains: 'auto' },
+      createdAt: new Date().toISOString(), lastRun: null,
+    }));
+
+    const result = await parseScenarios({ rootPath: tmpDir });
+    expect(result).toHaveLength(3);
+    expect(result[0].specFile).toBe('docs/specs/auth/spec.md');
+    expect(await hasSpecFiles(tmpDir)).toBe(true);
   });
 
   it('parses all complete scenarios from a spec file', async () => {

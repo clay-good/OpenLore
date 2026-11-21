@@ -92,6 +92,7 @@ import { mappingViewOf, resolveSpecLinkIndex } from '../../generator/spec-link-s
 import { openloreAudit } from '../../../api/audit.js';
 import type { DriftResult } from '../../../types/index.js';
 import { resolveFileFreshness } from './freshness.js';
+import { confinedOpenspecRel } from '../../../utils/openspec-dir.js';
 
 // ============================================================================
 // HANDLERS
@@ -491,7 +492,7 @@ export async function handleCheckSpecDrift(
     changedFiles: gitResult.files,
     failOn,
     domainFilter: domains.length > 0 ? domains : undefined,
-    openspecRelPath: openloreConfig.openspecPath ?? OPENSPEC_DIR,
+    openspecRelPath: confinedOpenspecRel(absDir, openloreConfig.openspecPath),
     baseRef: gitResult.resolvedBase,
     adrMap: adrMap ?? undefined,
   });

@@ -25,6 +25,7 @@ import { readOpenLoreConfig } from '../config-manager.js';
 import { assessStalenessForAnalysis } from './confidence-boundary.js';
 import type { DecisionConstraintState } from '../../decisions/constraint-ledger.js';
 import type { GovernanceFinding } from './enforcement-policy.js';
+import { confinedOpenspecRel } from '../../../utils/openspec-dir.js';
 
 const VIOLATION_REPORT_CAP = 200;
 
@@ -124,7 +125,7 @@ export function architectureViolationFindings(
 export async function handleCheckArchitecture(args: CheckArchitectureArgs): Promise<unknown> {
   const absDir = await validateDirectory(args.directory);
   const config = await readOpenLoreConfig(absDir);
-  const openspecPath = config?.openspecPath ?? 'openspec';
+  const openspecPath = confinedOpenspecRel(absDir, config?.openspecPath);
   const rules = await loadArchitectureRules(absDir, { openspecPath });
   const { loadDecisionConstraintState } = await import('../../decisions/constraint-ledger.js');
   let decisionConstraints: DecisionConstraintState | undefined;

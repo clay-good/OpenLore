@@ -49,7 +49,6 @@ import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
   OPENLORE_CONFIG_REL_PATH,
-  OPENSPEC_DIR,
   OPENSPEC_SPECS_SUBDIR,
   ARTIFACT_REPO_STRUCTURE,
   ARTIFACT_PARSE_HEALTH,
@@ -78,6 +77,7 @@ import { describeExclusions, totalExcluded, type ParseHealthReport } from '../..
 import { describeScriptContainerBoundaries } from '../../core/analyzer/sfc-script-extractor.js';
 import { describeMemoryDegradation } from '../../core/analyzer/memory-strategy.js';
 import type { GovernanceFinding } from '../../core/services/mcp-handlers/enforcement-policy.js';
+import { configuredSpecRoot, isUnderSpecRoot, specRootPath } from '../../core/services/mcp-handlers/spec-paths.js';
 import { detectCorpusIntegrity } from '../../core/decisions/corpus-integrity.js';
 import { detectInjectionShapes, INJECTION_SHAPE_LIMITS } from '../../core/services/served-content.js';
 import { redactSecretTextWithKnownValues } from '../../core/services/secret-redaction.js';
@@ -91,6 +91,7 @@ import {
 import { assessWiring, missingLauncherPaths } from '../install/wiring-scope.js';
 import { openloreCliEntry } from '../../utils/platform-command.js';
 import { jsonOutput } from '../output.js';
+import { confinedOpenspecRel } from '../../utils/openspec-dir.js';
 
 
 // ============================================================================
@@ -417,6 +418,8 @@ export async function checkServedContentTrust(
     toRepositoryPath(join(OPENLORE_DIR, 'decisions', 'pending.json')),
   ]);
   if (!explicitFiles) {
+    // Changed spec and decision files are those under this project's spec root (`openspecPath`).
+    const specRoot = (await configuredSpecRoot(rootPath, { readOnly: true })).relative;
     try {
       const { stdout } = await execFileAsync(
         'git',
@@ -426,7 +429,7 @@ export async function checkServedContentTrust(
       for (const record of stdout.split('\0')) {
         if (record.length < 4) continue;
         const path = record.slice(3);
-        if (path.startsWith('openspec/') && path.endsWith('.md')) {
+        if (isUnderSpecRoot(path, specRoot) && path.endsWith('.md')) {
           candidates.add(path);
         }
       }
@@ -472,7 +475,7 @@ export async function checkServedContentTrust(
 export async function checkCorpusIntegrity(rootPath: string): Promise<CheckResult> {
   try {
     const config = await readOpenLoreConfig(rootPath);
-    const findings = await detectCorpusIntegrity(rootPath, { openspecPath: config?.openspecPath });
+    const findings = await detectCorpusIntegrity(rootPath, { openspecPath: confinedOpenspecRel(rootPath, config?.openspecPath) });
     if (findings.length === 0) {
       return {
         name: 'Corpus integrity',
@@ -697,18 +700,14 @@ export async function checkParseHealth(rootPath: string): Promise<CheckResult> {
   }
 }
 
-async function checkOpenSpecDir(rootPath: string): Promise<CheckResult> {
+export async function checkOpenSpecDir(rootPath: string): Promise<CheckResult> {
   // Read the *configured* openspecPath rather than assuming the default — a
   // project may point OpenLore at docs/specs/ or another root (Spec 26 B5).
-  let configuredRoot = OPENSPEC_DIR;
-  try {
-    const config = await readOpenLoreConfig(rootPath);
-    if (config?.openspecPath) configuredRoot = config.openspecPath;
-  } catch {
-    /* no config — fall back to the default */
-  }
-  const specsDir = join(rootPath, configuredRoot, OPENSPEC_SPECS_SUBDIR);
-  const rel = `${configuredRoot.replace(/^\.\//, '').replace(/\/$/, '')}/${OPENSPEC_SPECS_SUBDIR}/`;
+  // Confined like every other reader: an escaping value falls back to `openspec`, so doctor
+  // never reports (or probes) a folder outside the project that no command would read.
+  const specRoot = await configuredSpecRoot(rootPath, { readOnly: true });
+  const specsDir = join(specRoot.absolute, OPENSPEC_SPECS_SUBDIR);
+  const rel = `${specRootPath(specRoot.relative, OPENSPEC_SPECS_SUBDIR)}/`;
   try {
     await access(specsDir);
     return { name: 'Spec source', status: 'ok', detail: `openspec: ${rel}` };

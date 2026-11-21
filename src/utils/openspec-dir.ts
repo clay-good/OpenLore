@@ -12,7 +12,11 @@
  * command and several times within one, and repeating the line would bury it.
  */
 
+import { isAbsolute, posix, relative, resolve, sep } from 'node:path';
+import { colorForStderr } from './colors.js';
 import { logger } from './logger.js';
+import { sanitizeForTerminal } from './misc.js';
+import { OPENSPEC_DIR } from '../constants.js';
 import { safeOpenspecDir } from './path-confinement.js';
 
 const disclosed = new Set<string>();
@@ -23,6 +27,40 @@ export function resolveOpenspecDir(absRoot: string, configuredPath: string | und
     const key = `${absRoot} ${configuredPath ?? ''}`;
     if (disclosed.has(key)) return;
     disclosed.add(key);
-    logger.warning(message);
+    // The default itself escaping (an `openspec/` symlinked out) has no fallback to name: the
+    // confined join of the default refuses it next, and that error says why.
+    if (posix.normalize((configuredPath || OPENSPEC_DIR).replaceAll('\\', '/')).replace(/\/$/, '') === OPENSPEC_DIR) return;
+    // Stderr, like every other config diagnostic: on stdout it broke `--json` output of the
+    // commands that resolve the spec root (`change-status --json`, `test --json`).
+    if (logger.getOptions().quiet) return;
+    const prefix = colorForStderr().yellow('[warn]');
+    process.stderr.write(`${prefix} ${sanitizeForTerminal(message)}\n`);
   });
+}
+
+/**
+ * The spec root for readers, which must not fail, or read elsewhere, where a plain join did not.
+ * A configured path that stays in the project is used as written, even when its real location
+ * does not (a corpus folder symlinked from elsewhere in a monorepo); the confined resolution
+ * would refuse it and quietly read the default instead. Only a path that leaves the project
+ * falls back, with a warning, to the default. A writer uses {@link resolveOpenspecDir}.
+ */
+export function readerOpenspecDir(absRoot: string, configuredPath: string | undefined): string {
+  const lexical = resolve(absRoot, configuredPath || OPENSPEC_DIR);
+  const inside = relative(resolve(absRoot), lexical);
+  if (inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)) return lexical;
+  try {
+    return resolveOpenspecDir(absRoot, configuredPath);
+  } catch {
+    return resolve(absRoot, OPENSPEC_DIR);
+  }
+}
+
+/**
+ * {@link readerOpenspecDir} as a repository-relative POSIX path (`.` for the root itself), for
+ * readers that pass the spec root on as a relative path. Passing the raw config value instead
+ * read outside the project (`../x/specs`).
+ */
+export function confinedOpenspecRel(absRoot: string, configuredPath: string | undefined): string {
+  return relative(absRoot, readerOpenspecDir(absRoot, configuredPath)).replaceAll('\\', '/') || '.';
 }

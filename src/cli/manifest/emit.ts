@@ -17,6 +17,7 @@ import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../utils/bo
 import { createRequire } from 'node:module';
 import { logger } from '../../utils/logger.js';
 import { readCachedContext } from '../../core/services/mcp-handlers/utils.js';
+import { configuredSpecRoot } from '../../core/services/mcp-handlers/spec-paths.js';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -141,10 +142,10 @@ async function loadRoutes(analysisDir: string): Promise<RouteInventoryEntry[]> {
   }
 }
 
-function countSpecs(projectRoot: string): number {
+function countSpecs(specRoot: string): number {
   try {
-    // glob is already a dependency; use sync matching against openspec/specs.
-    const specsDir = join(projectRoot, 'openspec', 'specs');
+    // glob is already a dependency; use sync matching against <spec root>/specs.
+    const specsDir = join(specRoot, 'specs');
     if (!existsSync(specsDir)) return 0;
     const { globSync } = require('glob') as typeof import('glob');
     return globSync('*/spec.md', { cwd: specsDir }).length;
@@ -336,7 +337,7 @@ export async function runManifestEmit(opts: ManifestEmitOptions): Promise<number
       exportsByFile: await loadExportsByFile(analysisDir),
       routes: await loadRoutes(analysisDir),
       pkg: readPackageJson(projectRoot),
-      specCount: countSpecs(projectRoot),
+      specCount: countSpecs((await configuredSpecRoot(projectRoot, { readOnly: true })).absolute),
       git: {
         remote: git(projectRoot, ['config', '--get', 'remote.origin.url']),
         commit: git(projectRoot, ['rev-parse', '--short', 'HEAD']),

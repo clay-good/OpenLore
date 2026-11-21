@@ -11,15 +11,15 @@
  */
 
 import { readFile, readdir } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
   ARTIFACT_MAPPING,
-  OPENSPEC_DIR,
   OPENSPEC_SPECS_SUBDIR,
 } from '../../constants.js';
 import { fileExists } from '../../utils/command-helpers.js';
+import { configuredSpecRoot } from '../services/mcp-handlers/spec-paths.js';
 import type { ParsedScenario, FunctionRef } from '../../types/test-generator.js';
 
 // ============================================================================
@@ -177,7 +177,12 @@ async function loadMapping(
 
 /** Whether the repository has any spec to read scenarios from (no spec source is not 0% coverage). */
 export async function hasSpecFiles(rootPath: string): Promise<boolean> {
-  return (await findSpecFiles(join(rootPath, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR))).length > 0;
+  return (await findSpecFiles(await specsDirOf(rootPath))).length > 0;
+}
+
+/** `<spec root>/specs` for this project: its configured `openspecPath`, not a fixed `openspec/`. */
+async function specsDirOf(rootPath: string): Promise<string> {
+  return join((await configuredSpecRoot(rootPath, { readOnly: true })).absolute, OPENSPEC_SPECS_SUBDIR);
 }
 
 async function findSpecFiles(
@@ -235,7 +240,7 @@ export async function parseScenarios(opts: {
   includeSkipped?: boolean;
 }): Promise<ParsedScenario[]> {
   const rootPath = opts.rootPath ?? process.cwd();
-  const specsDir = join(rootPath, OPENSPEC_DIR, OPENSPEC_SPECS_SUBDIR);
+  const specsDir = await specsDirOf(rootPath);
   const excludeSet = new Set(
     (opts.excludeDomains ?? []).map((d) => d.toLowerCase())
   );
@@ -258,7 +263,9 @@ export async function parseScenarios(opts: {
       continue;
     }
 
-    const specFileRel = specPath.replace(resolve(rootPath) + '/', '');
+    // relative(), not a '/'-suffixed prefix strip: that never matched a Windows path, so the
+    // served specFile stayed absolute there. POSIX on every OS, like every path OpenLore serves.
+    const specFileRel = relative(resolve(rootPath), specPath).split(sep).join('/');
 
     // Split into requirement sections (### Requirement: <name>)
     const reqSections = content.split(/^###\s+Requirement:\s*/m);
