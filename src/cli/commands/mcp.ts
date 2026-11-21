@@ -704,7 +704,8 @@ export const TOOL_DEFINITIONS = [
       'graph computation, never an LLM guess. kinds: calls, reaches, ' +
       'impacts, dead, safe-to-change (structural); decision-current (is a recorded decision still ' +
       'authoritative or superseded?); decision-governed (a symbol); endpoint-implemented, ' +
-      'endpoint-consumed ("METHOD /path"). "unverifiable" is first-class when the claim hits a ' +
+      'endpoint-consumed ("METHOD /path"); tested (a symbol: does a test assert on its output?). ' +
+      '"unverifiable" is first-class when the claim hits a ' +
       'dynamic-dispatch blind spot or names an unknown decision — hedge or read the source. Run ' +
       'analyze_codebase first for structural kinds.',
     inputSchema: {
@@ -714,7 +715,7 @@ export const TOOL_DEFINITIONS = [
         directory: { type: 'string', description: DIR_DESC },
         kind: {
           type: 'string',
-          enum: ['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current', 'decision-governed', 'endpoint-implemented', 'endpoint-consumed', 'lease-current'],
+          enum: ['calls', 'reaches', 'dead', 'impacts', 'safe-to-change', 'decision-current', 'decision-governed', 'endpoint-implemented', 'endpoint-consumed', 'lease-current', 'tested'],
           description: 'The kind of claim to verify.',
         },
         subject: { type: 'string', description: 'A symbol; a decision id; "METHOD /path"; or a leaseToken.' },

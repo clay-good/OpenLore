@@ -173,6 +173,22 @@ describe('before-stop', () => {
     expect(r.stdout).not.toContain('"decision"');
   });
 
+  // change: add-test-evidence-claims
+  it('shows changed-symbol-no-asserting-test with the changed file as its proof', async () => {
+    const root = repo();
+    const f = {
+      code: 'changed-symbol-no-asserting-test', subject: 'price (src/shop.ts)',
+      message: 'price changed; its tests only reach it through other functions',
+      remediation: 'Write an assertion on the output of price, or record why it is not asserted.',
+      location: { path: 'src/shop.ts' }, enforcementClass: 'advisory',
+    };
+    verify.result = { items: [{ subject: f.message, check: 'test_evidence', severity: 'warning', nextAction: f.remediation }], findings: [f], gated: false };
+    const out = JSON.parse((await runHook('before-stop', payload(root))).stdout) as { systemMessage?: string };
+    expect(out.systemMessage).toContain('price changed; its tests only reach it through other functions');
+    expect(out.systemMessage).toContain('src/shop.ts');
+    expect(out.systemMessage).toContain('Write an assertion on the output of price');
+  });
+
   it('blocks only when the policy makes a finding blocking, and never twice in a row', async () => {
     const root = repo();
     verify.result = { items: [], findings: [{ ...finding, enforcementClass: 'blocking' }], gated: true };

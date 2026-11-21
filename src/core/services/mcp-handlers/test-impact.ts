@@ -26,6 +26,15 @@ import { assembleBoundary, buildPairEdgeIndex, computeStaleness, edgeBasisWithin
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { isTestFile } from '../../analyzer/test-file.js';
+import {
+  newEvidenceCache,
+  strongerClass,
+  symbolTestEvidence,
+  type EvidenceClass,
+  type SymbolEvidence,
+  type TestRelationship,
+} from '../../analyzer/test-evidence.js';
+import { detectLanguage } from '../../analyzer/language-detection.js';
 import { gitPathArgs } from '../../../utils/git-args.js';
 import { execFileGit } from '../../../utils/git-exec.js';
 import {
@@ -133,6 +142,12 @@ interface SelectedTest {
    * by a tier rather than a path. Existing provenance labels only — no score.
    */
   structuralBasis?: { synthesizedEdges: number; synthesizedBy: string[] };
+  /**
+   * What the test does with the changed symbols (change: add-test-evidence-claims): `asserts-on`,
+   * `exercises`, or `reaches`; `not-assessed` when the test was selected without a link this
+   * analysis classifies (a tier, a same-file fallback, a symbol past the cap). Never a guarantee.
+   */
+  evidence?: TestEvidence;
 }
 
 /** Resolve changed symbols → seed production nodes (exact name preferred). */
@@ -686,9 +701,15 @@ export async function handleSelectTests(
     [...seeds.map(s => s.filePath), ...selectedTests.map(t => t.file)],
   );
 
+  const { symbolEvidence, omittedSymbols } = await attachTestEvidence(absDir, cg, seeds, selectedTests);
+  if (omittedSymbols > 0) {
+    caveats.push(`Test evidence was classified for the first ${MAX_EVIDENCE_SYMBOLS} changed symbols; ${omittedSymbols} more are not assessed.`);
+  }
+
   return {
     changed: hasSymbols ? seeds.map(s => s.name) : changedFiles,
     seeds: seeds.map(s => ({ name: s.name, file: s.filePath })),
+    symbolEvidence,
     ...(changeGranularity ? { changeGranularity } : {}),
     selectedTests,
     ...(truncatedAtDepth !== undefined ? { truncatedAtDepth } : {}),
@@ -886,4 +907,68 @@ async function testsNamingPaths(
 
 function normalizeRelative(path: string): string {
   return path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+}
+
+/** Changed symbols whose test evidence one answer classifies; the rest are disclosed as not assessed. */
+export const MAX_EVIDENCE_SYMBOLS = 20;
+
+export type TestEvidence = EvidenceClass | 'not-assessed';
+
+/** One changed symbol's strongest test evidence, as `select_tests`, `blast_radius` and `verify_change` serve it. */
+export interface SymbolEvidenceSummary {
+  symbol: string;
+  file: string;
+  /** Null when no test relates to the symbol at all. */
+  strongestEvidence: EvidenceClass | null;
+  /** Every related test's assertions were recognized. */
+  allRecognized: boolean;
+  /** Test relationships: the strongest first, capped. */
+  relationships: TestRelationship[];
+  notAssessed?: string[];
+}
+
+/**
+ * Class the selected tests against the changed symbols (change: add-test-evidence-claims). The
+ * selection is not touched: each selected test only gains `evidence`.
+ */
+async function attachTestEvidence(
+  absDir: string,
+  cg: SerializedCallGraph,
+  seeds: FunctionNode[],
+  selectedTests: SelectedTest[],
+): Promise<{ symbolEvidence: SymbolEvidenceSummary[]; omittedSymbols: number }> {
+  const cache = newEvidenceCache();
+  const assessed = seeds.slice(0, MAX_EVIDENCE_SYMBOLS);
+  const evidence: SymbolEvidence[] = [];
+  for (const seed of assessed) evidence.push(await symbolTestEvidence(absDir, cg, seed, cache));
+  for (const t of selectedTests) t.evidence = evidenceForSelectedTest(t, evidence);
+  return {
+    symbolEvidence: evidence.map(e => ({
+      symbol: e.symbol,
+      file: e.file,
+      strongestEvidence: e.strongest,
+      allRecognized: e.allRecognized,
+      relationships: e.relationships,
+      ...(e.notAssessed.length > 0 ? { notAssessed: e.notAssessed } : {}),
+    })),
+    omittedSymbols: seeds.length - assessed.length,
+  };
+}
+
+/**
+ * One selected test's class. A Python or Go test function is its own case, so it takes its own
+ * relationships; a JavaScript/TypeScript test case is not a graph node, so a selected JS entry (a
+ * file, or a helper in it) takes its file's strongest class. A test with no classified link is
+ * `not-assessed`, never assumed.
+ */
+export function evidenceForSelectedTest(t: { test: string; file: string }, evidence: readonly SymbolEvidence[]): TestEvidence {
+  const rels = evidence.flatMap(e => e.relationships.filter(r => r.testFile === t.file));
+  if (rels.length === 0) return 'not-assessed';
+  const language = detectLanguage(t.file);
+  const caseLevel = (language === 'Python' || language === 'Go') && t.test !== WHOLE_FILE_TEST;
+  const pick = caseLevel
+    ? rels.filter(r => r.test === null || r.test === t.test || r.test.endsWith(`.${t.test}`) || r.test.startsWith(`${t.test}/`))
+    : rels;
+  if (pick.length === 0) return 'reaches';
+  return pick.reduce<EvidenceClass | null>((best, r) => strongerClass(best, r.class), null) ?? 'not-assessed';
 }

@@ -164,3 +164,40 @@ and the response-level `confidenceBoundary` is unchanged.
 `flakiness: { assessed: false }` states that no test-outcome history is read, so no test is labeled
 flaky. A reader that flags a test only when runs at identical tree-hash inputs disagreed is deferred:
 no local source records per-test outcomes against a tree hash.
+
+## Test evidence: what a selected test does with the change
+
+Selection answers "what do I run". It does not answer "is this verified": a test that reaches a
+function through six layers and asserts on something else is selected the same way as one that
+calls it and checks the result. So each selected test also carries `evidence`, and the answer lists
+each changed symbol's strongest class in `symbolEvidence` (change: add-test-evidence-claims):
+
+| Class | Meaning |
+|---|---|
+| `asserts-on` | A recognized assertion in the test consumes a value from a call to the symbol. Not proof that the behavior is correct. |
+| `exercises` | The test calls the symbol, and no recognized assertion uses a value from that call. |
+| `reaches` | The symbol is only in the test's transitive call graph, or the test's assertions were not recognized (said so in the reason). |
+| `not-assessed` | The test was selected without a link this analysis classes (a tier, a same-file fallback, a symbol past the first 20). |
+
+The selection itself does not change. The class is computed without running anything: each linked
+test file is parsed, its test cases found, and the def-use overlay of the test body traced from the
+call to the assertion. One helper in the same file is followed. A member call (`x.name()`) counts
+only when its receiver can be the symbol's: the file names its class, or imports its module. The
+recognized frameworks are listed under `assertionRecognition` in [language support](language-support.md).
+`verify_claim` kind `tested` and the `changed-symbol-no-asserting-test` finding of `verify_change`
+use the same classes.
+
+Measured on this repository (commit `263ae3c56`, 6,713 production symbols, each classified as its own
+answer):
+
+| Strongest class | Symbols |
+|---|---:|
+| `asserts-on` | 1,418 (21%) |
+| `exercises` | 137 (2%) |
+| `reaches` | 3,890 (58%) |
+| no test relates to it | 1,268 (19%) |
+
+Assertions were not recognized for 15 of them. Classification adds no analysis time: it runs when an
+answer is asked for, at 18 ms per symbol at the 95th percentile and under 1 s for the worst cold
+case (a hub linked to 25 large test files). One answer parses at most 6 MB of test source; a file
+past that is listed as not assessed, never classed.

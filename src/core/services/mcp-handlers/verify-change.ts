@@ -204,6 +204,39 @@ export function projectVerifyReceipt(
     });
   }
 
+  // ── Changed symbols no test asserts on (change: add-test-evidence-claims) ──
+  // Raised only when every related test's assertions were recognized: an unrecognized framework is a
+  // gap this analysis states, never evidence that no assertion exists.
+  const evidenceRaw: GovernanceFinding[] = [];
+  for (const e of b.changed.testEvidence ?? []) {
+    if (e.strongestEvidence === null || e.strongestEvidence === 'asserts-on') continue;
+    if (!e.allRecognized) {
+      boundaries.push(`Test assertions related to ${e.symbol} were not all recognized, so whether a test asserts on it was not assessed.`);
+      continue;
+    }
+    evidenceRaw.push({
+      code: 'changed-symbol-no-asserting-test',
+      severity: 'warning',
+      source: 'test-evidence',
+      subject: `${e.symbol} (${e.file})`,
+      message: e.strongestEvidence === 'exercises'
+        ? `${e.symbol} changed; its tests call it, but no recognized assertion uses its output`
+        : `${e.symbol} changed; its tests only reach it through other functions`,
+      remediation: `Write an assertion on the output of ${e.symbol}, or record why it is not asserted.`,
+      location: { path: e.file },
+    });
+  }
+  const evidenceGate = evidenceRaw.length ? classifyFindings(evidenceRaw, policy) : undefined;
+  const evidenceFindings: ClassifiedFinding[] = evidenceGate ? evidenceGate.classified.filter(f => f.enforcementClass !== 'off') : [];
+  for (const f of evidenceFindings) {
+    items.push({
+      subject: f.message,
+      check: 'test_evidence',
+      severity: f.severity,
+      nextAction: f.remediation ?? 'Write an assertion on its output, or record why not.',
+    });
+  }
+
   // ── Checks weakened by the diff (structural_diff's check-weakening facts) ──
   // Already classified by structural_diff against the same policy; `off` codes are already dropped.
   const weakening = sd.error ? undefined : sd.checkWeakening;
@@ -247,7 +280,7 @@ export function projectVerifyReceipt(
   // ── Tests to run (select_tests, composed inside blast_radius) ──
   const testsToRun = b.tests.unavailable
     ? { unavailable: b.tests.unavailable }
-    : { count: b.tests.count, toRun: b.tests.toRun, files: b.tests.files };
+    : { count: b.tests.count, toRun: b.tests.toRun, files: b.tests.files, ...(b.changed.testEvidence ? { symbolEvidence: b.changed.testEvidence } : {}) };
 
   if (b.baseRefFallback) {
     boundaries.push(`base ref '${b.baseRefFallback.requested}' did not resolve; diffed against '${b.baseRefFallback.resolved}'.`);
@@ -273,6 +306,7 @@ export function projectVerifyReceipt(
       generatedFilesEdited: guardFindings.length,
       unresolvedReferences: refFindings.length,
       payloadsMissingRequired: payloadFindings.length,
+      changedSymbolsWithoutAssertingTest: evidenceFindings.length,
       // null: the check did not run (structural_diff or check weakening failed), not "nothing weakened".
       checksWeakened: weakening && !weakening.error ? weakeningFindings.length : null,
     },
@@ -280,9 +314,9 @@ export function projectVerifyReceipt(
     ...(omitted > 0 ? { truncated: { omitted, note: 'Lower-severity items omitted; raise the cap to see them.' } } : {}),
     testsToRun,
     // Registered governance findings (GovernanceFinding shape) an enforcement policy can name.
-    ...(guardFindings.length || refFindings.length || weakeningFindings.length || payloadFindings.length ? {
-      findings: [...guardFindings, ...refFindings, ...weakeningFindings, ...payloadFindings],
-      gated: (guardGate?.gated ?? false) || (refGate?.gated ?? false) || (payloadGate?.gated ?? false) || weakeningFindings.some(f => f.enforcementClass === 'blocking'),
+    ...(guardFindings.length || refFindings.length || weakeningFindings.length || payloadFindings.length || evidenceFindings.length ? {
+      findings: [...guardFindings, ...refFindings, ...weakeningFindings, ...payloadFindings, ...evidenceFindings],
+      gated: (guardGate?.gated ?? false) || (refGate?.gated ?? false) || (payloadGate?.gated ?? false) || (evidenceGate?.gated ?? false) || weakeningFindings.some(f => f.enforcementClass === 'blocking'),
     } : {}),
     ...(weakening?.baseline ? { checkWeakeningBaseline: weakening.baseline } : {}),
     // The guard's disclosures can also reach blast_radius's caveats: say each once.

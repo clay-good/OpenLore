@@ -23,6 +23,7 @@
  *   - `dynamicBoundary`← {@link supportsDynamicBoundary}    (dynamic-boundary.ts)
  *   - `messageTopology`← {@link MESSAGE_TOPOLOGY_LANGUAGES} (message-topology.ts)
  *   - `deprecationMarkers`← {@link DEPRECATION_MARKER_LANGUAGES} (call-graph-extract.ts)
+ *   - `assertionRecognition` ← {@link ASSERTION_RECOGNITION_LANGUAGES} (test-evidence.ts)
  * A behavioral test (`language-support.test.ts`) cross-checks each flag against the live
  * extractor on a fixture, so the registry cannot silently drift from reality.
  *
@@ -51,6 +52,7 @@ import { TEST_DETECTION_DECISIONS } from './test-file.js';
 import { COMPLEXITY_LANGUAGES } from './call-graph-complexity.js';
 import { MESSAGE_TOPOLOGY_LANGUAGES } from './message-topology.js';
 import { DEPRECATION_MARKER_LANGUAGES } from './call-graph-extract.js';
+import { ASSERTION_RECOGNITION_LANGUAGES } from './test-evidence.js';
 import {
   SCRIPT_CONTAINER_LIMITATIONS,
 } from './sfc-script-extractor.js';
@@ -79,6 +81,7 @@ export const CAPABILITIES = [
   'literalReflection',
   'messageTopology',
   'deprecationMarkers',
+  'assertionRecognition',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -103,6 +106,7 @@ export const CAPABILITY_DESCRIPTIONS: Record<Capability, string> = {
   literalReflection: 'Literal reflective dispatch recovery: a stable module-private JS/TS `const` dispatch table (`HANDLERS[k]()`, `HANDLERS["create"]()`) whose entries bind by their same-file declarations (never by name) becomes `literal-reflective` synthesized edges; every refusal stays a disclosed dynamic-boundary site. Self-typed receivers (`this["m"]()`, `getattr(self, "m")()`) and bare-name reflection are never resolved. A language WITHOUT this binds none of these shapes.',
   messageTopology: 'Message-topology recovery: an object literal with a static discriminant (`type`/`kind`/`action`/`event`/`op`/`cmd`/`command`/`tag` set to a literal or a module-bound `Const.MEMBER`) that is handed to a transport call (`send`, `postMessage`, `dispatch`, …, or via `JSON.stringify`) is paired with each clause selecting the same field and tag (`switch` case, `if (m.type === …)`, an early-exit `!==` guard, a ternary) as a `message-topology` synthesized edge. A computed or spread-overridden tag pairs nothing; a send no recognized clause selects is a disclosed `message-send` dynamic-boundary site. A message hop is never a call: claims, error propagation and test reach do not treat it as one. A language WITHOUT this recovers no message hop.',
   deprecationMarkers: 'Deprecation markers: the language\'s standard marker (JSDoc `@deprecated`, a Go `Deprecated:` comment paragraph, a Python PEP 702 `@deprecated` decorator) is recorded on the symbol, and `structural_diff` reports added calls into marked symbols as `deprecated-symbol-use`. A language WITHOUT this records no marker, so no call into it is reported.',
+  assertionRecognition: 'Test assertion recognition (`verify_claim` kind `tested`, test `evidence` on `select_tests`/`blast_radius`/`verify_change`): a recognizer identifies the test framework\'s assertion calls and their asserted arguments, so a test relationship is classed `asserts-on` / `exercises` / `reaches`. A language WITHOUT this classes every test relationship `reaches` with the reason stated, and never calls a symbol untested.',
 };
 
 /**
@@ -190,6 +194,7 @@ function deriveCapabilities(language: string): Capability[] {
   if (supportsLiteralReflection(language)) out.push('literalReflection');
   if (MESSAGE_TOPOLOGY_LANGUAGES.has(language)) out.push('messageTopology');
   if (DEPRECATION_MARKER_LANGUAGES.has(language)) out.push('deprecationMarkers');
+  if (ASSERTION_RECOGNITION_LANGUAGES.has(language)) out.push('assertionRecognition');
   // Return in canonical CAPABILITIES order for determinism.
   return CAPABILITIES.filter(c => out.includes(c));
 }

@@ -630,7 +630,7 @@ async function beforeStop(root: string, baseline: string | undefined, sessionId?
   // (fixed, decided, open) is counted once (change: hook-reliability, task 7.2).
   const prefix = await repoPrefix(root).catch(() => '');
   const rel = (p?: string) => (p && p.startsWith(prefix) ? p.slice(prefix.length) : p);
-  const sameFinding: Record<string, string> = { phantom_references: 'phantom', check_weakening: 'weakening' };
+  const sameFinding: Record<string, string> = { phantom_references: 'phantom', check_weakening: 'weakening', test_evidence: 'test-evidence' };
   const items: HookItem[] = [];
   for (const i of r.items ?? []) {
     // The verify_change receipt is the proof of its own items; a trade-off (who else this reaches)
