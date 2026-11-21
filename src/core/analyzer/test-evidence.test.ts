@@ -459,4 +459,81 @@ describe('classifyTestSource — never a false asserts-on (round 3)', () => {
     const pool = `package a\nfunc TestPool(t *testing.T) {\n  pool.Run(func(t *testing.T) {\n    assert.Equal(t, 1, Add(1))\n  })\n  assert.True(t, true)\n}\n`;
     expect(await cls('Go', 'a/a_test.go', pool, { name: 'Add', filePath: 'a/a.go' })).toEqual({ TestPool: 'exercises' });
   });
+
+  it('a type annotation naming the symbol does not shadow it (real-code check, round 4)', async () => {
+    const src = `${IMPORT}it('x', () => { const c = w as unknown as { count(s: ReturnType<typeof add>): number }; expect(add(1)).toBe(1); void c; });`;
+    expect(await cls('TypeScript', 'src/a.test.ts', src, ADD)).toEqual({ x: 'asserts-on' });
+  });
+
+});
+
+// Adversarial review round 4 of PR #799: each shape once gave a false `asserts-on`.
+describe('classifyTestSource — never a false asserts-on (round 4)', () => {
+  const cls = async (language: string, path: string, src: string, symbol: { name: string; filePath: string; className?: string }) =>
+    byTest((await classifyTestSource(language, path, src, symbol)).cases);
+  const IMPORT = `import { add } from './math';\n`;
+
+  it('a test\'s own declaration shadows a module helper of the same name', async () => {
+    const src = `${IMPORT}function total() { return add(1); }\nit('x', () => { const total = () => 5; expect(total()).toBe(5); });`;
+    expect(await cls('TypeScript', 'src/a.test.ts', src, ADD)).toEqual({});
+  });
+
+  it('a helper\'s return inside a nested function is not its return', async () => {
+    const src = `${IMPORT}function h() { [1].map(function (x) { return add(x); }); return 5; }\nit('x', () => { expect(h()).toBe(5); });`;
+    expect(await cls('TypeScript', 'src/a.test.ts', src, ADD)).toEqual({ x: 'exercises' });
+  });
+
+  it('a rest parameter is not one asserted value', async () => {
+    // `check` also looks like an assertion form this analysis does not know: a disclosed gap, never asserts-on.
+    const src = `${IMPORT}function check(...xs) { expect(xs[1]).toBe(2); }\nit('x', () => { check(add(1), 2); });`;
+    expect((await cls('TypeScript', 'src/a.test.ts', src, ADD)).x).not.toBe('asserts-on');
+    const helper = `${IMPORT}function verify2(...xs) { expect(xs[1]).toBe(2); }\nit('x', () => { verify2(add(1), 2); });`;
+    expect((await cls('TypeScript', 'src/a.test.ts', helper, ADD)).x).not.toBe('asserts-on');
+  });
+
+  it('more skip forms, and an assertion after an early return, check nothing', async () => {
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}test('x', { skip: true }, () => { expect(add(1)).toBe(1); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', (ctx) => { ctx.skip(); expect(add(1)).toBe(1); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('Python', 'test_a.py', `import unittest\nfrom a import add\ndef test_x():\n    raise unittest.SkipTest('later')\n    assert add(1) == 1\n`, { name: 'add', filePath: 'a.py' })).toEqual({ test_x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { add(1); return; expect(add(1)).toBe(1); });`, ADD)).toEqual({ x: 'exercises' });
+  });
+
+  it('a short-circuited or voided value is not on the spine', async () => {
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { expect(true || add(1)).toBe(true); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { expect(void add(1)).toBeUndefined(); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('Python', 'test_a.py', `from a import add\ndef test_x():\n    assert True or add(1)\n`, { name: 'add', filePath: 'a.py' })).toEqual({ test_x: 'exercises' });
+  });
+
+  it('an instance name a loop or catch clause also binds is not proof', async () => {
+    const calc = { name: 'add', filePath: 'src/calc.ts', className: 'Calc' };
+    const src = `import { Calc } from './calc';\nit('x', () => { const c = new Calc(); c.add(0); for (const c of others) { expect(c.add(1)).toBe(1); } });`;
+    expect(await cls('TypeScript', 'src/c.test.ts', src, calc)).toEqual({});
+  });
+
+  it('Go: a parent test does not take a subtest\'s assertions, and only testify\'s checking methods count', async () => {
+    const sub = `package a\nfunc TestX(t *testing.T) {\n  t.Run("a", func(st *testing.T) {\n    st.Skip()\n    if Sym() != 1 { st.Fatal("x") }\n  })\n}\n`;
+    const r = await cls('Go', 'a/a_test.go', sub, { name: 'Sym', filePath: 'a/a.go' });
+    expect(r.TestX).not.toBe('asserts-on');
+    expect(r['TestX/a']).toBe('exercises');
+    expect(await cls('Go', 'a/a_test.go', `package a\nfunc TestX(t *testing.T) {\n  _ = assert.ObjectsAreEqual(1, Sym())\n  assert.True(t, true)\n}\n`, { name: 'Sym', filePath: 'a/a.go' })).toEqual({ TestX: 'exercises' });
+  });
+
+  it('more mock and swallow forms', async () => {
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}import * as m from './math';\njest.replaceProperty(m, 'add', () => 9);\nit('x', () => { expect(add()).toBe(9); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('Python', 'test_a.py', `import a\nfrom a import add\ndef test_x():\n    setattr(a, 'add', lambda: 9)\n    assert add() == 9\n`, { name: 'add', filePath: 'a.py' })).toEqual({ test_x: 'exercises' });
+    expect(await cls('Python', 'test_a.py', `from a import add\ndef test_x():\n    try:\n        assert add() == 9\n    except (ValueError, AssertionError):\n        pass\n    assert True\n`, { name: 'add', filePath: 'a.py' })).toEqual({ test_x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { try { expect(add()).toBe(9); } catch (e) { if (!(e instanceof TypeError)) throw e; } expect(true).toBe(true); });`, ADD)).toEqual({ x: 'exercises' });
+  });
+
+  it('a should chain on the value is an unrecognized form, not exercises', async () => {
+    const r = await classifyTestSource('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { add(1).should.equal(1); expect(true).toBe(true); });`, ADD);
+    expect(r.cases.map(c => [c.class, c.recognized])).toEqual([['reaches', false]]);
+  });
+
+  it('deeply nested suites classify in time linear in depth', async () => {
+    const nest = (depth: number) => IMPORT + Array.from({ length: depth }, (_, i) => `describe('d${i}', () => { it('c${i}', () => { expect(add(${i})).toBe(${i}); });`).join('\n') + '\n' + '});'.repeat(depth);
+    const t1 = performance.now(); await classifyTestSource('TypeScript', 'src/n1.test.ts', nest(60), ADD); const small = performance.now() - t1;
+    const t2 = performance.now(); await classifyTestSource('TypeScript', 'src/n2.test.ts', nest(240), ADD); const large = performance.now() - t2;
+    expect(large).toBeLessThan(small * 30 + 500); // 4× the depth: well under the 64× of cubic growth
+  });
 });

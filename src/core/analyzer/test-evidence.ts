@@ -227,6 +227,9 @@ function onSpine(lang: Lang, inner: Node, outer: Node): boolean {
 /** Same node, compared by span and type (tree-sitter node objects are not stable identities). */
 const sameNode = (a: Node, b: Node): boolean => a.startIndex === b.startIndex && a.endIndex === b.endIndex && a.type === b.type;
 
+/** Nested function types whose `return` is not the enclosing helper's (Python and Go). */
+const RETURN_SCOPES: ReadonlySet<string> = new Set(['function_definition', 'lambda', 'func_literal']);
+
 /** Identifier texts under `n` (a declaration's name or pattern). */
 function identifiersIn(n: Node | null | undefined, types: ReadonlySet<string>): string[] {
   if (!n) return [];
@@ -265,7 +268,12 @@ function jsSwallowed(n: Node, body: Node): boolean {
     const tryStmt = p.parent;
     if (!sameNode(tryStmt.childForFieldName('body') ?? p, p)) continue;
     const handler = tryStmt.childForFieldName('handler');
-    if (handler && ![...walk(handler)].some(c => c.type === 'throw_statement')) return true;
+    // Only an unconditional rethrow (a direct statement of the catch block) lets the failure out.
+    const handlerBody = handler?.childForFieldName('body');
+    if (handler && !(handlerBody?.namedChildren.some(c => c.type === 'throw_statement') ?? false)) return true;
+    // `finally { return }` discards any failure.
+    const fin = tryStmt.childForFieldName('finalizer');
+    if (fin && [...walk(fin)].some(c => c.type === 'return_statement')) return true;
   }
   return false;
 }
@@ -345,6 +353,32 @@ function jsSkipMarker(call: Node): string | undefined {
   return undefined;
 }
 
+/** node:test's options object: `test('x', { skip: true }, fn)` / `{ todo: … }`. */
+function jsSkipOption(args: Node[]): string | undefined {
+  for (const a of args) {
+    if (a.type !== 'object') continue;
+    for (const pair of a.namedChildren) {
+      if (pair.type !== 'pair') continue;
+      const key = pair.childForFieldName('key')?.text.replace(/['"]/g, '');
+      const value = pair.childForFieldName('value')?.text;
+      if ((key === 'skip' || key === 'todo') && value !== 'false') return `{ ${key} }`;
+    }
+  }
+  return undefined;
+}
+
+/** `ctx.skip()` / `this.skip()` / `t.skip()` called directly in a test body. */
+function jsSkipCallIn(body: Node): string | undefined {
+  for (const d of walk(body)) {
+    if (d.type !== 'call_expression') continue;
+    const f = d.childForFieldName('function');
+    if (f?.type !== 'member_expression' || f.childForFieldName('property')?.text !== 'skip') continue;
+    const o = f.childForFieldName('object');
+    if (o && (o.type === 'this' || /^(?:ctx|context|t)$/.test(o.text))) return `${o.text}.skip()`;
+  }
+  return undefined;
+}
+
 function jsTitle(n: Node | undefined): string | null {
   if (!n) return null;
   if (n.type === 'string') return n.text.slice(1, -1);
@@ -399,6 +433,11 @@ const JS_SPINE_WRAPPERS = new Set(['await_expression', 'parenthesized_expression
 const JS: Lang = {
   identifierTypes: new Set(['identifier', 'shorthand_property_identifier']),
   spineStep(parent, child) {
+    // The right side of `||`, `&&`, `??` may never run; `void x` is always undefined.
+    if (parent.type === 'binary_expression' && /^(?:\|\||&&|\?\?)$/.test(parent.childForFieldName('operator')?.text ?? '')) {
+      return sameNode(parent.childForFieldName('left') ?? parent, child);
+    }
+    if (parent.type === 'unary_expression' && parent.childForFieldName('operator')?.text === 'void') return false;
     if (JS_SPINE_WRAPPERS.has(parent.type)) return true;
     if (parent.type === 'ternary_expression') return !sameNode(parent.childForFieldName('condition') ?? parent, child);
     if (parent.type === 'member_expression' || parent.type === 'subscript_expression') {
@@ -423,7 +462,11 @@ const JS: Lang = {
         const name = n.childForFieldName('name')?.text;
         if (name) localNames.add(name);
       } else if (n.type === 'formal_parameters') {
-        for (const id of identifiersIn(n, JS_DECL_NAME_TYPES)) localNames.add(id);
+        // A parameter's NAME, never its type annotation (`(s: ReturnType<typeof add>)` declares `s`).
+        for (const p of n.namedChildren) {
+          const pattern = p.childForFieldName('pattern') ?? (p.type === 'identifier' ? p : null);
+          for (const id of identifiersIn(pattern, JS_DECL_NAME_TYPES)) localNames.add(id);
+        }
       } else if (n.type === 'arrow_function') {
         const p = n.childForFieldName('parameter');
         if (p?.type === 'identifier') localNames.add(p.text);
@@ -438,7 +481,8 @@ const JS: Lang = {
   isAssertionCall: (name, receiver) => (receiver === null && JS_ASSERT_ROOTS.has(name))
     || (receiver?.type === 'identifier' && (JS_ASSERT_ROOTS.has(receiver.text) || receiver.text === 'chai')),
   looksLikeAssertion: (name, receiver) => /^(?:should|check|verify|validate|ensure|must|expectThat|assertThat)/i.test(name)
-    || (receiver?.type === 'identifier' && /^should$/i.test(receiver.text)),
+    || (receiver?.type === 'identifier' && /^should$/i.test(receiver.text))
+    || (receiver !== null && /\.should\b/.test(receiver.text)),
   bindings(source, body) {
     for (let p: Node | null = source; p && p.id !== body.id; p = p.parent) {
       if (JS_FN_TYPES.has(p.type) && p.id !== source.id) return null;
@@ -461,25 +505,36 @@ const JS: Lang = {
     return null;
   },
   cases(root) {
+    // Top-down, carrying the suite path and skip marker: climbing every case's parents is quadratic
+    // in nesting depth (a node's `parent` is not O(1) in tree-sitter).
     const out: Case[] = [];
-    for (const n of walk(root)) {
-      if (n.type !== 'call_expression') continue;
-      const r = jsRoot(n);
-      if (!r || !JS_CASES.has(r)) continue;
-      const args = n.childForFieldName('arguments')?.namedChildren ?? [];
-      const title = jsTitle(args[0]);
-      const fn = args.find(a => JS_FN_TYPES.has(a.type));
-      const body = fn?.childForFieldName('body');
-      if (title === null || !fn || !body) continue;
-      const suites: string[] = [];
-      let skipped = jsSkipMarker(n);
-      for (let p = n.parent; p; p = p.parent) {
-        if (p.type !== 'call_expression') continue;
-        const pr = jsRoot(p);
-        const pt = jsTitle(p.childForFieldName('arguments')?.namedChildren[0]);
-        if (pr && JS_SUITES.has(pr) && pt !== null) { suites.unshift(pt); skipped ??= jsSkipMarker(p); }
+    const stack: Array<{ n: Node; suites: string[]; skipped?: string }> = [{ n: root, suites: [] }];
+    while (stack.length) {
+      const { n, suites, skipped } = stack.pop()!;
+      let childSuites = suites;
+      let childSkipped = skipped;
+      if (n.type === 'call_expression') {
+        const r = jsRoot(n);
+        const args = n.childForFieldName('arguments')?.namedChildren ?? [];
+        const title = jsTitle(args[0]);
+        if (r && title !== null && (JS_CASES.has(r) || JS_SUITES.has(r))) {
+          const marker = skipped ?? jsSkipMarker(n) ?? jsSkipOption(args);
+          if (JS_SUITES.has(r)) {
+            childSuites = [...suites, title];
+            childSkipped = marker;
+          } else {
+            const fn = args.find(a => JS_FN_TYPES.has(a.type));
+            const body = fn?.childForFieldName('body');
+            if (fn && body) {
+              const bodySkip = marker ?? jsSkipCallIn(body);
+              out.push({ name: [...suites, title].join(' > '), fn, body, ...(bodySkip ? { skipped: bodySkip } : {}) });
+            }
+            continue; // a case's body holds no further cases
+          }
+        }
       }
-      out.push({ name: [...suites, title].join(' > '), fn, body, ...(skipped ? { skipped } : {}) });
+      const kids = n.namedChildren;
+      for (let i = kids.length - 1; i >= 0; i--) stack.push({ n: kids[i], suites: childSuites, skipped: childSkipped });
     }
     return out;
   },
@@ -593,7 +648,7 @@ const JS: Lang = {
   returns(body) {
     if (body.type !== 'statement_block') return [body]; // an arrow function's expression body
     const out: Node[] = [];
-    for (const n of walk(body)) if (n.type === 'return_statement' && n.namedChildren[0]) out.push(n.namedChildren[0]);
+    for (const n of walk(body)) if (n.type === 'return_statement' && n.namedChildren[0] && !inNestedFunction(n, body, JS_FN_TYPES)) out.push(n.namedChildren[0]);
     return out;
   },
 };
@@ -609,9 +664,13 @@ function pySwallowed(n: Node, body: Node): boolean {
     if (p.type !== 'block' || p.parent?.type !== 'try_statement' || !sameNode(p.parent.childForFieldName('body') ?? p, p)) continue;
     for (const h of p.parent.namedChildren.filter(c => c.type === 'except_clause')) {
       const head = h.text.split('\n')[0];
-      const broad = /^except\s*(?::|\(?\s*(?:BaseException|Exception|AssertionError)\b)/.test(head);
-      if (broad && ![...walk(h)].some(c => c.type === 'raise_statement')) return true;
+      // `except:`, or a handler naming a broad type anywhere in its tuple.
+      const broad = /^except\s*:/.test(head) || /\b(?:BaseException|Exception|AssertionError)\b/.test(head);
+      const block = h.namedChildren.find(c => c.type === 'block');
+      if (broad && !(block?.namedChildren.some(c => c.type === 'raise_statement') ?? false)) return true;
     }
+    const fin = p.parent.namedChildren.find(c => c.type === 'finally_clause');
+    if (fin && [...walk(fin)].some(c => c.type === 'return_statement')) return true;
   }
   return false;
 }
@@ -630,6 +689,8 @@ const PY_SPINE_WRAPPERS = new Set(['await', 'parenthesized_expression', 'not_ope
 const PY: Lang = {
   identifierTypes: new Set(['identifier']),
   spineStep(parent, child) {
+    // The right side of `or` / `and` may never run.
+    if (parent.type === 'boolean_operator') return sameNode(parent.childForFieldName('left') ?? parent, child);
     if (PY_SPINE_WRAPPERS.has(parent.type)) return true;
     if (parent.type === 'conditional_expression') return !sameNode(parent.namedChildren[1] ?? parent, child);
     if (parent.type === 'attribute') { const o = parent.childForFieldName('object'); return o !== null && sameNode(o, child); }
@@ -696,7 +757,7 @@ const PY: Lang = {
       const clsName = cls?.childForFieldName('name')?.text;
       const decorators = [n, cls].flatMap(d => d?.parent?.type === 'decorated_definition' ? d.parent.namedChildren.filter(c => c.type === 'decorator').map(c => c.text) : []);
       const skipDecorator = decorators.find(d => /\b(?:mark\.(?:skip|skipif|xfail)|unittest\.(?:skip\w*|expectedFailure)|skip(?:If|Unless)?|expectedFailure)\b/.test(d));
-      const skipped = skipDecorator ?? (/\b(?:pytest\.skip|self\.skipTest)\s*\(/.test(body.text) ? 'skip()'
+      const skipped = skipDecorator ?? (/\b(?:pytest\.(?:skip|importorskip)|self\.skipTest)\s*\(|\braise\s+(?:unittest\.)?SkipTest\b/.test(body.text) ? 'skip()'
         : /^pytestmark\s*=.*\b(?:skip|skipif|xfail)\b/m.test(root.text) ? 'pytestmark' : undefined);
       out.push({ name: clsName ? `${clsName}.${name}` : name, fn: n, body, ...(skipped ? { skipped } : {}) });
     }
@@ -756,7 +817,7 @@ const PY: Lang = {
   },
   returns(body) {
     const out: Node[] = [];
-    for (const n of walk(body)) if (n.type === 'return_statement' && n.namedChildren[0]) out.push(n.namedChildren[0]);
+    for (const n of walk(body)) if (n.type === 'return_statement' && n.namedChildren[0] && !inNestedFunction(n, body, RETURN_SCOPES)) out.push(n.namedChildren[0]);
     return out;
   },
 };
@@ -883,20 +944,14 @@ const GO: Lang = {
   },
   assertions(body, ctx) {
     const out: Assertion[] = [];
-    // A subtest's closure (`t.Run(name, func(t *testing.T) {…})`) runs; any other closure may not.
-    const isSubtest = (fn: Node): boolean => {
-      const call = fn.parent?.parent;
-      const f = call?.type === 'call_expression' ? call.childForFieldName('function') : null;
-      const recv = f?.type === 'selector_expression' ? f.childForFieldName('operand') : null;
-      return recv?.type === 'identifier' && ctx.testingParams.has(recv.text) && f!.childForFieldName('field')?.text === 'Run';
-    };
     const nested = new Set(['func_literal']);
     for (const n of walk(body)) {
-      if ((n.type === 'call_expression' || n.type === 'if_statement') && inNestedFunction(n, body, nested, isSubtest)) continue;
+      // A subtest is a case of its own (see `cases`); any other closure may not run.
+      if ((n.type === 'call_expression' || n.type === 'if_statement') && inNestedFunction(n, body, nested)) continue;
       if (n.type === 'call_expression') {
         const fn = n.childForFieldName('function');
         const operand = fn?.type === 'selector_expression' ? fn.childForFieldName('operand') : null;
-        if (operand?.type === 'identifier' && ctx.assertReceivers.has(operand.text)) {
+        if (operand?.type === 'identifier' && ctx.assertReceivers.has(operand.text) && GO_TESTIFY_METHODS.test(fn!.childForFieldName('field')?.text ?? '')) {
           // `assert.Equal(t, want, got, msg…)` skips `t`; `a := assert.New(t); a.Equal(want, got)` does not.
           const args = this.callArgs(n);
           const values = operand.text === 'assert' || operand.text === 'require' ? args.slice(1) : args;
@@ -927,7 +982,7 @@ const GO: Lang = {
   },
   returns(body) {
     const out: Node[] = [];
-    for (const n of walk(body)) if (n.type === 'return_statement' && n.namedChildren[0]) out.push(n.namedChildren[0]);
+    for (const n of walk(body)) if (n.type === 'return_statement' && n.namedChildren[0] && !inNestedFunction(n, body, RETURN_SCOPES)) out.push(n.namedChildren[0]);
     return out;
   },
 };
@@ -970,6 +1025,8 @@ interface FileAnalysis {
   allCallsIn(body: Node): Array<{ node: Node; name: string; receiver: Node | null }>;
   assertionsOf(body: Node): Assertion[];
   cfgOf(fn: Node): FunctionCfg | undefined;
+  /** Names a test case's own function declares (variables, functions, parameters, loop targets). */
+  localNamesOf(fn: Node): ReadonlySet<string>;
 }
 
 const fileAnalyses = new WeakMap<Node, FileAnalysis>();
@@ -987,6 +1044,7 @@ function analyzeFile(lang: Lang, language: string, root: Node): FileAnalysis {
   }
   calls.sort((a, b) => a.start - b.start);
   const callsByBody = new Map<number, typeof calls>();
+  const bareByBody = new Map<number, Map<string, Node[]>>();
   const callsOfBody = (body: Node): typeof calls => {
     let hit = callsByBody.get(body.id);
     if (!hit) {
@@ -999,6 +1057,7 @@ function analyzeFile(lang: Lang, language: string, root: Node): FileAnalysis {
     }
     return hit;
   };
+  const caseLocals = new Map<number, Set<string>>();
   const cfgs = new Map<number, FunctionCfg | undefined>();
   const cfgOf = (fn: Node): FunctionCfg | undefined => {
     if (!cfgs.has(fn.id)) cfgs.set(fn.id, cfgFor(fn, language));
@@ -1043,10 +1102,23 @@ function analyzeFile(lang: Lang, language: string, root: Node): FileAnalysis {
         : c.name === target.name && target.receiverOk(c.receiver, body)))
       .map(c => c.node),
     // A helper in the same file is reached only by a bare call.
-    bareCallsIn: (body, name) => callsOfBody(body).filter(c => c.name === name && c.receiver === null).map(c => c.node),
+    bareCallsIn: (body, name) => {
+      let byName = bareByBody.get(body.id);
+      if (!byName) {
+        byName = new Map();
+        for (const c of callsOfBody(body)) if (c.receiver === null) (byName.get(c.name) ?? byName.set(c.name, []).get(c.name)!).push(c.node);
+        bareByBody.set(body.id, byName);
+      }
+      return byName.get(name) ?? [];
+    },
     allCallsIn: (body) => callsOfBody(body),
     assertionsOf,
     cfgOf,
+    localNamesOf: (fn) => {
+      let hit = caseLocals.get(fn.id);
+      if (!hit) caseLocals.set(fn.id, hit = lang.context(fn).localNames);
+      return hit;
+    },
   };
   fileAnalyses.set(root, analysis);
   return analysis;
@@ -1203,9 +1275,26 @@ function instancesOf(language: string, root: Node, cls: string, ctorNames: Reado
       if (r && ctor.test(r.text)) out.add(l.text);
     }
   }
-  // Bound exactly once, to a constructor: a reassigned name may hold anything.
-  for (const name of out) if ((assigned.get(name) ?? 0) !== 1) out.delete(name);
+  // Bound exactly once, to a constructor: a reassigned name may hold anything — and so may a name a
+  // loop, a catch clause, a parameter or a `with … as` binds as well.
+  for (const name of out) if ((assigned.get(name) ?? 0) !== 1 || bindsElsewhere(root, name)) out.delete(name);
   return out;
+}
+
+/** Is `name` bound by a loop target, catch/except clause, parameter or `with … as` inside `root`? */
+function bindsElsewhere(root: Node, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const n of walk(root)) {
+    let target: Node | null = null;
+    if (n.type === 'for_in_statement' || n.type === 'for_statement' || n.type === 'for_in_clause') target = n.childForFieldName('left');
+    else if (n.type === 'catch_clause') target = n.childForFieldName('parameter');
+    else if (n.type === 'as_pattern') target = n.childForFieldName('alias');
+    else if (n.type === 'formal_parameters' || n.type === 'parameters' || n.type === 'lambda_parameters' || n.type === 'parameter_list') target = n;
+    else if (n.type === 'range_clause') target = n.childForFieldName('left');
+    else if (n.type === 'except_clause' && new RegExp(`\\bas\\s+${escaped}(?![\\w$])`).test(n.text.split('\n')[0])) return true;
+    if (target && [...walk(target)].some(d => d.type === 'identifier' && d.text === name)) return true;
+  }
+  return false;
 }
 
 /** The last segment of a (possibly qualified) type or constructor name. */
@@ -1362,6 +1451,9 @@ function paramNames(fn: Node): string[] {
   if (params.type === 'identifier') return [params.text];
   const out: string[] = [];
   for (const p of params.namedChildren) {
+    // A rest/variadic parameter collects several arguments: positions from it on are not one value.
+    if (/^(?:rest_pattern|list_splat_pattern|dictionary_splat_pattern|variadic_parameter_declaration|variadic_parameter)$/.test(p.type)
+      || p.childForFieldName('pattern')?.type === 'rest_pattern') break;
     let id: Node | null = p.type === 'identifier' ? p : null;
     for (const d of walk(p)) { if (!id && d.type === 'identifier') id = d; }
     // Go groups names: `a, b int` → both names, the type last.
@@ -1388,12 +1480,13 @@ function mockFactsOf(language: string, text: string, root: Node): MockFacts {
     for (const m of text.matchAll(/\b(?:(?:vi|jest)\.(?:mock|doMock|unstable_mockModule)|mock\.module|td\.replace(?:Esm)?)\(\s*(?:import\(\s*)?['"]([^'"\n]{1,300})['"]/g)) facts.modules.push(m[1]);
     // `m.add = vi.fn()` and any other member assignment to the name: the test may replace it.
     for (const m of text.matchAll(/\.([\w$]{1,200})\s*=(?!=)/g)) facts.names.set(m[1], 'assignment');
-    for (const m of text.matchAll(/\btd\.replace\([^,\n]{1,300},\s*['"]([\w$]{1,200})['"]/g)) facts.names.set(m[1], 'td.replace');
+    for (const m of text.matchAll(/\b(?:td\.replace|jest\.replaceProperty|Object\.defineProperty|Reflect\.set)\([^,\n]{1,300},\s*['"]([\w$]{1,200})['"]/g)) facts.names.set(m[1], 'property replaced');
     for (const m of text.matchAll(/\b(?:sinon\.(?:stub|replace|spy)|mock\.method)\([^,\n]{1,300},\s*['"]([\w$]{1,200})['"]/g)) facts.names.set(m[1], 'stub');
     for (const m of text.matchAll(/\b(?:vi|jest)\.mocked\(\s*([\w$]{1,200})/g)) facts.names.set(m[1], 'vi.mocked');
     for (const m of text.matchAll(/\bspyOn\([^,\n]{1,300},\s*['"]([\w$]{1,200})['"]/g)) facts.names.set(m[1], 'spyOn');
   } else if (language === 'Python') {
-    for (const m of text.matchAll(/\bpatch\(\s*['"][\w.]{0,300}\.(\w{1,200})['"]/g)) facts.names.set(m[1], 'patch');
+    for (const m of text.matchAll(/\bpatch\(\s*f?['"][^'"\n]{0,300}\.(\w{1,200})['"]/g)) facts.names.set(m[1], 'patch');
+    for (const m of text.matchAll(/\bsetattr\([^,\n]{1,300},\s*['"](\w{1,200})['"]/g)) facts.names.set(m[1], 'setattr');
     for (const m of text.matchAll(/\bpatch\.object\([^,\n]{1,300},\s*['"](\w{1,200})['"]/g)) facts.names.set(m[1], 'patch.object');
     for (const m of text.matchAll(/\.(\w{1,200})\s*=(?!=)/g)) facts.names.set(m[1], 'assignment');
     for (const m of text.matchAll(/\bmonkeypatch\.setattr\(\s*(?:['"][\w.]{0,300}\.(\w{1,200})['"]|[^,\n]{1,300},\s*['"](\w{1,200})['"])/g)) facts.names.set(m[1] ?? m[2], 'monkeypatch.setattr');
@@ -1480,9 +1573,11 @@ export async function classifyTestSource(
   const out: CaseEvidence[] = [];
   const unrecognized = (test: string, reason: string): CaseEvidence => ({ test, class: 'reaches', line: null, recognized: false, reason });
   for (const c of file.cases) {
+    // A name the test declares itself is its own, never the module helper of that name.
+    const locals = file.localNamesOf(c.fn);
     const direct = file.callsIn(c.body, target);
-    const viaValueHelper = [...valueHelpers].flatMap(h => file.bareCallsIn(c.body, h));
-    const viaStopping = [...stoppingHelpers].filter(h => file.bareCallsIn(c.body, h).length > 0);
+    const viaValueHelper = [...valueHelpers].filter(h => !locals.has(h)).flatMap(h => file.bareCallsIn(c.body, h));
+    const viaStopping = [...stoppingHelpers].filter(h => !locals.has(h) && file.bareCallsIn(c.body, h).length > 0);
     if (direct.length === 0 && viaValueHelper.length === 0 && viaStopping.length === 0) continue;
 
     const sources = [...direct, ...viaValueHelper];
@@ -1491,15 +1586,21 @@ export async function classifyTestSource(
       out.push({ test: c.name, class: 'exercises', line: line(direct[0] ?? viaValueHelper[0] ?? c.fn), recognized: true, reason: `the test calls ${symbolName} but is turned off (${c.skipped.split('\n')[0].slice(0, 80)})` });
       continue;
     }
-    const assertions = file.assertionsOf(c.body);
-    const assertionHelperCalls = [...assertingParams.keys()].flatMap(h => file.bareCallsIn(c.body, h).map(call => ({ h, call })));
+    // An assertion after the test's own top-level `return` never runs.
+    const earlyReturn = c.body.namedChildren.find(st => st.type === 'return_statement');
+    const reachable = (n: Node): boolean => !earlyReturn || n.startIndex < earlyReturn.startIndex;
+    const assertions = file.assertionsOf(c.body).filter(a => reachable(a.value));
+    const assertionHelperCalls = [...assertingParams.keys()].filter(h => !locals.has(h))
+      .flatMap(h => file.bareCallsIn(c.body, h).filter(reachable).map(call => ({ h, call })));
     const callLine = line((direct[0] ?? viaValueHelper[0] ?? c.fn));
     const cfg = sources.length > 0 ? file.cfgOf(c.fn) : undefined;
     // A value from the call flows into a call that looks like an assertion this analysis does not
     // know (`should(r)`, `self.check(r)`, a testify suite's `s.Equal`): not a fact either way.
     const findUnknownForm = () => sources.length > 0 ? file.allCallsIn(c.body).find(k => lang.looksLikeAssertion(k.name, k.receiver, file.ctx)
       && !lang.isAssertionCall(k.name, k.receiver, file.ctx)
-      && lang.callArgs(k.node).some(a => derivedFrom(lang, cfg, c.body, sources, a))) : undefined;
+      && (lang.callArgs(k.node).some(a => derivedFrom(lang, cfg, c.body, sources, a))
+        // `add(1).should.equal(1)`: the subject is the receiver chain.
+        || (k.receiver !== null && sources.some(src => contains(k.receiver!, src))))) : undefined;
     const assertsSomething = assertions.length > 0 || assertionHelperCalls.length > 0
       || file.allCallsIn(c.body).some(k => lang.isAssertionCall(k.name, k.receiver, file.ctx));
     if (!assertsSomething) {

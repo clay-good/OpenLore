@@ -208,14 +208,14 @@ answer):
 
 | Strongest class | Symbols |
 |---|---:|
-| `asserts-on` | 1,295 (19%) |
+| `asserts-on` | 1,307 (19%) |
 | `exercises` | 212 (3%) |
-| `reaches` | 3,938 (59%) |
+| `reaches` | 3,926 (58%) |
 | no test relates to it | 1,268 (19%) |
 
-For 251 of them some linked test was not classed (assertions not recognized, or the file uses the
+For 236 of them some linked test was not classed (assertions not recognized, or the file uses the
 symbol only outside test cases), so no finding is raised for them. Classification adds no analysis
 time: it runs when an answer is asked for. Over 60 simulated diffs (up to 20 changed symbols from one
-to three files, each answer starting with an empty cache) one answer took 26 ms at the median, 132 ms
+to three files, each answer starting with an empty cache) one answer took 29 ms at the median, 137 ms
 at the 95th percentile, and 0.4 s at most. One answer parses at most 6 MB of test source; a file
 past that is listed as not assessed, never classed.
