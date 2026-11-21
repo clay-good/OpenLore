@@ -32,6 +32,7 @@ import { execFileGit } from '../../../utils/git-exec.js';
 import { gitPathArgs } from '../../../utils/git-args.js';
 import { readOpenLoreConfig } from '../config-manager.js';
 import { emittedText } from '../generated-file-guard.js';
+import { confinedOpenspecRel } from '../../../utils/openspec-dir.js';
 
 export interface HandoffInput {
   directory: string;
@@ -196,7 +197,7 @@ export async function handleGetHandoffBriefing(input: HandoffInput): Promise<Rec
   const budget = Math.max(300, Math.min(Number.isFinite(requested) && requested > 0 ? requested : DEFAULT_BUDGET, 8000));
   const files = await uncommitted(root);
   let openspec = 'openspec';
-  try { openspec = (await readOpenLoreConfig(root))?.openspecPath?.replace(/^\.\//, '') || 'openspec'; } catch { /* default */ }
+  try { openspec = confinedOpenspecRel(root, (await readOpenLoreConfig(root))?.openspecPath); } catch { /* default */ }
 
   const { readLiveLedger } = await import('../session-ledger.js');
   const live = readLiveLedger(root);

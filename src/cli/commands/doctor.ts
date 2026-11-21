@@ -91,6 +91,7 @@ import {
 import { assessWiring, missingLauncherPaths } from '../install/wiring-scope.js';
 import { openloreCliEntry } from '../../utils/platform-command.js';
 import { jsonOutput } from '../output.js';
+import { confinedOpenspecRel } from '../../utils/openspec-dir.js';
 
 
 // ============================================================================
@@ -418,7 +419,7 @@ export async function checkServedContentTrust(
   ]);
   if (!explicitFiles) {
     // Changed spec and decision files are those under this project's spec root (`openspecPath`).
-    const specRoot = (await configuredSpecRoot(rootPath)).relative;
+    const specRoot = (await configuredSpecRoot(rootPath, { readOnly: true })).relative;
     try {
       const { stdout } = await execFileAsync(
         'git',
@@ -474,7 +475,7 @@ export async function checkServedContentTrust(
 export async function checkCorpusIntegrity(rootPath: string): Promise<CheckResult> {
   try {
     const config = await readOpenLoreConfig(rootPath);
-    const findings = await detectCorpusIntegrity(rootPath, { openspecPath: config?.openspecPath });
+    const findings = await detectCorpusIntegrity(rootPath, { openspecPath: confinedOpenspecRel(rootPath, config?.openspecPath) });
     if (findings.length === 0) {
       return {
         name: 'Corpus integrity',
@@ -704,7 +705,7 @@ export async function checkOpenSpecDir(rootPath: string): Promise<CheckResult> {
   // project may point OpenLore at docs/specs/ or another root (Spec 26 B5).
   // Confined like every other reader: an escaping value falls back to `openspec`, so doctor
   // never reports (or probes) a folder outside the project that no command would read.
-  const specRoot = await configuredSpecRoot(rootPath);
+  const specRoot = await configuredSpecRoot(rootPath, { readOnly: true });
   const specsDir = join(specRoot.absolute, OPENSPEC_SPECS_SUBDIR);
   const rel = `${specRootPath(specRoot.relative, OPENSPEC_SPECS_SUBDIR)}/`;
   try {

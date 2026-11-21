@@ -182,7 +182,7 @@ export async function hasSpecFiles(rootPath: string): Promise<boolean> {
 
 /** `<spec root>/specs` for this project: its configured `openspecPath`, not a fixed `openspec/`. */
 async function specsDirOf(rootPath: string): Promise<string> {
-  return join((await configuredSpecRoot(rootPath)).absolute, OPENSPEC_SPECS_SUBDIR);
+  return join((await configuredSpecRoot(rootPath, { readOnly: true })).absolute, OPENSPEC_SPECS_SUBDIR);
 }
 
 async function findSpecFiles(

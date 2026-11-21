@@ -12,6 +12,7 @@
  * command and several times within one, and repeating the line would bury it.
  */
 
+import { relative } from 'node:path';
 import { colorForStderr } from './colors.js';
 import { logger } from './logger.js';
 import { sanitizeForTerminal } from './misc.js';
@@ -31,4 +32,13 @@ export function resolveOpenspecDir(absRoot: string, configuredPath: string | und
     const prefix = colorForStderr().yellow('[warn]');
     process.stderr.write(`${prefix} ${sanitizeForTerminal(message)}\n`);
   });
+}
+
+/**
+ * {@link resolveOpenspecDir}, as a repository-relative POSIX path (`.` for the root itself),
+ * for callers that pass the spec root on as a relative path. Passing the raw config value
+ * instead read outside the project (`../x/specs`) or threw on it.
+ */
+export function confinedOpenspecRel(absRoot: string, configuredPath: string | undefined): string {
+  return relative(absRoot, resolveOpenspecDir(absRoot, configuredPath)).replaceAll('\\', '/') || '.';
 }

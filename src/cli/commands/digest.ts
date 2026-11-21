@@ -48,7 +48,7 @@ Examples:
 
     try {
       // Specs are read from, and --save writes to, this project's spec root (`openspecPath`).
-      const specRoot = await configuredSpecRoot(rootPath);
+      const specRoot = await configuredSpecRoot(rootPath, { readOnly: true });
       const result = await generateDigest({
         rootPath,
         domains: options.domains,

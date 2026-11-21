@@ -96,7 +96,12 @@ builders edit `src/`, `docs/`, `skills/`, `examples/`, `plugin/` later. Lines ar
   `adr-generator` paths are mapped the same way by the spec writer. The grep now finds no path
   OpenLore reads or writes: comments, the `test` help example, the uninstall note (11.1), the
   text saying the OpenSpec CLI looks for `openspec/` (`spec-workflow.ts`), and the unused
-  `errors.openspecExists` message.
+  `errors.openspecExists` message. Review also moved `view --spec` to the root, and confined the
+  sites that passed the raw value on (`orient` domain count, corpus integrity in `doctor` and
+  `enforce`, `handoff`, `check_architecture`, `check_spec_drift`). Readers keep working when the
+  corpus folder is a symlink from outside the project (`configuredSpecRoot(…, { readOnly })`);
+  writers still refuse it. Config warnings go to stderr, so `--json` output stays valid.
+  Open: `enforce` corpus-intent findings name the canonical `openspec/…` key for a moved corpus.
 
 ## 6. Adapter: Spec Kit
 

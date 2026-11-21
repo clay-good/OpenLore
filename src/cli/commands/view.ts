@@ -114,7 +114,7 @@ function openBrowser(url: string): void {
 
 /** The spec directory to view: `--spec` when given, else `<openspecPath>/specs` (repo-relative). */
 export async function viewSpecDir(rootPath: string, spec?: string): Promise<string> {
-  return spec ?? join((await configuredSpecRoot(rootPath)).relative, OPENSPEC_SPECS_SUBDIR);
+  return spec ?? join((await configuredSpecRoot(rootPath, { readOnly: true })).relative, OPENSPEC_SPECS_SUBDIR);
 }
 
 export const viewCommand = new Command('view')

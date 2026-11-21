@@ -390,6 +390,25 @@ describe('change evidence audit', () => {
     expect(payload.changes[0].evidenceDisclaimer).toBe(EVIDENCE_DISCLAIMER);
   });
 
+  it('keeps --json stdout parseable when the config cannot be read', async () => {
+    const root = await fixture();
+    await addChange(root, 'json-change', 'cli', '### Requirement: Synced');
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'config.json'), '{ bad json');
+    let stdout = '';
+    vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: string | Uint8Array) => {
+      stdout += String(chunk);
+      return true;
+    }) as typeof process.stdout.write);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const log = vi.spyOn(console, 'log');
+
+    expect(await runChangeStatusCli({ rootPath: root, json: true, validateChange: validate })).toBe(0);
+    expect((JSON.parse(stdout) as { changes: Array<{ name: string }> }).changes.map((c) => c.name)).toEqual(['json-change']);
+    expect(log).not.toHaveBeenCalled();
+    expect(stderr.mock.calls.map(([c]) => String(c)).join('')).toContain('Failed to read OpenLore configuration');
+  });
+
   it('reports no open changes, not a crash, when openspec/changes does not exist', async () => {
     const root = await mkdtemp(join(tmpdir(), 'openlore-change-status-'));
     roots.push(root);

@@ -138,7 +138,7 @@ export async function extractFromDiff(options: ExtractFromDiffOptions): Promise<
   }
 
   // The spec corpus is not code a decision is mined from, wherever `openspecPath` puts it.
-  const specRoot = (await configuredSpecRoot(rootPath)).relative;
+  const specRoot = (await configuredSpecRoot(rootPath, { readOnly: true })).relative;
   const relevant = files
     .filter((f) => isRelevantStagedFile(f.path, specRoot))
     .slice(0, DECISIONS_EXTRACTION_MAX_FILES);

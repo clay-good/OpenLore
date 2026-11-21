@@ -1106,7 +1106,8 @@ it('uses the current before-agent context root instead of the session-start root
   }
 });
 
-it('does not list spec domains through a specs symlink that leaves the project', async () => {
+// Creating a symlink on Windows needs Developer Mode or admin rights.
+it.skipIf(process.platform === 'win32')('does not list spec domains through a specs symlink that leaves the project', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-spec-link-'));
   const outside = await mkdtemp(join(tmpdir(), 'openlore-pi-outside-'));
   try {

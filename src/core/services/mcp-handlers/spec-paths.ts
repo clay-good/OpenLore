@@ -1,5 +1,5 @@
 /** Where this project's spec files are, from its configured `openspecPath`. */
-import { relative } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { OPENSPEC_DIR } from '../../../constants.js';
 import { resolveOpenspecDir } from '../../../utils/openspec-dir.js';
 import { readOpenLoreConfig } from '../config-manager.js';
@@ -12,9 +12,28 @@ import { indexedSpecContentProvenance } from '../served-content.js';
  * path that does not exist — `get_spec` reporting not-found for files plainly on
  * disk, and `list_spec_domains` answering with an empty list.
  */
-export async function configuredSpecRoot(absDir: string): Promise<{ absolute: string; relative: string }> {
+export async function configuredSpecRoot(
+  absDir: string,
+  options: {
+    /**
+     * For callers that only read. A root whose path stays in the project but whose real
+     * location does not (a corpus folder symlinked from elsewhere in a monorepo) makes the
+     * confined resolution throw; a reader then gets the in-project path, as it did before it
+     * followed `openspecPath`. Writers leave this off, so they still refuse such a root.
+     */
+    readOnly?: boolean;
+  } = {},
+): Promise<{ absolute: string; relative: string }> {
   const configured = (await readOpenLoreConfig(absDir).catch(() => null))?.openspecPath ?? OPENSPEC_DIR;
-  const absolute = resolveOpenspecDir(absDir, configured);
+  let absolute: string;
+  try {
+    absolute = resolveOpenspecDir(absDir, configured);
+  } catch (error) {
+    if (!options.readOnly) throw error;
+    const lexical = resolve(absDir, configured);
+    const inside = relative(resolve(absDir), lexical);
+    absolute = inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside) ? resolve(absDir, OPENSPEC_DIR) : lexical;
+  }
   const relativePath = relative(absDir, absolute).replaceAll('\\', '/');
   return { absolute, relative: relativePath || '.' };
 }

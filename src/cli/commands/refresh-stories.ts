@@ -323,7 +323,7 @@ Examples:
       changedFiles = getLastCommitChangedFiles(rootPath);
 
       // Filter to source files only (skip docs, specs, stories themselves)
-      const specRoot = (await configuredSpecRoot(rootPath)).relative;
+      const specRoot = (await configuredSpecRoot(rootPath, { readOnly: true })).relative;
       changedFiles = changedFiles.filter(f => isStorySourceChange(f, specRoot));
 
       if (changedFiles.length === 0) {

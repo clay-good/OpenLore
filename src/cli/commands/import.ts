@@ -609,7 +609,7 @@ async function buildKeywordSearchIndex(rootPath: string, analysisDir: string): P
  */
 export async function buildSpecSearchIndex(rootPath: string, analysisDir: string): Promise<boolean> {
   // The spec root is this project's `openspecPath`, not a fixed `openspec/`.
-  const specRoot = (await configuredSpecRoot(rootPath)).absolute;
+  const specRoot = (await configuredSpecRoot(rootPath, { readOnly: true })).absolute;
   const specsDir = join(specRoot, OPENSPEC_SPECS_SUBDIR);
   if (!existsSync(specsDir)) return false;
   const mappingJsonPath = join(analysisDir, 'mapping.json');

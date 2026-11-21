@@ -337,7 +337,7 @@ export async function runManifestEmit(opts: ManifestEmitOptions): Promise<number
       exportsByFile: await loadExportsByFile(analysisDir),
       routes: await loadRoutes(analysisDir),
       pkg: readPackageJson(projectRoot),
-      specCount: countSpecs((await configuredSpecRoot(projectRoot)).absolute),
+      specCount: countSpecs((await configuredSpecRoot(projectRoot, { readOnly: true })).absolute),
       git: {
         remote: git(projectRoot, ['config', '--get', 'remote.origin.url']),
         commit: git(projectRoot, ['rev-parse', '--short', 'HEAD']),

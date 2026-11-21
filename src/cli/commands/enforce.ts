@@ -37,7 +37,7 @@ import { sanitizeForTerminal } from '../../utils/misc.js';
 import { readOpenLoreConfigStrict } from '../../core/services/config-manager.js';
 import { loadSpecCorpus } from '../../core/generator/spec-link-service.js';
 import { lintScenarioCorpus, SCENARIO_PATH_CAVEAT } from '../../core/generator/scenario-checkability.js';
-import { resolveOpenspecDir } from '../../utils/openspec-dir.js';
+import { confinedOpenspecRel, resolveOpenspecDir } from '../../utils/openspec-dir.js';
 import {
   effectivePolicy,
   normalizeEnforcementPolicy,
@@ -542,7 +542,7 @@ export async function collectGovernanceFindings(
   // Keep the legacy stale-decision source above for compatibility; this pass owns
   // the closed typed-edge contract and the corpus-* finding vocabulary.
   try {
-    findings.push(...await detectCorpusIntegrity(cwd, { openspecPath: config?.openspecPath }));
+    findings.push(...await detectCorpusIntegrity(cwd, { openspecPath: confinedOpenspecRel(cwd, config?.openspecPath) }));
     for (const code of CORPUS_FINDING_CODES) assessedCodes.add(code);
   } catch (err) {
     caveats.push(`corpus-integrity check unavailable: ${err instanceof Error ? err.message : String(err)}`);

@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { checkOpenSpecDir } from './doctor.js';
+import { checkCorpusIntegrity, checkOpenSpecDir } from './doctor.js';
 
 let root: string;
 
@@ -42,5 +42,12 @@ describe('doctor spec source check', () => {
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
+  });
+
+  it('checks corpus integrity at the fallback root, not "unavailable", when openspecPath escapes', async () => {
+    await project('../not-this-project');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const result = await checkCorpusIntegrity(root);
+    expect(result.detail).not.toMatch(/unavailable|traversal/i);
   });
 });
