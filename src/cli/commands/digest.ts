@@ -7,11 +7,11 @@
 
 import { Command } from 'commander';
 import { writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { parseList } from '../../utils/command-helpers.js';
 import { generateDigest, renderDigestMarkdown } from '../../core/digest/digest-generator.js';
-import { configuredSpecRoot } from '../../core/services/mcp-handlers/spec-paths.js';
+import { configuredSpecRoot, specRootPath } from '../../core/services/mcp-handlers/spec-paths.js';
+import { safeJoin } from '../../utils/path-confinement.js';
 
 export const digestCommand = new Command('digest')
   .description('Generate a plain-English digest of your specs for human review')
@@ -67,7 +67,8 @@ Examples:
       const outputPath = options.output
         ? options.output
         : options.save
-          ? join(specRoot.absolute, 'digest.md')
+          // A write, so confined: a spec root symlinked out of the project is refused.
+          ? safeJoin(rootPath, specRootPath(specRoot.relative, 'digest.md'))
           : null;
 
       if (outputPath) {

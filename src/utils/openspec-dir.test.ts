@@ -39,6 +39,38 @@ describe('resolveOpenspecDir', () => {
     }
   });
 
+  // Creating a symlink on Windows needs Developer Mode or admin rights.
+  it.skipIf(process.platform === 'win32')('a configured root symlinked from outside is read where configured, not swapped for the default', () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'openlore-reader-docs-'));
+    try {
+      const root = join(scratch, 'repo');
+      mkdirSync(join(scratch, 'shared', 'specs'), { recursive: true });
+      mkdirSync(join(root, 'openspec'), { recursive: true });
+      symlinkSync(join(scratch, 'shared'), join(root, 'docs'));
+      const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      expect(readerOpenspecDir(root, 'docs')).toBe(join(root, 'docs'));
+      expect(confinedOpenspecRel(root, './docs/')).toBe('docs');
+      expect(err).not.toHaveBeenCalled();
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('a symlinked default is not reported as falling back to itself', () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'openlore-default-link-'));
+    try {
+      const root = join(scratch, 'repo');
+      mkdirSync(join(scratch, 'shared'), { recursive: true });
+      mkdirSync(root);
+      symlinkSync(join(scratch, 'shared'), join(root, 'openspec'));
+      const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      expect(() => resolveOpenspecDir(root, './openspec')).toThrow();
+      expect(err.mock.calls.map(([c]) => String(c)).join('')).not.toContain('using the default');
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
   it('a relative form of the spec root, for readers that pass it on', () => {
     const root = resolve('/tmp/openlore-openspec-rel');
     expect(confinedOpenspecRel(root, undefined)).toBe('openspec');

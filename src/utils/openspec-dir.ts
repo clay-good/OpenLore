@@ -12,7 +12,7 @@
  * command and several times within one, and repeating the line would bury it.
  */
 
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { isAbsolute, posix, relative, resolve, sep } from 'node:path';
 import { colorForStderr } from './colors.js';
 import { logger } from './logger.js';
 import { sanitizeForTerminal } from './misc.js';
@@ -27,6 +27,9 @@ export function resolveOpenspecDir(absRoot: string, configuredPath: string | und
     const key = `${absRoot} ${configuredPath ?? ''}`;
     if (disclosed.has(key)) return;
     disclosed.add(key);
+    // The default itself escaping (an `openspec/` symlinked out) has no fallback to name: the
+    // confined join of the default refuses it next, and that error says why.
+    if (posix.normalize((configuredPath || OPENSPEC_DIR).replaceAll('\\', '/')).replace(/\/$/, '') === OPENSPEC_DIR) return;
     // Stderr, like every other config diagnostic: on stdout it broke `--json` output of the
     // commands that resolve the spec root (`change-status --json`, `test --json`).
     if (logger.getOptions().quiet) return;
@@ -36,19 +39,20 @@ export function resolveOpenspecDir(absRoot: string, configuredPath: string | und
 }
 
 /**
- * {@link resolveOpenspecDir} for readers, which must not fail where a plain join did not. When
- * the confined resolution fails — the corpus folder's path stays in the project but its real
- * location does not (a folder symlinked from elsewhere in a monorepo), or it cannot be resolved —
- * this returns the in-project path, or the default when even that escapes. A writer uses
- * {@link resolveOpenspecDir} and is refused instead.
+ * The spec root for readers, which must not fail, or read elsewhere, where a plain join did not.
+ * A configured path that stays in the project is used as written, even when its real location
+ * does not (a corpus folder symlinked from elsewhere in a monorepo); the confined resolution
+ * would refuse it and quietly read the default instead. Only a path that leaves the project
+ * falls back, with a warning, to the default. A writer uses {@link resolveOpenspecDir}.
  */
 export function readerOpenspecDir(absRoot: string, configuredPath: string | undefined): string {
+  const lexical = resolve(absRoot, configuredPath || OPENSPEC_DIR);
+  const inside = relative(resolve(absRoot), lexical);
+  if (inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)) return lexical;
   try {
     return resolveOpenspecDir(absRoot, configuredPath);
   } catch {
-    const lexical = resolve(absRoot, configuredPath || OPENSPEC_DIR);
-    const inside = relative(resolve(absRoot), lexical);
-    return inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside) ? resolve(absRoot, OPENSPEC_DIR) : lexical;
+    return resolve(absRoot, OPENSPEC_DIR);
   }
 }
 

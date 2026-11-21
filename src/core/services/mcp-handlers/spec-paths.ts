@@ -16,10 +16,9 @@ export async function configuredSpecRoot(
   absDir: string,
   options: {
     /**
-     * For callers that wrote nothing outside the project before they followed `openspecPath`
-     * (readers, and `digest --save`, which joined without confinement). When the confined
-     * resolution fails — a corpus folder symlinked from elsewhere in a monorepo — they get the
-     * in-project path (`readerOpenspecDir`). Writers that refused such a root leave this off.
+     * For callers that only read: a configured path that stays in the project is used as
+     * written, even when it is a folder symlinked from elsewhere in a monorepo
+     * (`readerOpenspecDir`). Writers leave this off, or confine the write themselves.
      */
     readOnly?: boolean;
   } = {},

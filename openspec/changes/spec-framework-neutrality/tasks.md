@@ -98,10 +98,13 @@ builders edit `src/`, `docs/`, `skills/`, `examples/`, `plugin/` later. Lines ar
   text saying the OpenSpec CLI looks for `openspec/` (`spec-workflow.ts`), and the unused
   `errors.openspecExists` message. Review also moved `view --spec` to the root, and confined the
   sites that passed the raw value on (`orient` domain count, corpus integrity in `doctor` and
-  `enforce`, `handoff`, `check_architecture`, `check_spec_drift`). Readers keep working when the
-  corpus folder is a symlink from outside the project (`configuredSpecRoot(…, { readOnly })`);
-  writers still refuse it. Config warnings go to stderr, so `--json` output stays valid.
-  Open: `enforce` corpus-intent findings name the canonical `openspec/…` key for a moved corpus.
+  `enforce`, `handoff`, `check_architecture`, CLI/API/MCP drift). Readers use the configured path
+  as written while it stays in the project, even when it is a folder symlinked from elsewhere
+  (`readerOpenspecDir`); writes are confined (`digest --save` included). Config warnings go to
+  stderr, so `--json` output stays valid.
+  Open, as on main: `change-status`, `working_set_context` and the Pi spec index refuse a
+  symlinked corpus folder (confined reads), and `digest`/`drift` fail on one; `enforce`
+  corpus-intent findings name the canonical `openspec/…` key for a moved corpus.
 
 ## 6. Adapter: Spec Kit
 
