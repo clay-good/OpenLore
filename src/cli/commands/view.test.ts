@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { viewCommand, sanitizeErrorMessage, safePath } from './view.js';
+import { viewCommand, sanitizeErrorMessage, safePath, viewSpecDir } from './view.js';
 import { safeJoin } from '../../utils/path-confinement.js';
 
 vi.mock('../../utils/path-confinement.js', async (importOriginal) => ({
@@ -122,11 +122,12 @@ describe('view command', () => {
       expect(opt?.defaultValue).toContain('analysis');
     });
 
-    it('should have --spec option with default', () => {
+    it('should have a --spec option whose default follows openspecPath', () => {
       const opt = viewCommand.options.find(o => o.long === '--spec');
       expect(opt).toBeDefined();
-      expect(opt?.defaultValue).toContain('openspec');
-      expect(opt?.defaultValue).toContain('specs');
+      // No fixed default: it is resolved from the config when the command runs (viewSpecDir).
+      expect(opt?.defaultValue).toBeUndefined();
+      expect(opt?.description).toContain('openspecPath');
     });
 
     it('should have --port option with numeric default', () => {
@@ -208,9 +209,16 @@ describe('view command', () => {
       expect(opt?.defaultValue).toMatch(/\.openlore.analysis/);
     });
 
-    it('spec default should not be a raw hardcoded string', () => {
-      const opt = viewCommand.options.find(o => o.long === '--spec');
-      expect(opt?.defaultValue).toMatch(/openspec.specs/);
+    it('spec directory defaults to <openspecPath>/specs, and --spec wins', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'openlore-view-spec-'));
+      try {
+        // No config: the default root. The configured root is read by configuredSpecRoot,
+        // which the change-status, digest and scenario-parser tests exercise with a real config.
+        expect(await viewSpecDir(root)).toBe(join('openspec', 'specs'));
+        expect(await viewSpecDir(root, 'custom/specs')).toBe('custom/specs');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 });

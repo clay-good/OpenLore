@@ -1106,6 +1106,22 @@ it('uses the current before-agent context root instead of the session-start root
   }
 });
 
+it('does not list spec domains through a specs symlink that leaves the project', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-spec-link-'));
+  const outside = await mkdtemp(join(tmpdir(), 'openlore-pi-outside-'));
+  try {
+    await mkdir(join(outside, 'secret-domain'), { recursive: true });
+    await mkdir(join(dir, 'docs'), { recursive: true });
+    await symlink(outside, join(dir, 'docs', 'specs'));
+    await mkdir(join(dir, '.openlore'), { recursive: true });
+    await writeFile(join(dir, '.openlore', 'config.json'), JSON.stringify({ openspecPath: 'docs' }));
+    expect(await readSpecIndex(dir)).not.toContain('secret-domain');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
 it('lists spec domains from the configured openspecPath', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'openlore-pi-spec-root-'));
   try {

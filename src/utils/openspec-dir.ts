@@ -12,7 +12,9 @@
  * command and several times within one, and repeating the line would bury it.
  */
 
+import { colorForStderr } from './colors.js';
 import { logger } from './logger.js';
+import { sanitizeForTerminal } from './misc.js';
 import { safeOpenspecDir } from './path-confinement.js';
 
 const disclosed = new Set<string>();
@@ -23,6 +25,10 @@ export function resolveOpenspecDir(absRoot: string, configuredPath: string | und
     const key = `${absRoot} ${configuredPath ?? ''}`;
     if (disclosed.has(key)) return;
     disclosed.add(key);
-    logger.warning(message);
+    // Stderr, like every other config diagnostic: on stdout it broke `--json` output of the
+    // commands that resolve the spec root (`change-status --json`, `test --json`).
+    if (logger.getOptions().quiet) return;
+    const prefix = colorForStderr().yellow('[warn]');
+    process.stderr.write(`${prefix} ${sanitizeForTerminal(message)}\n`);
   });
 }

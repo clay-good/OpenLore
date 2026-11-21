@@ -588,6 +588,9 @@ const ALLOWED_RAW_INTERPOLATIONS: Record<string, readonly string[]> = {
     'title',
     'value',
   ],
+  'utils/openspec-dir.ts': [
+    'prefix',
+  ],
   'utils/progress.ts': [
     '(options.score * 100).toFixed(1)',
     "isTTY ? '🏷️ ' : '-'",

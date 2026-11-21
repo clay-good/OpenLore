@@ -50,7 +50,8 @@ vi.mock('./graph.js', () => ({
 
 // The configured spec root (`openspecPath`); a test sets it to check a moved corpus.
 let mockSpecRoot = 'openspec';
-vi.mock('./spec-paths.js', () => ({
+vi.mock('./spec-paths.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./spec-paths.js')>()),
   configuredSpecRoot: vi.fn(async (absDir: string) => ({ absolute: `${absDir}/${mockSpecRoot}`, relative: mockSpecRoot })),
 }));
 

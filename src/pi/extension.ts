@@ -49,7 +49,7 @@ import { Type, type TObject, type TSchema } from 'typebox';
 import { execFile, spawn } from 'node:child_process';
 import { openSync, closeSync, readFileSync, existsSync } from 'node:fs';
 import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
-import { basename, delimiter, dirname, join, resolve as resolvePath } from 'node:path';
+import { basename, delimiter, dirname, join, relative, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -1263,7 +1263,8 @@ export async function readSpecIndex(cwd: string): Promise<string> {
     // The spec root is this project's `openspecPath` (confined to the project; default `openspec`).
     const raw = await readLayeredConfig(safeJoin(cwd, join(OPENLORE_DIR, 'config.json'))).catch(() => null);
     const specRoot = resolveOpenspecDir(cwd, typeof raw?.openspecPath === 'string' ? raw.openspecPath : undefined);
-    const dirs = (await readdir(join(specRoot, 'specs'), { withFileTypes: true }))
+    // safeJoin: a committed `<root>/specs` symlink must not list a folder outside the project.
+    const dirs = (await readdir(safeJoin(cwd, join(relative(cwd, specRoot), 'specs')), { withFileTypes: true }))
       .filter((d) => d.isDirectory()).map((d) => d.name).sort();
     if (dirs.length === 0) return '';
     const shown = dirs.slice(0, PI_SPEC_INDEX_MAX_DOMAINS);
