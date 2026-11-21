@@ -213,6 +213,20 @@ function inNestedFunction(n: Node, body: Node, fnTypes: ReadonlySet<string>, all
   return false;
 }
 
+/** `inner` reaches `outer` along value-carrying steps only (see `Lang.spineStep`). */
+function onSpine(lang: Lang, inner: Node, outer: Node): boolean {
+  if (inner.startIndex < outer.startIndex || inner.endIndex > outer.endIndex) return false;
+  for (let p: Node = inner; p.startIndex !== outer.startIndex || p.endIndex !== outer.endIndex || p.type !== outer.type; ) {
+    const parent = p.parent;
+    if (!parent || !lang.spineStep(parent, p)) return false;
+    p = parent;
+  }
+  return true;
+}
+
+/** Same node, compared by span and type (tree-sitter node objects are not stable identities). */
+const sameNode = (a: Node, b: Node): boolean => a.startIndex === b.startIndex && a.endIndex === b.endIndex && a.type === b.type;
+
 /** Identifier texts under `n` (a declaration's name or pattern). */
 function identifiersIn(n: Node | null | undefined, types: ReadonlySet<string>): string[] {
   if (!n) return [];
@@ -241,11 +255,30 @@ function valuePositions(name: string): number[] {
 
 /** Jest/Vitest matchers about a mock's calls: their arguments are reference values, not checks of the symbol. */
 const JS_MOCK_MATCHERS = /^(?:toHaveBeenCalled\w*|toBeCalled\w*|toHaveBeenLastCalledWith|toHaveBeenNthCalledWith|lastCalledWith|nthCalledWith|toHaveReturned\w*|toReturn\w*)$/;
+/** Chai property assertions: an assertion with no call. */
+const JS_CHAI_PROPS = new Set(['true', 'false', 'null', 'undefined', 'ok', 'empty', 'exist', 'NaN', 'finite']);
+
+/** Inside `body`, is `n` in a `try` whose handler neither rethrows nor fails: an assertion there never fails the test. */
+function jsSwallowed(n: Node, body: Node): boolean {
+  for (let p = n.parent; p && p.id !== body.id; p = p.parent) {
+    if (p.type !== 'statement_block' || p.parent?.type !== 'try_statement') continue;
+    const tryStmt = p.parent;
+    if (!sameNode(tryStmt.childForFieldName('body') ?? p, p)) continue;
+    const handler = tryStmt.childForFieldName('handler');
+    if (handler && ![...walk(handler)].some(c => c.type === 'throw_statement')) return true;
+  }
+  return false;
+}
+
 /** Matchers that assert the expect'ed function raises. */
 const JS_THROW_MATCHERS = /^(?:toThrow\w*|rejects|toReject\w*)$/;
 
 /** One test case: its name, the function node holding its body, and the body. */
-interface Case { name: string; fn: Node; body: Node }
+interface Case {
+  name: string; fn: Node; body: Node;
+  /** How the test is turned off (`it.skip`, `@pytest.mark.skip`, `t.Skip()`), or undefined when it runs. */
+  skipped?: string;
+}
 
 /** A function in the file a test may call: a helper candidate. */
 interface FileFn { name: string; fn: Node; body: Node }
@@ -274,6 +307,12 @@ interface Lang {
    * pattern element whose initializer holds the call (`const r = add(1), other = 7` binds `r`).
    */
   bindings(source: Node, body: Node): { names: string[]; from: number; to: number } | null;
+  /**
+   * Whether `parent` carries `child`'s value forward unchanged in kind: an `await`, parentheses, a
+   * cast, a comparison or arithmetic, a member read or index, a method call ON it. Never an argument
+   * to another call: in `expect(f(add()))` the assertion checks `f`, and `add`'s result is only an input.
+   */
+  spineStep(parent: Node, child: Node): boolean;
   /** A call that looks like an assertion this analysis does not recognize (`should(x)`, `s.Equal`). */
   looksLikeAssertion(name: string, receiver: Node | null, ctx: FileContext): boolean;
   /** Return statements' values in a function body. */
@@ -296,6 +335,16 @@ function jsRoot(call: Node): string | null {
   return fn?.type === 'identifier' ? fn.text : null;
 }
 
+/** `it.skip`, `xit`, `describe.skip`, `it.skipIf(c)`, `test.todo`: how a case or suite is turned off. */
+function jsSkipMarker(call: Node): string | undefined {
+  let fn = call.childForFieldName('function');
+  if (fn?.type === 'call_expression') fn = fn.childForFieldName('function'); // it.skipIf(c)('x', fn)
+  const text = fn?.text ?? '';
+  const parts = text.split('.');
+  if (/^x(?:it|test|describe|specify|context)$/.test(parts[0]) || parts.some(p => /^(?:skip|todo|skipIf|runIf)$/.test(p))) return text;
+  return undefined;
+}
+
 function jsTitle(n: Node | undefined): string | null {
   if (!n) return null;
   if (n.type === 'string') return n.text.slice(1, -1);
@@ -314,12 +363,12 @@ function jsPatternNames(name: Node | null, value: Node | null, source: Node): st
   if (!name || !value) return [];
   if (name.type === 'identifier') return [name.text];
   if (name.type === 'array_pattern' && value.type === 'array') {
-    const i = value.namedChildren.findIndex(v => contains(v, source));
+    const i = value.namedChildren.findIndex(v => onSpine(JS, source, v));
     const el = i >= 0 ? name.namedChildren[i] : undefined;
     return el?.type === 'identifier' ? [el.text] : [];
   }
   if (name.type === 'object_pattern' && value.type === 'object') {
-    const pair = value.namedChildren.find(v => v.type === 'pair' && contains(v, source));
+    const pair = value.namedChildren.find(v => v.type === 'pair' && v.childForFieldName('value') !== null && onSpine(JS, source, v.childForFieldName('value')!));
     const key = pair?.childForFieldName('key')?.text;
     for (const el of name.namedChildren) {
       if (el.type === 'shorthand_property_identifier_pattern' && el.text === key) return [el.text];
@@ -344,8 +393,24 @@ function jsSoleCall(fn: Node): Node | null {
   return body && (body.type === 'call_expression' || body.type === 'new_expression') ? body : null;
 }
 
+const JS_SPINE_WRAPPERS = new Set(['await_expression', 'parenthesized_expression', 'as_expression', 'non_null_expression',
+  'satisfies_expression', 'type_assertion', 'unary_expression', 'binary_expression', 'template_substitution', 'template_string']);
+
 const JS: Lang = {
   identifierTypes: new Set(['identifier', 'shorthand_property_identifier']),
+  spineStep(parent, child) {
+    if (JS_SPINE_WRAPPERS.has(parent.type)) return true;
+    if (parent.type === 'ternary_expression') return !sameNode(parent.childForFieldName('condition') ?? parent, child);
+    if (parent.type === 'member_expression' || parent.type === 'subscript_expression') {
+      const obj = parent.childForFieldName('object');
+      return obj !== null && sameNode(obj, child);
+    }
+    if (parent.type === 'call_expression') {
+      const fn = parent.childForFieldName('function');
+      return fn !== null && sameNode(fn, child);
+    }
+    return false;
+  },
   context(root) {
     const localNames = new Set<string>();
     for (const n of walk(root)) {
@@ -378,11 +443,19 @@ const JS: Lang = {
     for (let p: Node | null = source; p && p.id !== body.id; p = p.parent) {
       if (JS_FN_TYPES.has(p.type) && p.id !== source.id) return null;
       if (p.type === 'variable_declarator') {
-        return { names: jsPatternNames(p.childForFieldName('name'), p.childForFieldName('value'), source), from: line(p), to: p.endPosition.row + 1 };
+        const value = p.childForFieldName('value');
+        const name = p.childForFieldName('name');
+        // `const r = f(add())` binds f's result, not add's: only a value on the call's spine is bound.
+        const names = name?.type === 'identifier'
+          ? (value && onSpine(JS, source, value) ? [name.text] : [])
+          : jsPatternNames(name, value, source);
+        return { names, from: line(p), to: p.endPosition.row + 1 };
       }
       if (p.type === 'assignment_expression' || p.type === 'augmented_assignment_expression') {
         const left = p.childForFieldName('left');
-        return { names: left?.type === 'identifier' ? [left.text] : identifiersIn(left, JS_DECL_NAME_TYPES), from: line(p), to: p.endPosition.row + 1 };
+        const right = p.childForFieldName('right');
+        const names = left?.type === 'identifier' && right && onSpine(JS, source, right) ? [left.text] : [];
+        return { names, from: line(p), to: p.endPosition.row + 1 };
       }
     }
     return null;
@@ -399,13 +472,14 @@ const JS: Lang = {
       const body = fn?.childForFieldName('body');
       if (title === null || !fn || !body) continue;
       const suites: string[] = [];
+      let skipped = jsSkipMarker(n);
       for (let p = n.parent; p; p = p.parent) {
         if (p.type !== 'call_expression') continue;
         const pr = jsRoot(p);
         const pt = jsTitle(p.childForFieldName('arguments')?.namedChildren[0]);
-        if (pr && JS_SUITES.has(pr) && pt !== null) suites.unshift(pt);
+        if (pr && JS_SUITES.has(pr) && pt !== null) { suites.unshift(pt); skipped ??= jsSkipMarker(p); }
       }
-      out.push({ name: [...suites, title].join(' > '), fn, body });
+      out.push({ name: [...suites, title].join(' > '), fn, body, ...(skipped ? { skipped } : {}) });
     }
     return out;
   },
@@ -460,10 +534,14 @@ const JS: Lang = {
       const isMember = obj?.type === 'identifier' && (JS_ASSERT_ROOTS.has(obj.text)
         || (obj.text === 'chai' && JS_ASSERT_ROOTS.has(fn!.childForFieldName('property')?.text ?? '')));
       if (!isRoot && !isMember) continue;
-      // An assertion inside a callback (`setTimeout`, `.then`) may never run before the test ends.
-      if (inNestedFunction(n, body, JS_FN_TYPES)) continue;
+      // An assertion inside a callback (`setTimeout`, `.then`) may never run before the test ends, and
+      // one inside a `try` whose handler swallows the failure never fails the test.
+      if (inNestedFunction(n, body, JS_FN_TYPES) || jsSwallowed(n, body)) continue;
       const args = this.callArgs(n);
       const method = isRoot ? fn!.text : fn!.childForFieldName('property')?.text ?? '';
+      // `expect.objectContaining(…)`, `expect.any(…)`: asymmetric matchers are values inside another
+      // assertion, not assertions. `expect.soft` / `expect.poll` are; `expect.assertions(n)` checks no value.
+      if (isMember && obj!.text === 'expect' && !['soft', 'poll'].includes(method)) continue;
       // The matcher chain after `expect(actual)`.
       const chain: Node[] = [];
       let cur: Node = n;
@@ -476,7 +554,20 @@ const JS: Lang = {
       const matchers = chain.map(m => m.childForFieldName('property')?.text ?? '');
       const throws = matchers.some(m => JS_THROW_MATCHERS.test(m));
       const mockMatcher = matchers.some(m => JS_MOCK_MATCHERS.test(m));
-      if (method === 'expect' || method === 'poll') {
+      const expectForm = method === 'expect' || method === 'poll' || method === 'soft';
+      // `expect(x)` alone, or `expect(x).toBeDefined` never called, checks nothing; a chai property
+      // assertion (`.to.be.true`) is one only from a closed list.
+      const called = chain.some(m => m.parent?.type === 'call_expression' && sameNode(m.parent.childForFieldName('function') ?? m, m));
+      if (expectForm && !called && !JS_CHAI_PROPS.has(matchers.at(-1) ?? '')) continue;
+      if (/^(?:throws|rejects|doesNotThrow|doesNotReject)$/.test(method) && !isRoot) {
+        // `assert.throws(() => add())`: only the function's one call, and only that call raising.
+        const actual = args[0];
+        const sole = actual && JS_FN_TYPES.has(actual.type) ? jsSoleCall(actual)
+          : actual && (actual.type === 'call_expression' || actual.type === 'await_expression') ? actual : null;
+        if (sole) out.push({ value: sole, line: line(n), exact: true });
+        continue;
+      }
+      if (expectForm) {
         const actual = args[0];
         if (actual && JS_FN_TYPES.has(actual.type)) {
           // `expect(() => add()).toThrow()` / `expect.poll(() => add())`: the function's one call.
@@ -512,6 +603,19 @@ const PY_IDS: ReadonlySet<string> = new Set(['identifier']);
 const PY_UNITTEST_ASSERT = /^assert(?:Equal|NotEqual|True|False|Is|IsNot|IsNone|IsNotNone|In|NotIn|IsInstance|NotIsInstance|AlmostEqual|NotAlmostEqual|Greater|GreaterEqual|Less|LessEqual|Regex|NotRegex|CountEqual|DictEqual|ListEqual|TupleEqual|SetEqual|SequenceEqual|MultiLineEqual|Raises|RaisesRegex|Warns|WarnsRegex|Logs|NoLogs)$/;
 /** A mock's call-record assertions: they assert no value of the symbol. */
 const PY_MOCK_ASSERT = /^assert_(?:called\w*|any_call|has_calls|not_called|awaited\w*|has_awaits|any_await|not_awaited)$/;
+/** Inside `body`, is `n` in a `try` whose broad handler (`except:`, `except Exception`, `except AssertionError`) does not re-raise? */
+function pySwallowed(n: Node, body: Node): boolean {
+  for (let p = n.parent; p && p.id !== body.id; p = p.parent) {
+    if (p.type !== 'block' || p.parent?.type !== 'try_statement' || !sameNode(p.parent.childForFieldName('body') ?? p, p)) continue;
+    for (const h of p.parent.namedChildren.filter(c => c.type === 'except_clause')) {
+      const head = h.text.split('\n')[0];
+      const broad = /^except\s*(?::|\(?\s*(?:BaseException|Exception|AssertionError)\b)/.test(head);
+      if (broad && ![...walk(h)].some(c => c.type === 'raise_statement')) return true;
+    }
+  }
+  return false;
+}
+
 /** The call a statement makes when the statement is exactly that call (or `x = call`). */
 function pySoleCall(stmt: Node | undefined): Node | null {
   let e = stmt?.type === 'expression_statement' ? stmt.namedChildren[0] : stmt;
@@ -520,8 +624,19 @@ function pySoleCall(stmt: Node | undefined): Node | null {
   return e?.type === 'call' ? e : null;
 }
 
+const PY_SPINE_WRAPPERS = new Set(['await', 'parenthesized_expression', 'not_operator', 'boolean_operator',
+  'comparison_operator', 'binary_operator', 'unary_operator']);
+
 const PY: Lang = {
   identifierTypes: new Set(['identifier']),
+  spineStep(parent, child) {
+    if (PY_SPINE_WRAPPERS.has(parent.type)) return true;
+    if (parent.type === 'conditional_expression') return !sameNode(parent.namedChildren[1] ?? parent, child);
+    if (parent.type === 'attribute') { const o = parent.childForFieldName('object'); return o !== null && sameNode(o, child); }
+    if (parent.type === 'subscript') { const v = parent.childForFieldName('value'); return v !== null && sameNode(v, child); }
+    if (parent.type === 'call') { const f = parent.childForFieldName('function'); return f !== null && sameNode(f, child); }
+    return false;
+  },
   context(root) {
     const localNames = new Set<string>();
     for (const n of walk(root)) {
@@ -557,10 +672,11 @@ const PY: Lang = {
         const lefts = left && (left.type === 'pattern_list' || left.type === 'tuple_pattern') ? left.namedChildren : null;
         const rights = right && (right.type === 'expression_list' || right.type === 'tuple') ? right.namedChildren : null;
         if (lefts && rights && lefts.length === rights.length) {
-          const i = rights.findIndex(r => contains(r, source));
-          if (i >= 0) return { names: identifiersIn(lefts[i], PY_IDS), ...span };
+          const i = rights.findIndex(r => onSpine(PY, source, r));
+          return { names: i >= 0 ? identifiersIn(lefts[i], PY_IDS) : [], ...span };
         }
-        return { names: identifiersIn(left, PY_IDS), ...span };
+        // `a, b = add(1)` binds both; `r = f(add(1))` binds nothing of add's.
+        return { names: right && onSpine(PY, source, right) ? identifiersIn(left, PY_IDS) : [], ...span };
       }
     }
     return null;
@@ -578,7 +694,11 @@ const PY: Lang = {
       let cls: Node | null = null;
       for (let p = n.parent; p && !cls; p = p.parent) if (p.type === 'class_definition') cls = p;
       const clsName = cls?.childForFieldName('name')?.text;
-      out.push({ name: clsName ? `${clsName}.${name}` : name, fn: n, body });
+      const decorators = [n, cls].flatMap(d => d?.parent?.type === 'decorated_definition' ? d.parent.namedChildren.filter(c => c.type === 'decorator').map(c => c.text) : []);
+      const skipDecorator = decorators.find(d => /\b(?:mark\.(?:skip|skipif|xfail)|unittest\.(?:skip\w*|expectedFailure)|skip(?:If|Unless)?|expectedFailure)\b/.test(d));
+      const skipped = skipDecorator ?? (/\b(?:pytest\.skip|self\.skipTest)\s*\(/.test(body.text) ? 'skip()'
+        : /^pytestmark\s*=.*\b(?:skip|skipif|xfail)\b/m.test(root.text) ? 'pytestmark' : undefined);
+      out.push({ name: clsName ? `${clsName}.${name}` : name, fn: n, body, ...(skipped ? { skipped } : {}) });
     }
     return out;
   },
@@ -608,7 +728,7 @@ const PY: Lang = {
     const out: Assertion[] = [];
     const nested = new Set(['function_definition', 'lambda']);
     for (const n of walk(body)) {
-      if ((n.type === 'assert_statement' || n.type === 'call' || n.type === 'with_statement') && inNestedFunction(n, body, nested)) continue;
+      if ((n.type === 'assert_statement' || n.type === 'call' || n.type === 'with_statement') && (inNestedFunction(n, body, nested) || pySwallowed(n, body))) continue;
       if (n.type === 'assert_statement') {
         const cond = n.namedChildren[0]; // the condition, not the message
         if (cond) out.push({ value: cond, line: line(n) });
@@ -648,6 +768,15 @@ const GO_TESTIFY_METHODS = /^(?:Equal|NotEqual|EqualValues|Exactly|Same|NotSame|
 
 const GO: Lang = {
   identifierTypes: new Set(['identifier']),
+  spineStep(parent, child) {
+    if (parent.type === 'parenthesized_expression' || parent.type === 'unary_expression' || parent.type === 'binary_expression') return true;
+    if (parent.type === 'selector_expression' || parent.type === 'index_expression' || parent.type === 'type_assertion_expression') {
+      const o = parent.childForFieldName('operand');
+      return o !== null && sameNode(o, child);
+    }
+    if (parent.type === 'call_expression') { const f = parent.childForFieldName('function'); return f !== null && sameNode(f, child); }
+    return false;
+  },
   context(root) {
     const localNames = new Set<string>();
     const testingParams = new Set<string>();
@@ -681,21 +810,54 @@ const GO: Lang = {
         const rights = right ? (right.type === 'expression_list' ? right.namedChildren : [right]) : [];
         // `got, want := Sym(), 3` pairs element by element; `x, err := Sym()` binds both.
         if (rights.length > 1 && lefts.length === rights.length) {
-          const i = rights.findIndex(r => contains(r, source));
-          if (i >= 0) return { names: identifiersIn(lefts[i], GO_IDS), ...span };
+          const i = rights.findIndex(r => onSpine(GO, source, r));
+          return { names: i >= 0 ? identifiersIn(lefts[i], GO_IDS) : [], ...span };
         }
-        return { names: lefts.flatMap(l => identifiersIn(l, GO_IDS)), ...span };
+        // `x, err := Sym()` binds both; `x := f(Sym())` binds nothing of Sym's.
+        return { names: rights.length === 1 && onSpine(GO, source, rights[0]) ? lefts.flatMap(l => identifiersIn(l, GO_IDS)) : [], ...span };
       }
     }
     return null;
   },
   cases(root) {
     const out: Case[] = [];
+    const tParams = (fn: Node): string[] => {
+      const params = fn.childForFieldName('parameters');
+      return (params?.namedChildren ?? []).filter(p => /^\*testing\.[TBF]$/.test(p.childForFieldName('type')?.text ?? ''))
+        .flatMap(p => (p.childrenForFieldName?.('name') ?? []).map(x => x.text));
+    };
+    // `t.Skip()` anywhere in the test turns it off (conservatively, even under a condition).
+    const skipIn = (body: Node, ts: string[]): string | undefined => [...walk(body)].find(c => {
+      if (c.type !== 'call_expression') return false;
+      const f = c.childForFieldName('function');
+      const recv = f?.type === 'selector_expression' ? f.childForFieldName('operand') : null;
+      return recv?.type === 'identifier' && ts.includes(recv.text) && /^Skip(?:f|Now)?$/.test(f!.childForFieldName('field')?.text ?? '');
+    })?.text;
     for (const n of root.namedChildren) {
       if (n.type !== 'function_declaration') continue;
       const name = n.childForFieldName('name')?.text ?? '';
       const body = n.childForFieldName('body');
-      if (/^Test(?:$|[^a-z])/.test(name) && body) out.push({ name, fn: n, body });
+      if (!/^Test(?:$|[^a-z])/.test(name) || !body) continue;
+      const ts = tParams(n);
+      const skipped = skipIn(body, ts);
+      out.push({ name, fn: n, body, ...(skipped ? { skipped } : {}) });
+      // Each `t.Run(name, func(t *testing.T) {…})` is a case of its own: its closure's data flow is
+      // not in the enclosing test's overlay.
+      let i = 0;
+      for (const c of walk(body)) {
+        if (c.type !== 'call_expression') continue;
+        const f = c.childForFieldName('function');
+        const recv = f?.type === 'selector_expression' ? f.childForFieldName('operand') : null;
+        if (!(recv?.type === 'identifier' && ts.includes(recv.text) && f!.childForFieldName('field')?.text === 'Run')) continue;
+        const args = c.childForFieldName('arguments')?.namedChildren ?? [];
+        const lit = args[1];
+        const litBody = lit?.type === 'func_literal' ? lit.childForFieldName('body') : null;
+        if (!lit || !litBody) continue;
+        i++;
+        const title = args[0]?.type === 'interpreted_string_literal' ? args[0].text.slice(1, -1) : `#${i}`;
+        const subSkipped = skipped ?? skipIn(litBody, tParams(lit));
+        out.push({ name: `${name}/${title}`, fn: lit, body: litBody, ...(subSkipped ? { skipped: subSkipped } : {}) });
+      }
     }
     return out;
   },
@@ -725,7 +887,8 @@ const GO: Lang = {
     const isSubtest = (fn: Node): boolean => {
       const call = fn.parent?.parent;
       const f = call?.type === 'call_expression' ? call.childForFieldName('function') : null;
-      return f?.type === 'selector_expression' && f.childForFieldName('field')?.text === 'Run';
+      const recv = f?.type === 'selector_expression' ? f.childForFieldName('operand') : null;
+      return recv?.type === 'identifier' && ctx.testingParams.has(recv.text) && f!.childForFieldName('field')?.text === 'Run';
     };
     const nested = new Set(['func_literal']);
     for (const n of walk(body)) {
@@ -754,10 +917,10 @@ const GO: Lang = {
           return recv?.type === 'identifier' && ctx.testingParams.has(recv.text) && GO_FAIL.test(f!.childForFieldName('field')?.text ?? '');
         });
         if (!fails) continue;
+        // The condition is asserted; the initializer's bindings (`if got := Sym(); got != 9`) reach it
+        // through def-use.
         const cond = n.childForFieldName('condition');
-        const init = n.childForFieldName('initializer');
         if (cond) out.push({ value: cond, line: line(n) });
-        if (init) out.push({ value: init, line: line(n) });
       }
     }
     return out;
@@ -860,7 +1023,7 @@ function analyzeFile(lang: Lang, language: string, root: Node): FileAnalysis {
     const cfg = cfgOf(h.fn);
     const idx = new Set<number>();
     params.forEach((p, i) => {
-      if (asserted.some(a => derivedFrom(lang, cfg, h.body, [], a.value, [p]) || [...walk(a.value)].some(n => lang.identifierTypes.has(n.type) && n.text === p))) idx.add(i);
+      if (asserted.some(a => !a.exact && derivedFrom(lang, cfg, h.body, [], a.value, [p]))) idx.add(i);
     });
     if (idx.size > 0) assertingParams.set(name, idx);
   }
@@ -916,7 +1079,7 @@ function resolveRelative(testPath: string, spec: string): string {
  * one only from the same directory); a Go import path from a module (a dotted first segment, never
  * the standard library) ending in the symbol's directory.
  */
-function moduleBindings(language: string, text: string, symbolFile: string, testPath: string): Set<string> {
+function moduleBindings(language: string, text: string, symbolFile: string, testPath: string, goModule?: string): Set<string> {
   const target = withoutExt(posixPath(symbolFile));
   const names = new Set<string>();
   if (language === 'TypeScript' || language === 'JavaScript') {
@@ -946,10 +1109,15 @@ function moduleBindings(language: string, text: string, symbolFile: string, test
       }
     }
   } else if (language === 'Go') {
-    const dir = dirOf(target).split('/').pop() ?? '';
-    for (const m of text.matchAll(/(?:^|[\s(])(?:(\w+)[ \t]+)?"([^"]+)"/gm)) {
-      const segs = m[2].split('/');
-      if (segs.length < 2 || !segs[0].includes('.') || segs.at(-1) !== dir) continue;
+    // The import path must be the symbol's package: `<module>/<dir>` when go.mod names the module;
+    // otherwise a module path (a dotted first segment) ending in the symbol's whole directory.
+    const fullDir = dirOf(target);
+    const dir = fullDir.split('/').pop() ?? '';
+    for (const m of text.matchAll(/(?:^|[\s(])(?:(\w+|\.)[ \t]+)?"([^"\n]{1,300})"/gm)) {
+      const path = m[2];
+      const ok = goModule ? path === (fullDir ? `${goModule}/${fullDir}` : goModule)
+        : path.split('/')[0].includes('.') && fullDir !== '' && (path.endsWith(`/${fullDir}`));
+      if (!ok || m[1] === '.') continue;
       names.add(m[1] ?? dir);
     }
   }
@@ -996,8 +1164,10 @@ function importedNames(language: string, text: string, symbol: { name: string; f
     const testDir = dirOf(testPath);
     for (const m of text.matchAll(/^[ \t]*from[ \t]+(\.*)([\w.]*)[ \t]+import[ \t]+\(?([^\n#)]+)/gm)) {
       const mod = m[1] ? withoutExt(`${testDir ? `${testDir}/` : ''}${'../'.repeat(Math.max(0, m[1].length - 1))}${m[2].replace(/\./g, '/')}`) : m[2].replace(/\./g, '/');
+      // A single-segment module only from the test's own directory (or the root); a dotted one by suffix.
       const ok = m[1] ? resolveRelative(testPath, `./${'../'.repeat(Math.max(0, m[1].length - 1))}${m[2].replace(/\./g, '/')}`) === target || mod === target
-        : target === mod || target.endsWith(`/${mod}`);
+        : m[2].includes('.') ? target === mod || target.endsWith(`/${mod}`)
+        : target === mod || target === (testDir ? `${testDir}/${mod}` : mod);
       add(m[3], /\s+as\s+/, ok);
     }
   } else if (language === 'Go') {
@@ -1008,11 +1178,14 @@ function importedNames(language: string, text: string, symbol: { name: string; f
 }
 
 /** Local names this file assigns from a constructor of `cls`: its instances. */
-function instancesOf(language: string, root: Node, cls: string): Set<string> {
-  const esc = cls.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // every regex metacharacter
-  const ctor = language === 'Python' ? new RegExp(`^(?:[\\w.]+\\.)?${esc}\\s*\\(`)
-    : language === 'Go' ? new RegExp(`^(?:&?(?:\\w+\\.)?${esc}\\s*\\{|(?:\\w+\\.)?New${esc}\\s*\\()`)
-    : new RegExp(`^(?:await\\s+)?new\\s+(?:[\\w$]+\\.)*${esc}\\s*[(<]`);
+function instancesOf(language: string, root: Node, cls: string, ctorNames: ReadonlySet<string>): Set<string> {
+  const esc = (t: string): string => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // every regex metacharacter
+  const names = [...ctorNames].map(esc).join('|');
+  const factories = [...ctorNames].map(n => esc(n.includes('.') ? n.replace(/\.([^.]+)$/, '.New$1') : `New${n}`)).join('|');
+  const ctor = language === 'Python' ? new RegExp(`^(?:${names})\\s*\\(`)
+    : language === 'Go' ? new RegExp(`^(?:&?(?:${names})\\s*\\{|(?:${factories})\\s*\\()`)
+    : new RegExp(`^(?:await\\s+)?new\\s+(?:${names})\\s*[(<]`);
+  void cls;
   const out = new Set<string>();
   const assigned = new Map<string, number>();
   for (const n of walk(root)) {
@@ -1036,26 +1209,35 @@ function instancesOf(language: string, root: Node, cls: string): Set<string> {
 }
 
 /** The last segment of a (possibly qualified) type or constructor name. */
-const lastName = (n: Node | null | undefined): string | undefined => n?.text.split('.').pop();
 
 function callTarget(
   language: string,
   text: string,
   root: Node,
   testPath: string,
-  symbol: { name: string; filePath: string; className?: string },
+  symbol: TestSymbol,
+  ctx: FileContext,
 ): CallTarget {
   const lang = LANGS[language];
+  const namespaces = memoOnRoot(root, `module\0${symbol.filePath}\0${testPath}\0${symbol.goModule ?? ''}`, () => moduleBindings(language, text, symbol.filePath, testPath, symbol.goModule));
+  // A namespace binding a test shadows with its own declaration (`const math = {…}`) is not the module.
+  const namespaceOk = (r: Node): boolean => (lang?.identifierTypes.has(r.type) ?? false) && namespaces.has(r.text) && !ctx.localNames.has(r.text);
   if (symbol.className) {
     const cls = symbol.className;
+    // The class must be the symbol's class: imported from its module (under any alias), or reached
+    // through a namespace of it — never a test double of the same name declared in the test file.
+    const classNames = new Set([...memoOnRoot(root, `names\0${cls}\0${symbol.filePath}\0${testPath}`, () => importedNames(language, text, { name: cls, filePath: symbol.filePath }, testPath))]
+      .filter(n => !ctx.localNames.has(n) || language === 'Go'));
+    const ctorNames = new Set([...classNames, ...[...namespaces].filter(n => !ctx.localNames.has(n)).map(n => `${n}.${cls}`)]);
+    if (ctorNames.size === 0) return { name: symbol.name, bareNames: new Set(), receiverOk: () => false };
     // A method is never called bare; its receiver is `C` (a static), `new C()`, or a name the same
     // test case binds to a constructor of C exactly once (an instance name reused, or reassigned,
     // elsewhere is not proof).
     const isInstance = (r: Node, body: Node): boolean => {
-      if (r.type === 'identifier') return r.text === cls || memoOnRoot(body, `class\0${cls}`, () => instancesOf(language, body, cls)).has(r.text);
-      if (r.type === 'new_expression') return lastName(r.childForFieldName('constructor')) === cls;
-      if (r.type === 'call') return lastName(r.childForFieldName('function')) === cls;
-      if (r.type === 'composite_literal') return lastName(r.childForFieldName('type')) === cls;
+      if (r.type === 'identifier') return classNames.has(r.text) || memoOnRoot(body, `class\0${[...ctorNames].join(',')}`, () => instancesOf(language, body, cls, ctorNames)).has(r.text);
+      if (r.type === 'new_expression') return ctorNames.has(r.childForFieldName('constructor')?.text ?? '');
+      if (r.type === 'call') return ctorNames.has(r.childForFieldName('function')?.text ?? '');
+      if (r.type === 'composite_literal') return ctorNames.has(r.childForFieldName('type')?.text ?? '');
       if (r.type === 'unary_expression' || r.type === 'parenthesized_expression') {
         const inner = r.namedChildren.at(-1);
         return inner ? isInstance(inner, body) : false;
@@ -1064,11 +1246,10 @@ function callTarget(
     };
     return { name: symbol.name, bareNames: new Set(), receiverOk: isInstance };
   }
-  const bindings = memoOnRoot(root, `module\0${symbol.filePath}\0${testPath}`, () => moduleBindings(language, text, symbol.filePath, testPath));
   return {
     name: symbol.name,
     bareNames: memoOnRoot(root, `names\0${symbol.name}\0${symbol.filePath}\0${testPath}`, () => importedNames(language, text, symbol, testPath)),
-    receiverOk: (r) => lang !== undefined && (lang.identifierTypes.has(r.type) || r.type === 'attribute') && bindings.has(r.text),
+    receiverOk: (r) => namespaceOk(r) || (r.type === 'attribute' && namespaces.has(r.text)),
   };
 }
 
@@ -1078,9 +1259,9 @@ const ASSIGN_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /** Assignments in a tree by start row: the left side's text and where it starts. Built once per tree. */
-const assignmentRows = new WeakMap<Node, Map<number, Array<{ startIndex: number; left: string }>>>();
+const assignmentRows = new WeakMap<Node, Map<number, Array<{ startIndex: number; left: string; value: Node | null }>>>();
 
-function assignmentsOnRow(body: Node, row: number): Array<{ startIndex: number; left: string }> {
+function assignmentsOnRow(body: Node, row: number): Array<{ startIndex: number; left: string; value: Node | null }> {
   let root: Node = body;
   while (root.parent) root = root.parent;
   let rows = assignmentRows.get(root);
@@ -1091,7 +1272,8 @@ function assignmentsOnRow(body: Node, row: number): Array<{ startIndex: number; 
       const left = (n.childForFieldName('left') ?? n.childForFieldName('name'))?.text;
       if (left === undefined) continue;
       const r = n.startPosition.row;
-      (rows.get(r) ?? rows.set(r, []).get(r)!).push({ startIndex: n.startIndex, left });
+      const value = n.childForFieldName('value') ?? n.childForFieldName('right');
+      (rows.get(r) ?? rows.set(r, []).get(r)!).push({ startIndex: n.startIndex, left, value });
     }
     assignmentRows.set(root, rows);
   }
@@ -1105,8 +1287,16 @@ function assignmentsOnRow(body: Node, row: number): Array<{ startIndex: number; 
  */
 function derivedFrom(lang: Lang, cfg: FunctionCfg | undefined, body: Node, sources: Node[], value: Node, extraSeedVars: string[] = [], exact = false): boolean {
   // An assertion that a call raises is about that call only: the source must BE it.
-  if (exact) return sources.some(s => s.id === value.id);
-  if (sources.some(s => contains(value, s))) return true;
+  if (exact) return sources.some(s => sameNode(s, value));
+  if (sources.some(s => onSpine(lang, s, value))) return true;
+  // Go `if got := Sym(); got != want`: the initializer's binding is local to the `if`, read in its
+  // condition on the same line (the overlay does not link the two).
+  const ifStmt = value.parent?.type === 'if_statement' ? value.parent : null;
+  const init = ifStmt?.childForFieldName('initializer');
+  if (init) {
+    const bound = new Set(sources.filter(s => contains(init, s)).flatMap(s => lang.bindings(s, body)?.names ?? []));
+    if ([...walk(value)].some(n => lang.identifierTypes.has(n.type) && bound.has(n.text) && onSpine(lang, n, value))) return true;
+  }
   if (!cfg) return false;
   const tainted = new Set<string>();
   for (const s of sources) {
@@ -1138,16 +1328,21 @@ function derivedFrom(lang: Lang, cfg: FunctionCfg | undefined, body: Node, sourc
       // `const a = r, b = 5` the overlay cannot tell which declarator read `r`.
       const fed = e.useInDefLine !== undefined ? defVarsAtLine.get(e.useInDefLine) : undefined;
       // Counted from the syntax tree: the overlay records only definitions that are read later.
-      if (fed && fed.size === 1 && assignmentsOnRow(body, e.useInDefLine! - 1).length <= 1) {
+      const fedRow = e.useInDefLine !== undefined ? assignmentsOnRow(body, e.useInDefLine - 1) : [];
+      // …and only when the read is on the spine of what it defines (`const a = r.x`, not `const a = f(r)`).
+      const fedValue = fedRow.length === 1 ? fedRow[0].value : null;
+      const onFedSpine = fedValue !== null && [...walk(fedValue)].some(n => lang.identifierTypes.has(n.type) && n.text === e.variable
+        && line(n) === e.useLine && onSpine(lang, n, fedValue));
+      if (fed && fed.size === 1 && fedRow.length <= 1 && onFedSpine) {
         const key = `${[...fed][0]}|${e.useInDefLine}`;
         if (!tainted.has(key)) { tainted.add(key); changed = true; }
       }
     }
   }
-  // A tainted variable read inside the value, on the line it is read.
+  // A tainted variable read on the value's spine, on the line it is read.
   for (const n of walk(value)) {
     if (!lang.identifierTypes.has(n.type)) continue;
-    if (usesReached.some(u => u.variable === n.text && u.line === line(n))) return true;
+    if (usesReached.some(u => u.variable === n.text && u.line === line(n)) && onSpine(lang, n, value)) return true;
   }
   return false;
 }
@@ -1190,13 +1385,17 @@ function mockFactsOf(language: string, text: string, root: Node): MockFacts {
   const facts: MockFacts = { modules: [], names: new Map() };
   if (language === 'TypeScript' || language === 'JavaScript') {
     // `vi.mock('./m')`, `vi.mock(import('./m'))`, and an alias (`vi.mock('@/m')`): kept whole, matched below.
-    for (const m of text.matchAll(/\b(?:vi|jest)\.(?:mock|doMock)\(\s*(?:import\(\s*)?['"]([^'"\n]{1,300})['"]/g)) facts.modules.push(m[1]);
+    for (const m of text.matchAll(/\b(?:(?:vi|jest)\.(?:mock|doMock|unstable_mockModule)|mock\.module|td\.replace(?:Esm)?)\(\s*(?:import\(\s*)?['"]([^'"\n]{1,300})['"]/g)) facts.modules.push(m[1]);
+    // `m.add = vi.fn()` and any other member assignment to the name: the test may replace it.
+    for (const m of text.matchAll(/\.([\w$]{1,200})\s*=(?!=)/g)) facts.names.set(m[1], 'assignment');
+    for (const m of text.matchAll(/\btd\.replace\([^,\n]{1,300},\s*['"]([\w$]{1,200})['"]/g)) facts.names.set(m[1], 'td.replace');
     for (const m of text.matchAll(/\b(?:sinon\.(?:stub|replace|spy)|mock\.method)\([^,\n]{1,300},\s*['"]([\w$]{1,200})['"]/g)) facts.names.set(m[1], 'stub');
     for (const m of text.matchAll(/\b(?:vi|jest)\.mocked\(\s*([\w$]{1,200})/g)) facts.names.set(m[1], 'vi.mocked');
     for (const m of text.matchAll(/\bspyOn\([^,\n]{1,300},\s*['"]([\w$]{1,200})['"]/g)) facts.names.set(m[1], 'spyOn');
   } else if (language === 'Python') {
     for (const m of text.matchAll(/\bpatch\(\s*['"][\w.]{0,300}\.(\w{1,200})['"]/g)) facts.names.set(m[1], 'patch');
     for (const m of text.matchAll(/\bpatch\.object\([^,\n]{1,300},\s*['"](\w{1,200})['"]/g)) facts.names.set(m[1], 'patch.object');
+    for (const m of text.matchAll(/\.(\w{1,200})\s*=(?!=)/g)) facts.names.set(m[1], 'assignment');
     for (const m of text.matchAll(/\bmonkeypatch\.setattr\(\s*(?:['"][\w.]{0,300}\.(\w{1,200})['"]|[^,\n]{1,300},\s*['"](\w{1,200})['"])/g)) facts.names.set(m[1] ?? m[2], 'monkeypatch.setattr');
   }
   mockFacts.set(root, facts);
@@ -1223,6 +1422,9 @@ function mocksSymbol(language: string, text: string, root: Node, testPath: strin
   return facts.names.get(symbol.name) ?? null;
 }
 
+/** The production symbol being classified. `goModule`: the repository's Go module path (from go.mod). */
+export interface TestSymbol { name: string; filePath: string; className?: string; goModule?: string }
+
 export interface CaseEvidence {
   test: string;
   class: EvidenceClass;
@@ -1241,7 +1443,7 @@ export async function classifyTestSource(
   language: string,
   path: string,
   text: string,
-  symbol: { name: string; filePath: string; className?: string },
+  symbol: TestSymbol,
   cache?: EvidenceCache,
 ): Promise<{ parsed: boolean; cases: CaseEvidence[] }> {
   const lang = LANGS[language];
@@ -1259,8 +1461,8 @@ export async function classifyTestSource(
   if (!root) return { parsed: false, cases: [] };
 
   const symbolName = symbol.name;
-  const target = callTarget(language, text, root, path, symbol);
   const file = analyzeFile(lang, language, root);
+  const target = callTarget(language, text, root, path, symbol, file.ctx);
   const mocked = mocksSymbol(language, text, root, path, symbol);
   const { helpers, assertingParams } = file;
 
@@ -1284,6 +1486,11 @@ export async function classifyTestSource(
     if (direct.length === 0 && viaValueHelper.length === 0 && viaStopping.length === 0) continue;
 
     const sources = [...direct, ...viaValueHelper];
+    if (c.skipped) {
+      // A test that does not run checks nothing, whatever its body says.
+      out.push({ test: c.name, class: 'exercises', line: line(direct[0] ?? viaValueHelper[0] ?? c.fn), recognized: true, reason: `the test calls ${symbolName} but is turned off (${c.skipped.split('\n')[0].slice(0, 80)})` });
+      continue;
+    }
     const assertions = file.assertionsOf(c.body);
     const assertionHelperCalls = [...assertingParams.keys()].flatMap(h => file.bareCallsIn(c.body, h).map(call => ({ h, call })));
     const callLine = line((direct[0] ?? viaValueHelper[0] ?? c.fn));
@@ -1405,6 +1612,10 @@ export async function symbolTestEvidence(
     return fileCache.get(file) ?? null;
   };
 
+  // Go: the module path go.mod declares, so an import path is matched exactly.
+  if (!cache.files.has('go.mod')) cache.files.set('go.mod', await readFileConfined(root, 'go.mod', 64 * 1024).catch(() => null));
+  const goModule = /^\s*module\s+(\S+)/m.exec(cache.files.get('go.mod') ?? '')?.[1];
+  const target: TestSymbol = { name: symbol.name, filePath: symbol.filePath, ...(symbol.className ? { className: symbol.className } : {}), ...(goModule ? { goModule } : {}) };
   const directFiles = direct.slice(0, MAX_FILES_PER_SYMBOL);
   omittedFiles += direct.length - directFiles.length;
   for (const file of directFiles) {
@@ -1416,7 +1627,7 @@ export async function symbolTestEvidence(
       continue;
     }
     const text = await read(file);
-    const result = text === null ? null : await classifyTestSource(language, file, text, symbol, cache);
+    const result = text === null ? null : await classifyTestSource(language, file, text, target, cache);
     if (!result?.parsed) {
       notAssessed.push(file);
       allRecognized = false;

@@ -103,13 +103,13 @@ it('map delete', () => { expect(seen.delete('k')).toBe(false); });
 it('other module', () => { expect(util.delete('k')).toBe(true); });
 `;
     // A module function \`delete\`: neither receiver is a namespace of its module.
-    expect((await classifyTestSource('TypeScript', 'g.test.ts', src, { name: 'delete', filePath: 'src/store.ts' })).cases).toEqual([]);
+    expect((await classifyTestSource('TypeScript', 'src/g.test.ts', src, { name: 'delete', filePath: 'src/store.ts' })).cases).toEqual([]);
     // A method \`Store.delete\`: the file never names Store.
-    expect((await classifyTestSource('TypeScript', 'g.test.ts', src, { name: 'delete', filePath: 'src/store.ts', className: 'Store' })).cases).toEqual([]);
+    expect((await classifyTestSource('TypeScript', 'src/g.test.ts', src, { name: 'delete', filePath: 'src/store.ts', className: 'Store' })).cases).toEqual([]);
     // A method \`Graph.delete\`: naming Graph is not enough; the receiver must be a Graph.
-    expect((await classifyTestSource('TypeScript', 'g.test.ts', src, { name: 'delete', filePath: 'src/graph.ts', className: 'Graph' })).cases).toEqual([]);
+    expect((await classifyTestSource('TypeScript', 'src/g.test.ts', src, { name: 'delete', filePath: 'src/graph.ts', className: 'Graph' })).cases).toEqual([]);
     const withInstance = `${src}it('graph', () => { const g = new Graph(); expect(g.delete('k')).toBe(true); });\n`;
-    expect(byTest((await classifyTestSource('TypeScript', 'g.test.ts', withInstance, { name: 'delete', filePath: 'src/graph.ts', className: 'Graph' })).cases))
+    expect(byTest((await classifyTestSource('TypeScript', 'src/g.test.ts', withInstance, { name: 'delete', filePath: 'src/graph.ts', className: 'Graph' })).cases))
       .toEqual({ graph: 'asserts-on' });
   });
 });
@@ -326,7 +326,7 @@ describe('classifyTestSource — never a false asserts-on (round 2)', () => {
 
   it('an instance name bound in one test, or reassigned, is not proof in another', async () => {
     const calc = { name: 'add', filePath: 'src/calc.ts', className: 'Calc' };
-    const src = `it('a', () => { const c = new Calc(); c.add(1); });\nit('b', () => { const c = new Other(); expect(c.add(1)).toBe(1); });\nit('c', () => { let c = new Calc(); c = makeOther(); expect(c.add()).toBe(1); });\n`;
+    const src = `import { Calc } from './calc';\nit('a', () => { const c = new Calc(); c.add(1); });\nit('b', () => { const c = new Other(); expect(c.add(1)).toBe(1); });\nit('c', () => { let c = new Calc(); c = makeOther(); expect(c.add()).toBe(1); });\n`;
     expect(await cls('TypeScript', 'src/c.test.ts', src, calc)).toEqual({ a: 'exercises' });
   });
 
@@ -383,5 +383,80 @@ describe('classifyTestSource — never a false asserts-on (round 2)', () => {
     const t2 = performance.now(); await classifyTestSource('TypeScript', 'src/big2.test.ts', cases(2000), ADD); const large = performance.now() - t2;
     // 4× the cases: well under 16× (quadratic) the time.
     expect(large).toBeLessThan(small * 10 + 200);
+  });
+});
+
+// Adversarial review round 3 of PR #799, and the real-code check (each once a false `asserts-on`).
+describe('classifyTestSource — never a false asserts-on (round 3)', () => {
+  const cls = async (language: string, path: string, src: string, symbol: { name: string; filePath: string; className?: string }) =>
+    byTest((await classifyTestSource(language, path, src, symbol)).cases);
+  const IMPORT = `import { add } from './math';\n`;
+
+  it('a value only counts along its spine, never as an argument to another call', async () => {
+    // The assertion checks open(...)'s store; dbPath only built its argument.
+    const dbPath = { name: 'dbPath', filePath: 'src/edge-store.ts', className: 'EdgeStore' };
+    const src = `import { EdgeStore } from './edge-store';\nit('x', () => { const store = EdgeStore.open(EdgeStore.dbPath('o')); expect(store.getNode('n')?.fanIn).toBe(0); });`;
+    expect(await cls('TypeScript', 'src/e.test.ts', src, dbPath)).toEqual({ x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { expect(render(add(1))).toContain('3'); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { const r = f(add(1)); expect(r).toBe(1); });`, ADD)).toEqual({ x: 'exercises' });
+    // Along the spine it still counts: await, member, method call on the result, comparison.
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', async () => { const r = await add(1); expect(r.total.toFixed(1)).toBe('1.0'); });`, ADD)).toEqual({ x: 'asserts-on' });
+    expect(await cls('Python', 'test_a.py', `from a import add\ndef test_x():\n    assert len(add(1)) == 1\n`, { name: 'add', filePath: 'a.py' })).toEqual({ test_x: 'exercises' });
+  });
+
+  it('a skipped test checks nothing', async () => {
+    for (const form of ['it.skip', 'xit', 'it.todo', 'it.skipIf(true)']) {
+      expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}${form}('x', () => { expect(add(1)).toBe(1); });`, ADD), form).toEqual({ x: 'exercises' });
+    }
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}describe.skip('s', () => { it('x', () => { expect(add(1)).toBe(1); }); });`, ADD)).toEqual({ 's > x': 'exercises' });
+    expect(await cls('Python', 'test_a.py', `import pytest\nfrom a import add\n@pytest.mark.skip\ndef test_x():\n    assert add(1) == 1\n`, { name: 'add', filePath: 'a.py' })).toEqual({ test_x: 'exercises' });
+    expect(await cls('Go', 'a/a_test.go', `package a\nfunc TestX(t *testing.T) {\n  t.Skip("later")\n  if Sym() != 1 { t.Fatal("x") }\n}\n`, { name: 'Sym', filePath: 'a/a.go' })).toEqual({ TestX: 'exercises' });
+  });
+
+  it('expect needs a called matcher, and expect.X is an assertion only for soft and poll', async () => {
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { expect(add(1)); expect(true).toBe(true); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { expect(add(1)).toBeDefined; expect(true).toBe(true); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: add(1) })); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { expect.soft(add(1)).toBe(1); });`, ADD)).toEqual({ x: 'asserts-on' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { expect(add(1)).to.be.true; });`, ADD)).toEqual({ x: 'asserts-on' });
+  });
+
+  it('assert.throws counts only the symbol itself raising', async () => {
+    const js = (body: string) => `const { add } = require('./math');\ntest('x', () => { ${body} });`;
+    expect(await cls('JavaScript', 'src/a.test.js', js(`assert.throws(() => parse(add(1)));`), ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('JavaScript', 'src/a.test.js', js(`assert.throws(() => { add(1); boom(); });`), ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('JavaScript', 'src/a.test.js', js(`assert.throws(() => add(NaN));`), ADD)).toEqual({ x: 'asserts-on' });
+  });
+
+  it('a method counts only on the symbol\'s own class, imported from its module', async () => {
+    const calc = { name: 'add', filePath: 'src/calc.ts', className: 'Calc' };
+    expect(await cls('TypeScript', 'src/c.test.ts', `class Calc { add() { return 1; } }\nit('x', () => { const c = new Calc(); expect(c.add()).toBe(1); });`, calc)).toEqual({});
+    expect(await cls('TypeScript', 'src/c.test.ts', `import { Calc } from 'other-lib';\nit('x', () => { const c = new Calc(); expect(c.add()).toBe(1); });`, calc)).toEqual({});
+    expect(await cls('TypeScript', 'src/c.test.ts', `import { Calc as C } from './calc';\nit('x', () => { const c = new C(); expect(c.add()).toBe(1); });`, calc)).toEqual({ x: 'asserts-on' });
+  });
+
+  it('module resolution is exact, and a shadowed namespace is not the module', async () => {
+    expect(await cls('Python', 'tests/test_u.py', `from utils import add\ndef test_x():\n    assert add(1) == 1\n`, { name: 'add', filePath: 'vendor/lib/utils.py' })).toEqual({});
+    expect(await cls('Go', 'x/e_test.go', `package x\nimport "github.com/pkg/errors"\nfunc TestX(t *testing.T) {\n  if errors.Wrap(nil, "a") != nil { t.Fatal("x") }\n}\n`, { name: 'Wrap', filePath: 'internal/errors/errors.go' })).toEqual({});
+    expect(await cls('TypeScript', 'src/a.test.ts', `import * as math from './math';\nit('x', () => { const math = { add: () => 1 }; expect(math.add()).toBe(1); });`, ADD)).toEqual({});
+  });
+
+  it('a test that assigns the symbol\'s name, or mocks its module by another API, consumes a mock', async () => {
+    expect(await cls('TypeScript', 'src/a.test.ts', `import * as m from './math';\nit('x', () => { m.add = vi.fn(() => 9); expect(m.add()).toBe(9); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}jest.unstable_mockModule('./math', () => ({ add: jest.fn() }));\nit('x', () => { expect(add()).toBe(9); });`, ADD)).toEqual({ x: 'exercises' });
+  });
+
+  it('an assertion in a try that swallows the failure never fails the test', async () => {
+    expect(await cls('TypeScript', 'src/a.test.ts', `${IMPORT}it('x', () => { try { expect(add()).toBe(9); } catch {} expect(true).toBe(true); });`, ADD)).toEqual({ x: 'exercises' });
+    expect(await cls('Python', 'test_a.py', `from a import add\ndef test_x():\n    try:\n        assert add() == 9\n    except AssertionError:\n        pass\n    assert True\n`, { name: 'add', filePath: 'a.py' })).toEqual({ test_x: 'exercises' });
+  });
+
+  it('a Go subtest is its own case, so a table test that asserts in it is found', async () => {
+    const src = `package a\nfunc TestTable(t *testing.T) {\n  for _, tc := range cases {\n    t.Run(tc.name, func(t *testing.T) {\n      got := Add(tc.x)\n      assert.Equal(t, tc.want, got)\n    })\n  }\n}\n`;
+    const r = await cls('Go', 'a/a_test.go', src, { name: 'Add', filePath: 'a/a.go' });
+    expect(r['TestTable/#1']).toBe('asserts-on');
+    // A closure passed to something other than the test's own t.Run is not a subtest.
+    const pool = `package a\nfunc TestPool(t *testing.T) {\n  pool.Run(func(t *testing.T) {\n    assert.Equal(t, 1, Add(1))\n  })\n  assert.True(t, true)\n}\n`;
+    expect(await cls('Go', 'a/a_test.go', pool, { name: 'Add', filePath: 'a/a.go' })).toEqual({ TestPool: 'exercises' });
   });
 });

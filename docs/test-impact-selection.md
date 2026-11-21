@@ -182,7 +182,11 @@ each changed symbol's strongest class in `symbolEvidence` (change: add-test-evid
 The selection itself does not change. The class is computed without running anything: each linked
 test file is parsed, its test cases found, and the def-use overlay of the test body traced from the
 call to the assertion's value arguments (never a message argument). One helper in the same file is
-followed (a function at module level, never one nested in another test). A call counts as a call to
+followed (a function at module level, never one nested in another test). A value counts only along
+its spine (the call itself, through `await`, a cast, a comparison, a member read or a method call on
+the result), never as an argument to another call: in `expect(render(add(1)))` the assertion checks
+`render`. A skipped test (`it.skip`, `@pytest.mark.skip`, `t.Skip()`) and an assertion in a `try`
+that swallows its failure check nothing. A call counts as a call to
 the symbol only when it provably is one: a bare call by a name the test file imports the symbol as
 (`import { add as plus } from './math'`, `from shop import price`, the same Go package) and never
 declares itself; a method call on an instance the same test binds to the symbol's class once
@@ -204,14 +208,14 @@ answer):
 
 | Strongest class | Symbols |
 |---|---:|
-| `asserts-on` | 1,362 (20%) |
-| `exercises` | 145 (2%) |
+| `asserts-on` | 1,295 (19%) |
+| `exercises` | 212 (3%) |
 | `reaches` | 3,938 (59%) |
 | no test relates to it | 1,268 (19%) |
 
-For 248 of them some linked test was not classed (assertions not recognized, or the file uses the
+For 251 of them some linked test was not classed (assertions not recognized, or the file uses the
 symbol only outside test cases), so no finding is raised for them. Classification adds no analysis
 time: it runs when an answer is asked for. Over 60 simulated diffs (up to 20 changed symbols from one
-to three files, each answer starting with an empty cache) one answer took 25 ms at the median, 135 ms
+to three files, each answer starting with an empty cache) one answer took 26 ms at the median, 132 ms
 at the 95th percentile, and 0.4 s at most. One answer parses at most 6 MB of test source; a file
 past that is listed as not assessed, never classed.
