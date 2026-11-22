@@ -4,7 +4,7 @@
   "description": "Runtime for the OpenLore Claude Code plugin. Pins the published openlore package.",
   "license": "MIT",
   "dependencies": {
-    "openlore": "3.7.0"
+    "openlore": "3.8.0"
   },
   "overrides": {
     "sharp": "^0.35.5"
