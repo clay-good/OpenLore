@@ -33,6 +33,8 @@ They intentionally do not move with the current schema.
   1.2.0: `openspecPath` is no longer written when no spec corpus exists. `3.7.0-customized.json`
   captures the keys v3.7.0 adds: `adrPaths`, per-lane `filePolicies`, and
   `configurationAssistant.reviewMode`, with `openspecPath` set to `docs`.
+- `3.8.0-default.json` captures the unchanged default configuration factory shape for v3.8.0 and
+  schema 1.2.0 (the release added test-evidence claims and spec-path fixes, not config behavior).
 
 For each release, add at least one `<package-version>-*.json` fixture before changing the package
 version. Include both a factory-default shape and a realistic customized shape when the release
