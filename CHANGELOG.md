@@ -5,6 +5,31 @@ All notable changes to OpenLore are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [3.8.0] - 2026-11-22
+
+OpenLore now tells an agent whether a test actually checks a function, not only whether it reaches
+it. This release also fixes moved spec folders and a Windows console window. No breaking changes.
+
+### Highlights
+
+- **Test evidence.** Each test linked to a function now says how: `asserts-on` (an assertion uses
+  the function's result), `exercises` (the test calls it), or `reaches` (only through other code).
+  `verify_claim` has a new `tested` kind that confirms only with an asserting test and cites the
+  file, test and line. `select_tests`, `blast_radius` and `verify_change` show the evidence, and a
+  changed function with no asserting test gets an advisory finding. Works for Vitest, Jest, Node
+  assert, Chai, pytest, unittest, Go testing and testify. (#799)
+
+### Fixes
+
+- A spec folder set with `openspecPath` is now used everywhere, not only in some commands:
+  `change-status`, `doctor`, `digest`, `view`, the Pi spec index, and more. (#798)
+- On Windows, the background index repair no longer opens an empty console window. (#797)
+- A config read error now goes to stderr, so `--json` output stays valid. (#798)
+
+### Dependencies
+
+- `web-tree-sitter` 0.27.2 and other minor and patch updates. (#793, #794, #795, #796)
+
 ## [3.7.0] - 2026-11-15
 
 OpenLore now ships as a Claude Code plugin, and most of this release makes its answers to agents
