@@ -27,6 +27,7 @@ import {
   specsForFile,
   functionsForDomain,
   notReadyResult,
+  isNotReadyResult,
 } from './utils.js';
 import { EdgeStore } from '../edge-store.js';
 import { logger } from '../../../utils/logger.js';
@@ -918,5 +919,13 @@ describe('notReadyResult (ReadyOrHonestFirstUse)', () => {
     expect(r.notReady).toBe(true);
     expect(r.reason).toBe('graph-unavailable');
     expect(r.remedy).toBe('openlore analyze');
+  });
+
+  it('isNotReadyResult recognizes only a not-ready result (#810)', () => {
+    expect(isNotReadyResult(notReadyResult('No analysis found.', 'index-absent'))).toBe(true);
+    expect(isNotReadyResult({ error: 'File not found: a.ts' })).toBe(false);
+    expect(isNotReadyResult({ notReady: 'yes' })).toBe(false);
+    expect(isNotReadyResult(null)).toBe(false);
+    expect(isNotReadyResult('notReady')).toBe(false);
   });
 });

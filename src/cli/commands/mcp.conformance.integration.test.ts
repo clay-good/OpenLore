@@ -354,11 +354,14 @@ describe('spec — lean default surface + breadth pointer (via SDK Client over s
       expect(alias.isError).toBe(true);
       expect((alias.content as Array<{ text?: string }>)[0]?.text).toMatch(/get_ui_component_inventory.*substrate.*full/i);
 
-      // A member still reaches its handler. An unanalyzed temp repo returns a
-      // structured domain error, not the preset boundary error.
+      // A member still reaches its handler. An unanalyzed temp repo returns the
+      // not-ready conclusion as an isError result (#810), not the preset boundary error.
       const member = await c.callTool({ name: 'orient', arguments: { directory: dir, task: 'anything' } });
-      expect(member.isError).toBeFalsy();
-      expect((member.content as Array<{ text?: string }>)[0]?.text).not.toMatch(/not available in the active/i);
+      const memberText = (member.content as Array<{ text?: string }>).map((b) => b.text ?? '').join('\n');
+      expect(memberText).not.toMatch(/not available in the active/i);
+      expect(member.isError).toBe(true);
+      expect(memberText).toMatch(/"notReady":\s*true/);
+      expect(memberText).toMatch(/"remedy":/);
     } finally {
       await c.close();
       rmSync(dir, { recursive: true, force: true });
@@ -523,7 +526,9 @@ describe('spec — lean default surface + breadth pointer (via SDK Client over s
         name: 'orient',
         arguments: { directory: dir, task: 'retain shared daemon' },
       });
-      expect(member.isError).toBeFalsy();
+      // `dir` is unanalyzed, so orient answers with the not-ready conclusion (#810).
+      expect(member.isError).toBe(true);
+      expect((member.content as Array<{ text?: string }>).map((b) => b.text ?? '').join('\n')).toMatch(/"notReady":\s*true/);
       await new Promise((resolve) => setTimeout(resolve, 1000));
 
       // If the 403 had evicted the endpoint, orient would run locally and the

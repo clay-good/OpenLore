@@ -409,6 +409,11 @@ export function notReadyResult(
   return { error, notReady: true, reason, remedy };
 }
 
+/** True for a {@link notReadyResult}; MCP marks such a result `isError: true` (#810). */
+export function isNotReadyResult(result: unknown): result is NotReadyResult {
+  return !!result && typeof result === 'object' && (result as { notReady?: unknown }).notReady === true;
+}
+
 interface ContextCacheEntry {
   ctx: CachedContext;
   mtime: number;
