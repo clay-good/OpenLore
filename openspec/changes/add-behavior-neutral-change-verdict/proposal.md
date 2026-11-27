@@ -1,6 +1,6 @@
 # State how much of a diff is proven behavior-neutral
 
-> Priority: P2 · Not built (the proof rule and the subtraction are built; see "Already built")
+> Priority: Later · Not built (the proof rule and the subtraction are built; see "Already built")
 > Reaches the agent through: `verify_change`, `blast_radius`, and the before-stop moment
 > Why it helps the agent: the agent can say "these 14 symbols changed only in comments and layout" with proof, and spend its checks on the rest.
 

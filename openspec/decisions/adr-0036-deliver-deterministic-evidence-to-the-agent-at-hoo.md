@@ -2,7 +2,10 @@
 
 ## Status
 
-accepted
+superseded by ADR-0038 (decision 35c3f807, 2026-11-27)
+
+> ADR-0038 keeps every rule below and adds the trust bar, a fifth moment (first touch of a file),
+> the hand-back at stop, and when to raise to a human. This ADR is kept as the historical record.
 
 **Domains**: 
 

@@ -2,7 +2,10 @@
 
 ## Status
 
-accepted
+superseded by ADR-0039 (decision f7faf32c, 2026-11-27)
+
+> `verify_change` did not join `substrate`: its benchmark gate is not doing. ADR-0039 records what
+> shipped. This ADR is kept as the historical record.
 
 **Domains**: 
 
