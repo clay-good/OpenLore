@@ -68,7 +68,11 @@ interface StructuralResult {
   signatureChanged?: Array<SymbolRef & { before: string; after: string; staleCallers?: Array<{ file: string; name: string }> }>;
   renameCandidates?: Array<{ from: SymbolRef; to: SymbolRef; confidence: string; note: string }>;
   /** Diff shapes that weaken a check (change: add-check-weakening-findings). Listed, not gated. */
-  checkWeakening?: { findings?: Array<{ code: string; severity: string; message: string }>; error?: string };
+  checkWeakening?: {
+    findings?: Array<{ code: string; severity: string; message: string }>;
+    notAssessed?: Array<{ file: string; reason: string }>;
+    error?: string;
+  };
 }
 
 export interface ReviewBriefing {
@@ -448,6 +452,13 @@ export function renderMarkdown(b: ReviewBriefing): string {
     L.push(...mdList(weakened.map(f => `**${markdownText(f.code, 40)}** ${markdownText(f.message, 400)}`), 15));
     L.push('');
   }
+  // Files the weakening checks skipped are named with the reason, never dropped silently (#807).
+  const unassessed = s.checkWeakening?.notAssessed ?? [];
+  if (unassessed.length) {
+    L.push('### Not checked for weakened checks');
+    L.push(...mdList(unassessed.map(n => `${inlineCode(n.file)}: ${markdownText(n.reason, 300)}`), 15));
+    L.push('');
+  }
 
   // ── Blast radius ─────────────────────────────────────────────────────────────
   const blast = b.blast;
@@ -559,6 +570,7 @@ export function renderHuman(b: ReviewBriefing): string {
     L.push(`   Delta: ${rm} removed, ${ad} added, ${sc} sig change(s), ${st} stale caller(s), ${rc} rename(s)`);
   }
   for (const f of (s.checkWeakening?.findings ?? []).slice(0, 10)) L.push(`   ⚠ ${f.code}: ${f.message}`);
+  for (const n of (s.checkWeakening?.notAssessed ?? []).slice(0, 10)) L.push(`   · not checked for weakening: ${n.file}: ${n.reason}`);
   const blast = b.blast;
   if ('error' in blast) L.push(`   ⚠ blast radius: ${blast.error}`);
   else {

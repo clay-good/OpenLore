@@ -937,8 +937,12 @@ function configRelaxations(path: string, kind: ConfigKind, base: string, current
 // ── Detection over the changed files ────────────────────────────────────────────
 
 const parserCache = new Map<string, Parser | null>();
+function parserKey(language: string, path: string): string {
+  return language === 'TypeScript' || language === 'JavaScript' ? (/\.[jt]sx$/i.test(path) ? 'tsx' : 'ts') : language;
+}
+
 async function parse(language: string, path: string, text: string): Promise<Node | null> {
-  const key = language === 'TypeScript' || language === 'JavaScript' ? (/\.[jt]sx$/i.test(path) ? 'tsx' : 'ts') : language;
+  const key = parserKey(language, path);
   if (!parserCache.has(key)) parserCache.set(key, await getExceptionParser(language, path));
   const parser = parserCache.get(key);
   if (!parser) return null;
@@ -947,6 +951,19 @@ async function parse(language: string, path: string, text: string): Promise<Node
   } catch {
     return null;
   }
+}
+
+/** Why one revision of a file did not parse: its first syntax error's line, or why no tree was made. */
+function parseFailureCause(language: string, path: string, root: Node | null): string {
+  if (!root) {
+    return parserCache.get(parserKey(language, path)) ? 'the parser failed or ran out of time' : `no ${language} parser is available`;
+  }
+  // Follow the first child that holds an error down to the innermost one (no recursion): an outer
+  // ERROR node starts where recovery began, not at the offending text.
+  const holdsError = (c: Node): boolean => c.hasError || c.isError || c.isMissing;
+  let node = root;
+  for (let next = node.children.find(holdsError); next; next = node.children.find(holdsError)) node = next;
+  return `syntax error at line ${node.startPosition.row + 1}`;
 }
 
 /** Production symbols reached by a test file, from `tested_by` edges and their forward call closure. */
@@ -1108,9 +1125,13 @@ export async function detectWeakeningShapes(
       continue;
     }
     const { baseRoot, curRoot } = await rootsOf(f, language);
-    if ((f.base !== null && !baseRoot) || (f.current !== null && !curRoot) || baseRoot?.hasError || curRoot?.hasError) {
-      // A syntax error (a conflict marker, a half-written edit) would read as removed tests.
-      notAssessed.push({ file: emittedText(f.path), shapes: isTest ? [...TEST_SHAPES, ...CODE_SHAPES] : CODE_SHAPES, reason: 'the file has a syntax error, or could not be parsed, at one of the two revisions' });
+    // A syntax error (a conflict marker, a half-written edit) would read as removed tests. Name each
+    // revision that failed and why, so the caller can fix it (#807).
+    const failed: string[] = [];
+    if (f.base !== null && (!baseRoot || baseRoot.hasError)) failed.push(`at the baseline (${parseFailureCause(language, f.path, baseRoot)})`);
+    if (f.current !== null && (!curRoot || curRoot.hasError)) failed.push(`in the new state (${parseFailureCause(language, f.path, curRoot)})`);
+    if (failed.length > 0) {
+      notAssessed.push({ file: emittedText(f.path), shapes: isTest ? [...TEST_SHAPES, ...CODE_SHAPES] : CODE_SHAPES, reason: `the file could not be parsed ${failed.join(' and ')}` });
       push();
       continue;
     }
