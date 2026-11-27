@@ -174,7 +174,7 @@ vi.mock('../../core/analyzer/ai-config-generator.js', () => ({
   generateAiConfigs: vi.fn().mockResolvedValue([]), AI_TOOL_TARGETS: [],
 }));
 
-vi.mock('../../core/services/config-manager.js', () => ({ readOpenLoreConfig: vi.fn() }));
+vi.mock('../../core/services/config-manager.js', () => ({ readOpenLoreConfig: vi.fn(), retargetPrimaryConfigRoot: vi.fn(() => () => {}) }));
 
 // This suite isolates index-mode selection and uses a deliberately nonexistent
 // repository root. Keep source-stability hashing deterministic so the hardened

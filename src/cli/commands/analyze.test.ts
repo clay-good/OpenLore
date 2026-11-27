@@ -142,6 +142,7 @@ vi.mock('../../core/analyzer/ai-config-generator.js', () => ({
 
 vi.mock('../../core/services/config-manager.js', () => ({
   readOpenLoreConfig: vi.fn(),
+  retargetPrimaryConfigRoot: vi.fn(() => () => {}),
 }));
 
 vi.mock('../../core/decisions/atomic-store.js', async (orig) => {
@@ -663,6 +664,29 @@ describe('analyze command', () => {
 
       await analyzeCommand.parseAsync([], { from: 'user' });
 
+      expect(process.exitCode).toBe(1);
+    });
+
+    it('--directory analyzes that repository instead of the current directory', async () => {
+      const cfgMod = await import('../../core/services/config-manager.js');
+      mockStat.mockResolvedValue({ isDirectory: () => true });
+      mockReadOpenLoreConfig.mockResolvedValue(null);
+      const other = resolve('/other/repo');
+
+      await analyzeCommand.parseAsync(['--directory', other], { from: 'user' });
+
+      expect(mockReadOpenLoreConfig).toHaveBeenCalledWith(other);
+      expect(vi.mocked(cfgMod.retargetPrimaryConfigRoot)).toHaveBeenCalledWith(other);
+    });
+
+    it('--directory that is not a directory fails before reading any config', async () => {
+      const loggerMod = await import('../../utils/logger.js');
+      mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+
+      await analyzeCommand.parseAsync(['--directory', resolve('/missing')], { from: 'user' });
+
+      expect(vi.mocked(loggerMod.logger.error)).toHaveBeenCalledWith(expect.stringContaining('--directory is not a directory'));
+      expect(mockReadOpenLoreConfig).not.toHaveBeenCalled();
       expect(process.exitCode).toBe(1);
     });
 
