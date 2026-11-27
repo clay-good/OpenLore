@@ -145,7 +145,7 @@ live registry.
 | `coordination` | 8 | 3,721 | 3,980 |
 | `substrate` | 15 | 5,264 | 5,500 |
 | `plugin` | 11 | 4,240 | 4,520 |
-| `full` | 84 | 28,713 | 30,000 |
+| `full` | 84 | 28,721 | 30,000 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line

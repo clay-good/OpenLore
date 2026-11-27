@@ -653,7 +653,7 @@ describe('handleGetFunctionBody', () => {
     expect(result.error).toContain('File not found');
   });
 
-  it('returns function body via line scan fallback when no call graph', async () => {
+  it('returns function body by parsing the file when no call graph', async () => {
     const src = `export function doSomething(x: number): number {\n  return x + 1;\n}\n`;
     const srcPath = join(tmpDir, 'util.ts');
     await writeFile(srcPath, src, 'utf-8');
@@ -661,17 +661,44 @@ describe('handleGetFunctionBody', () => {
     const { handleGetFunctionBody } = await import('./analysis.js');
     const result = await handleGetFunctionBody(tmpDir, 'util.ts', 'doSomething') as Record<string, unknown>;
 
-    expect(result.functionName).toBe('doSomething');
-    expect(result.filePath).toBe('util.ts');
-    expect(typeof result.body).toBe('string');
-    expect((result.body as string)).toContain('doSomething');
-    expect(result.note).toContain('line scan');
     expect(result).toEqual({
       functionName: 'doSomething', filePath: 'util.ts', language: 'TypeScript', className: null,
       startLine: 1, endLine: 3, body: src.trimEnd(), lineCount: 3,
-      note: 'Extracted via line scan (no call graph available). Run analyze_codebase for exact extraction.',
+      note: 'Not in the analysis index; extracted by parsing the file now. Run analyze_codebase to index it.',
       provenance: expect.stringContaining('Untrusted repository source content'),
     });
+  });
+
+  // #805: a call that appears above the definition used to be returned as the "body".
+  it('returns the definition, not an earlier call site, when no call graph (Go)', async () => {
+    const src = 'package main\n\nfunc Run() int {\n\treturn helper(2)\n}\n\nfunc helper(n int) int {\n\treturn n * 2\n}\n';
+    await writeFile(join(tmpDir, 'main.go'), src, 'utf-8');
+
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'main.go', 'helper') as Record<string, unknown>;
+
+    expect(result.body).toBe('func helper(n int) int {\n\treturn n * 2\n}');
+    expect(result.startLine).toBe(7);
+  });
+
+  it('returns the definition, not an earlier call site, when no call graph (TypeScript)', async () => {
+    const src = 'export function run() {\n  return helper(2);\n}\n\nfunction helper(n: number) {\n  return n * 2;\n}\n';
+    await writeFile(join(tmpDir, 'run.ts'), src, 'utf-8');
+
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'run.ts', 'helper') as Record<string, unknown>;
+
+    expect(result.body).toBe('function helper(n: number) {\n  return n * 2;\n}');
+  });
+
+  it('returns an error, not a call site, when the file only calls the function', async () => {
+    await writeFile(join(tmpDir, 'caller.ts'), 'export function run() {\n  return imported(2);\n}\n', 'utf-8');
+
+    const { handleGetFunctionBody } = await import('./analysis.js');
+    const result = await handleGetFunctionBody(tmpDir, 'caller.ts', 'imported') as Record<string, unknown>;
+
+    expect(result.error).toContain('no definition with that name');
+    expect(result.body).toBeUndefined();
   });
 
   it('returns error when function not found in file', async () => {

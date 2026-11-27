@@ -1206,7 +1206,7 @@ export const TOOL_DEFINITIONS = [
     description:
       'Return the exact source code of a named function in a file. ' +
       'Use focus plus focusKind for stored variable/callee evidence; omit both for the full implementation. ' +
-      'Prior analysis enables exact byte ranges; otherwise it uses a brace-depth scan.',
+      'Prior analysis enables exact byte ranges; otherwise it parses the file now and errors if no definition is found.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
