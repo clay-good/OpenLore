@@ -110,6 +110,14 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
     expect(renderHuman(b)).toContain(`not checked for weakening: src/a.test.ts: ${reason}`);
   });
 
+  it('names file revisions that did not parse (#807)', () => {
+    const structural = { ...structuralWithDelta, parseFailures: [{ file: 'src/a.ts', revision: 'head', cause: 'syntax error at line 3' }] };
+    const b: ReviewBriefing = { base: 'main', head: 'working tree', structural, blast: blastBriefing, caveats: [], status: 'ok' };
+    expect(renderMarkdown(b)).toContain('### Files that did not parse');
+    expect(renderMarkdown(b)).toContain('`src/a.ts` (head): syntax error at line 3');
+    expect(renderHuman(b)).toContain('did not parse (head): src/a.ts: syntax error at line 3');
+  });
+
   it('renders the frozen/new ratchet receipt and initialization action', () => {
     const md = renderMarkdown({
       base: 'main', head: 'working tree', structural: structuralWithDelta, blast: blastBriefing,
