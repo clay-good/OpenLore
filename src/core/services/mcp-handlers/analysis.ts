@@ -24,7 +24,6 @@ function servedRelPath(fromDir: string, target: string): string {
 import { spawnGitSync } from '../../../utils/git-exec.js';
 import { mkdtempSync, readFileSync, rmSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { escapeRegExp } from '../../../utils/misc.js';
 import { readFileConfined, readFileConfinedWithStat } from '../../../utils/path-confinement.js';
 import { ANALYSIS_ARTIFACT_MAX_BYTES, readArtifactBounded } from '../../../utils/bounded-artifact-read.js';
 
@@ -591,13 +590,27 @@ async function handleGetFunctionBodyUnfocused(
   // single-symbol tool, and parsing the whole multi-megabyte artifact per call — outside
   // the cache, so without its size ceiling or generation check — made it as expensive as
   // get_call_graph. (change: optimize-serving-hot-path-caches)
+  let changedSinceAnalysis = false;
   try {
     const ctx = await readCachedContext(absDir);
     if (ctx?.callGraph?.nodes) {
       const node = ctx.callGraph.nodes.find(
         n => n.name === functionName && (n.filePath === filePath || n.filePath.endsWith('/' + filePath.replace(/^\//, '')))
       );
+      // The byte range describes the file as analyzed. Once the file changes it can land on
+      // any text, a call site included, so a changed file is parsed now instead (#805).
       if (node && node.startIndex < node.endIndex) {
+        let baselineFileHash: string | null = null;
+        try { baselineFileHash = ctx.edgeStore?.getFileHash(node.filePath) ?? null; } catch { /* no record: use mtimes */ }
+        const sourceMtimeMs = (await stat(absFile)).mtimeMs;
+        changedSinceAnalysis = node.endIndex > source.length || resolveFileFreshness({
+          baselineFileHash,
+          currentFileHash: createHash('sha256').update(source).digest('hex'),
+          sourceMtimeMs,
+          artifactMtimeMs: ctx.artifactMtimeMs ?? 0,
+        }) === 'stale';
+      }
+      if (node && node.startIndex < node.endIndex && !changedSinceAnalysis) {
         const body = source.slice(node.startIndex, node.endIndex);
         return {
           functionName,
@@ -614,41 +627,56 @@ async function handleGetFunctionBodyUnfocused(
     }
   } catch { /* no call graph — fall through to line-scan */ }
 
-  // Fallback: find the function by scanning for its declaration line
-  const lines = source.split('\n');
-  // `functionName` is a caller-supplied MCP argument: escape it so a value containing
-  // regex metacharacters cannot change what this matches or backtrack pathologically.
-  const declPattern = new RegExp(`\\b${escapeRegExp(functionName)}\\s*[(<]`);
-  const startLine = lines.findIndex(l => declPattern.test(l));
-  if (startLine === -1) {
-    return { error: `Function "${functionName}" not found in ${filePath}. Run analyze_codebase first for exact byte-range extraction.` };
-  }
+  // Fallback: the index does not cover this function, or the file changed after analysis.
+  const parsed = await parseDefinitionNow(source, filePath, functionName);
+  if ('error' in parsed) return parsed;
+  return {
+    ...parsed,
+    note: changedSinceAnalysis
+      ? 'The file changed after analysis; extracted by parsing the file now. Run analyze_codebase to refresh the index.'
+      : 'Not in the analysis index; extracted by parsing the file now. Run analyze_codebase to index it.',
+    provenance: REPO_CONTENT_PROVENANCE,
+  };
+}
 
-  // Collect lines until matching brace depth returns to 0 (works for C-style languages)
-  let depth = 0;
-  let endLine = startLine;
-  for (let i = startLine; i < lines.length; i++) {
-    for (const ch of lines[i]) {
-      if (ch === '{') depth++;
-      else if (ch === '}') depth--;
-    }
-    if (depth > 0 || i === startLine) { endLine = i; continue; }
-    endLine = i;
-    break;
+/**
+ * Find a function's definition by parsing the current source, for when the analysis index
+ * does not cover it. A text scan for `name(` also matches call sites, so this never guesses:
+ * no parser for the language, or no definition with that name, is an explicit error (#805).
+ */
+async function parseDefinitionNow(
+  source: string,
+  filePath: string,
+  functionName: string,
+): Promise<{ error: string } | Record<string, unknown>> {
+  const language = detectLanguage(filePath);
+  let nodes: Array<{ name: string; className?: string; startIndex: number; endIndex: number }> | undefined;
+  try {
+    const { dispatchFileExtract } = await import('../../analyzer/call-graph.js');
+    nodes = (await dispatchFileExtract({ path: filePath, content: source, language }))?.nodes;
+  } catch { nodes = undefined; }
+  if (!nodes) {
+    return { error: `Function "${functionName}" not found in ${filePath}: no ${language} parser is available. Run analyze_codebase first.` };
   }
-
-  const body = lines.slice(startLine, endLine + 1).join('\n');
+  const def = nodes.find(n => n.name === functionName && n.startIndex < n.endIndex);
+  if (!def) {
+    return { error: `Function "${functionName}" not found in ${filePath}: the file has no definition with that name.` };
+  }
+  const body = source.slice(def.startIndex, def.endIndex);
+  const startLine = source.slice(0, def.startIndex).split('\n').length;
+  const lineCount = body.split('\n').length;
   return {
     functionName,
     filePath,
-    language: detectLanguage(filePath),
-    className: null,
-    startLine: startLine + 1,
-    endLine: endLine + 1,
+    language,
+    className: def.className ?? null,
+    // Both position forms, so a parsed answer has the same fields as an indexed one.
+    startIndex: def.startIndex,
+    endIndex: def.endIndex,
+    startLine,
+    endLine: startLine + lineCount - 1,
     body,
-    lineCount: endLine - startLine + 1,
-    note: 'Extracted via line scan (no call graph available). Run analyze_codebase for exact extraction.',
-    provenance: REPO_CONTENT_PROVENANCE,
+    lineCount,
   };
 }
 
@@ -703,36 +731,6 @@ function isUsableFocusCfg(value: unknown): value is FunctionCfg {
       && (edge.precision === 'exact' || edge.precision === 'may'));
 }
 
-function currentSourceFallback(source: string, filePath: string, functionName: string): Record<string, unknown> {
-  const lines = source.split('\n');
-  const declaration = new RegExp(`\\b${escapeRegExp(functionName)}\\s*[(<]`);
-  const start = lines.findIndex(line => declaration.test(line));
-  if (start < 0) return { functionName, filePath };
-  let depth = 0;
-  let end = start;
-  for (let index = start; index < lines.length; index++) {
-    for (const character of lines[index]) {
-      if (character === '{') depth++;
-      else if (character === '}') depth--;
-    }
-    end = index;
-    if (index > start && depth <= 0) break;
-  }
-  const body = lines.slice(start, end + 1).join('\n');
-  return {
-    functionName,
-    filePath,
-    language: detectLanguage(filePath),
-    className: null,
-    startLine: start + 1,
-    endLine: end + 1,
-    body,
-    lineCount: end - start + 1,
-    note: 'Extracted from the current confined source because indexed focus evidence was unavailable.',
-    provenance: REPO_CONTENT_PROVENANCE,
-  };
-}
-
 async function handleGetFunctionBodyFocused(
   directory: string,
   filePath: string,
@@ -749,7 +747,6 @@ async function handleGetFunctionBodyFocused(
     return { error: `File not found or changed during safe access: ${filePath}` };
   }
   const source = confined.content;
-  const fallback = currentSourceFallback(source, normalizedFile, functionName);
   const refuse = (reason: string, message: string): Record<string, unknown> => ({
     functionName,
     filePath: normalizedFile,
@@ -759,6 +756,10 @@ async function handleGetFunctionBodyFocused(
   });
   const ctx = await readCachedContext(absDir);
   if (!ctx?.callGraph || !ctx.edgeStore) {
+    const parsed = await parseDefinitionNow(source, normalizedFile, functionName);
+    const fallback = 'error' in parsed
+      ? { functionName, filePath: normalizedFile }
+      : { ...parsed, note: 'Extracted from the current confined source because indexed focus evidence was unavailable.', provenance: REPO_CONTENT_PROVENANCE };
     return {
       ...fallback,
       focus,
