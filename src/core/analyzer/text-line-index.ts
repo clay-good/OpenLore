@@ -26,7 +26,7 @@
 
 import { existsSync } from 'node:fs';
 import { getHeapStatistics } from 'node:v8';
-import { readdir, rm, rename } from 'node:fs/promises';
+import { readdir, rm, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { quietNativeLoggingOnce } from './lance-logging.js';
 import { noteUpdateAndMaybeCompact } from './index-compaction.js';
@@ -132,10 +132,13 @@ const CACHED_BYTES_PER_LINE = 1024;
 const CACHE_HEAP_SHARE = 0.25;
 let cacheLineLimitOverride: number | null = null;
 
+/** The budget covers every index cached in this process (several repositories can be open). */
 function corpusFitsInMemory(lines: number): boolean {
   const limit = cacheLineLimitOverride
     ?? (getHeapStatistics().heap_size_limit * CACHE_HEAP_SHARE) / CACHED_BYTES_PER_LINE;
-  return lines <= limit;
+  let cached = 0;
+  for (const entry of _bm25Cache.values()) cached += entry.rows.length;
+  return cached + lines <= limit;
 }
 
 /** Test-only: force the streaming path above `n` lines (`null` restores the heap-derived limit). */
@@ -143,9 +146,15 @@ export function _setCacheLineLimitForTesting(n: number | null): void {
   cacheLineLimitOverride = n;
 }
 
-// Corpus-wide line count and token total for the streaming path, keyed by index path and
-// table version, so a write by any process is seen on the next search.
-const _streamStats = new Map<string, { version: number; N: number; totalLen: number }>();
+// Corpus-wide line count and token total for the streaming path. Keyed by the dataset's
+// identity, not its version alone: a rebuild writes a NEW dataset whose version restarts at 1,
+// so a same-size rebuild by any process would otherwise reuse the old totals.
+const _streamStats = new Map<string, { identity: string; N: number; totalLen: number }>();
+
+/** Test-only: is this output directory's text index held in the in-memory cache? */
+export function _isTextIndexCachedForTesting(outputDir: string): boolean {
+  return _bm25Cache.has(join(outputDir, DB_FOLDER));
+}
 
 /** Test-only: clear the in-memory BM25 cache to force the cold path. */
 export function _resetTextLineIndexCachesForTesting(): void {
@@ -326,6 +335,7 @@ export class TextLineIndex {
         await rm(stagePath, { recursive: true, force: true });
         await rm(dbPath, { recursive: true, force: true });
         _bm25Cache.delete(dbPath);
+        _streamStats.delete(dbPath);
         return { lines: 0, files: 0 };
       }
 
@@ -334,6 +344,7 @@ export class TextLineIndex {
       await rm(dbPath, { recursive: true, force: true });
       await rename(stagePath, dbPath);
       _bm25Cache.delete(dbPath);
+      _streamStats.delete(dbPath);
       return { lines: total, files: indexedFiles };
     } catch (err) {
       await rm(stagePath, { recursive: true, force: true }).catch(() => { /* best effort */ });
@@ -423,7 +434,7 @@ export class TextLineIndex {
       }
       const lineCount = (await table.countRows()) as number;
       if (!corpusFitsInMemory(lineCount)) {
-        return streamSearchText(table, dbPath, outputDir, query, { limit, filePath, traceCandidates, vocabularyExpansion });
+        return streamSearchText(table, dbPath, outputDir, query, lineCount, { limit, filePath, traceCandidates, vocabularyExpansion });
       }
       const rows = (await table.query().toArray()) as Record<string, unknown>[];
       const records: TextLineRecord[] = rows.map((r) => ({
@@ -517,7 +528,7 @@ function docView(
 /**
  * Search the text index without loading it: memory is one Arrow batch plus the result list.
  * Scores, ties and evidence are the in-memory path's exactly. Pass 1 counts each query term's
- * document frequency (and, once per table version, the corpus line and token totals); pass 2
+ * document frequency (and, once per dataset state, the corpus line and token totals); pass 2
  * scores the lines that contain a query term and keeps the best ones. A token is a lowercase
  * substring of its line, so `includes` skips lines that cannot match without tokenizing them.
  */
@@ -527,10 +538,12 @@ async function streamSearchText(
   dbPath: string,
   outputDir: string,
   query: string,
+  lineCount: number,
   opts: { limit: number; filePath?: string; traceCandidates: boolean; vocabularyExpansion: boolean },
 ): Promise<TextSearchResult[]> {
   const queryTokens = tokenize(query);
-  if (queryTokens.length === 0) return [];
+  const keep = opts.traceCandidates ? opts.limit * 3 : opts.limit;
+  if (queryTokens.length === 0 || !(keep > 0)) return [];
   const { expansionTokens } = expandVocabularyQuery(outputDir, queryTokens, opts.vocabularyExpansion);
   const terms = [...new Set([...queryTokens, ...expansionTokens])];
   const mayContain = (text: string): boolean => {
@@ -544,9 +557,10 @@ async function streamSearchText(
   };
 
   // Pass 1: document frequencies, plus the corpus totals when this table version lacks them.
-  const version = (await table.version()) as number;
+  const dataset = await stat(join(dbPath, `${TABLE_NAME}.lance`)).then((st) => `${st.ino}:${st.birthtimeMs}`, () => '');
+  const identity = `${dataset}:${(await table.version()) as number}:${lineCount}`;
   let stats = _streamStats.get(dbPath);
-  if (stats?.version !== version) stats = undefined;
+  if (stats?.identity !== identity) stats = undefined;
   const df = new Map<string, number>();
   let N = 0;
   let totalLen = 0;
@@ -562,13 +576,12 @@ async function streamSearchText(
     }
   }
   if (!stats) {
-    stats = { version, N, totalLen };
+    stats = { identity, N, totalLen };
     _streamStats.set(dbPath, stats);
   }
   const avgLength = stats.N > 0 ? stats.totalLen / stats.N : 1;
 
   // Pass 2: score the lines that contain a query term; keep the best `keep`.
-  const keep = opts.traceCandidates ? opts.limit * 3 : opts.limit;
   type Hit = { rec: TextLineRecord; doc: { id: string; tfMap: Map<string, number>; length: number }; id: string; score: number; expansionScore: number };
   const best: Hit[] = [];
   for await (const batch of table.query().select(['id', 'filePath', 'lineNumber', 'text'])) {

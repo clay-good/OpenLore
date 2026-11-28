@@ -19,6 +19,7 @@ import {
   _resetTextLineIndexCachesForTesting,
   _setBuildFlushLinesForTesting,
   _setCacheLineLimitForTesting,
+  _isTextIndexCachedForTesting,
   STAGING_PREFIX,
 } from './text-line-index.js';
 import { VectorIndex } from './vector-index.js';
@@ -373,6 +374,42 @@ describe('TextLineIndex — streaming search matches the in-memory search', () =
       expect(again).toEqual(cached);
     }
     expect((await both('payment', { limit: 500 })).streamed.some(h => h.expansionTerms?.includes('pmt'))).toBe(true);
+  });
+
+  // Found in review: a rebuild writes a new dataset whose version restarts, so a same-size
+  // rebuild used to keep the old corpus totals.
+  it('does not reuse corpus totals across a rebuild with the same version', async () => {
+    await TextLineIndex.build(outputDir, [{ filePath: 'a.txt', content: 'alpha beta' }]);
+    _setCacheLineLimitForTesting(0);
+    await TextLineIndex.searchText(outputDir, 'alpha');
+    await TextLineIndex.build(outputDir, [{ filePath: 'a.txt', content: 'alpha beta' }, { filePath: 'b.txt', content: 'gamma gamma gamma\nalpha' }]);
+    const streamed = await TextLineIndex.searchText(outputDir, 'alpha');
+    _setCacheLineLimitForTesting(null);
+    _resetTextLineIndexCachesForTesting();
+    expect(streamed).toEqual(await TextLineIndex.searchText(outputDir, 'alpha'));
+  });
+
+  it('returns nothing for a non-positive limit instead of throwing', async () => {
+    await TextLineIndex.build(outputDir, [{ filePath: 'a.txt', content: 'alpha beta' }]);
+    _setCacheLineLimitForTesting(0);
+    expect(await TextLineIndex.searchText(outputDir, 'alpha', { limit: 0 })).toEqual([]);
+  });
+
+  it('counts every cached index against the memory budget', async () => {
+    const other = await mkdtemp(join(tmpdir(), 'ol-text-idx-other-'));
+    try {
+      const lines = Array.from({ length: 6 }, (_, i) => `alpha line ${i}`).join('\n');
+      await TextLineIndex.build(outputDir, [{ filePath: 'a.txt', content: lines }]);
+      await TextLineIndex.build(other, [{ filePath: 'b.txt', content: lines }]);
+      _setCacheLineLimitForTesting(10);
+      await TextLineIndex.searchText(outputDir, 'alpha');
+      expect(_isTextIndexCachedForTesting(outputDir)).toBe(true);
+      const streamed = await TextLineIndex.searchText(other, 'alpha');
+      expect(_isTextIndexCachedForTesting(other)).toBe(false); // 6 cached + 6 > 10
+      expect(streamed.length).toBeGreaterThan(0);
+    } finally {
+      await rm(other, { recursive: true, force: true });
+    }
   });
 
   it('sees writes made after the corpus totals were taken', async () => {
