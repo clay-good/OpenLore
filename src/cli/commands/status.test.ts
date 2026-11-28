@@ -591,7 +591,40 @@ describe('openlore status — a legacy full-digest import', () => {
     }), 'utf-8');
     const out = await statusThroughRealCheck(true, [], POINTER);
     expect(out.split('\n').filter(line => line.includes('Digest pointer'))).toHaveLength(1);
-    expect(JSON.parse(await statusThroughRealCheck(true, ['--json'], POINTER)).unservedDigestPointer?.lines).toEqual([3]);
+    expect(JSON.parse(await statusThroughRealCheck(true, ['--json'], POINTER)).unservedDigestPointer).toEqual({
+      file: 'CLAUDE.md', lines: [3], reason: '`contextInjection.mode` is "off" in the OpenLore config',
+    });
+  });
+
+  it('names hooks.prompt-submitted when that is the setting, through the real check', async () => {
+    await mkdir(join(root, '.openlore'), { recursive: true });
+    await writeFile(join(root, '.openlore', 'config.json'), JSON.stringify({ hooks: { 'prompt-submitted': false } }), 'utf-8');
+    const json = JSON.parse(await statusThroughRealCheck(true, ['--json'], POINTER));
+    expect(json.unservedDigestPointer?.reason).toBe('`hooks.prompt-submitted` is false in .openlore/config.json');
+  });
+
+  it('does not name the project file when only the user config turns injection off', async () => {
+    const userConfig = join(root, 'user-config.json');
+    await writeFile(userConfig, JSON.stringify({ contextInjection: { mode: 'off' } }), 'utf-8');
+    const saved = process.env.OPENLORE_GLOBAL_CONFIG;
+    process.env.OPENLORE_GLOBAL_CONFIG = userConfig;
+    try {
+      const json = JSON.parse(await statusThroughRealCheck(true, ['--json'], POINTER));
+      expect(json.unservedDigestPointer?.reason).toBe('`contextInjection.mode` is "off" in the OpenLore config');
+    } finally {
+      if (saved === undefined) delete process.env.OPENLORE_GLOBAL_CONFIG; else process.env.OPENLORE_GLOBAL_CONFIG = saved;
+    }
+  });
+
+  it('says nothing about a pointer when CLAUDE.local.md or another case imports the digest', async () => {
+    await withDigest();
+    await writeFile(join(root, 'CLAUDE.md'), `${POINTER}\n`, 'utf-8');
+    await writeFile(join(root, 'CLAUDE.local.md'), '@.openlore/analysis/CODEBASE.md\n', 'utf-8');
+    expect(await findDigestNotes(root, doesNotReach, injectionOff)).toEqual({});
+    await rm(join(root, 'CLAUDE.local.md'));
+    expect((await findDigestNotes(root, doesNotReach, injectionOff)).unservedDigestPointer?.lines).toEqual([1]);
+    await writeFile(join(root, 'CLAUDE.md'), `@.openlore/analysis/codebase.md\n${POINTER}\n`, 'utf-8');
+    expect(await findDigestNotes(root, doesNotReach, injectionOff)).toEqual({});
   });
 
   it('says nothing when CODEBASE.md is a symlink, and caps a long line list', async () => {

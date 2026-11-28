@@ -4,7 +4,7 @@
  * Real filesystem: real settings files, a real slim digest in the format analyze writes.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -174,6 +174,36 @@ describe('slimDigestReachesAgent', () => {
     wirePromptHook(root);
     mkdirSync(join(home, 'managed-settings.d'), { recursive: true });
     writeFileSync(join(home, 'managed-settings.d', '10-policy.json'), JSON.stringify({ allowManagedHooksOnly: true }));
+    expect(await slimDigestReachesAgent(root, home, managed())).toBe(false);
+  });
+  it('a disable in the main checkout settings.local.json counts for a linked worktree', async () => {
+    const main = realpathSync(mkdtempSync(join(tmpdir(), 'olslimreach-main-')));
+    try {
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: main, stdio: 'ignore' });
+      git('init', '-q');
+      git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init');
+      const worktree = join(main, 'wt');
+      git('worktree', 'add', '-q', worktree);
+      const wt = realpathSync(worktree);
+      mkdirSync(join(wt, '.openlore', 'analysis'), { recursive: true });
+      for (const f of ['llm-context.json', 'CODEBASE.slim.md']) writeFileSync(join(wt, '.openlore', 'analysis', f), readFileSync(join(analysis(), f)));
+      wirePromptHook(wt);
+      expect(await slimDigestReachesAgent(wt, home, managed())).toBe(true);
+      mkdirSync(join(main, '.claude'), { recursive: true });
+      writeFileSync(join(main, '.claude', 'settings.local.json'), JSON.stringify({ disableAllHooks: true }));
+      expect(await slimDigestReachesAgent(wt, home, managed())).toBe(false);
+    } finally {
+      rmSync(main, { recursive: true, force: true });
+    }
+  });
+
+  it('with CLAUDE_CONFIG_DIR set, a disable in ~/.claude still counts', async () => {
+    wirePromptHook(root);
+    const configDir = join(home, 'elsewhere');
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(join(home, '.claude'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ disableAllHooks: true }));
+    process.env.CLAUDE_CONFIG_DIR = configDir;
     expect(await slimDigestReachesAgent(root, home, managed())).toBe(false);
   });
 });

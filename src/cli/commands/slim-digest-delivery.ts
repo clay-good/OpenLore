@@ -6,9 +6,11 @@
  * That holds when all of these hold, and only then:
  * - no Claude settings file sets `disableAllHooks`, and the managed settings file (and its
  *   `managed-settings.d/*.json` drop-ins) neither disables hooks nor allows only managed hooks.
- *   `CLAUDE_CONFIG_DIR` replaces `~/.claude`. MDM profiles, registry policy and server-managed
- *   settings are not read; plugin hooks are not counted. Every gap errs toward "does not reach",
- *   which keeps the import;
+ *   `CLAUDE_CONFIG_DIR` replaces `~/.claude` for hooks; both can disable them, as can the
+ *   repository root's and the main checkout's `settings.local.json`. MDM profiles, registry
+ *   policy and server-managed settings are not read, and plugin hooks are not counted: those gaps
+ *   can make the answer "reaches" too often (a policy disable) or "does not reach" too often (a
+ *   plugin hook);
  * - the prompt hook (`openlore orient --inject`) is wired and its program exists. A repository-scope
  *   hook makes the user-scope one stand down (`repoWiresStep`), so when the repository wires one,
  *   only repository-scope hooks count. An `npx` command cannot be checked for its program; it
@@ -24,7 +26,8 @@
 import { constants } from 'node:fs';
 import { open, readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { execFileGit } from '../../utils/git-exec.js';
 import { readSlimDigest } from './orient-inject.js';
 import { promptSubmittedOff } from './orient.js';
 import { assessHookWiring, claudeSettingsFiles, isUserScopeCommand } from '../install/hook-wiring-health.js';
@@ -85,6 +88,21 @@ async function hooksDisabled(files: readonly string[], managed: readonly string[
   return false;
 }
 
+/**
+ * In a git repository Claude Code reads `.claude/settings.local.json` at the repository root,
+ * which for a linked worktree is the main checkout. Those files can only disable hooks here.
+ */
+async function checkoutLocalSettings(rootPath: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileGit('git', ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir'], { cwd: rootPath, timeout: 5_000 });
+    const [toplevel, commonDir] = stdout.trim().split(/\r?\n/);
+    const roots = [toplevel, commonDir && basename(commonDir) === '.git' ? dirname(commonDir) : undefined];
+    return roots.filter((r): r is string => !!r).map(r => join(r, '.claude', 'settings.local.json'));
+  } catch {
+    return [];
+  }
+}
+
 export async function slimDigestReachesAgent(
   rootPath: string,
   home: string = process.env.OPENLORE_HOME || homedir(),
@@ -94,12 +112,16 @@ export async function slimDigestReachesAgent(
     if (promptSubmittedOff(rootPath)) return false;
     const files = claudeSettingsFiles(rootPath, home);
     // Claude Code reads user settings from CLAUDE_CONFIG_DIR, in place of ~/.claude, when it is set.
+    // Hooks are counted from that file only; a disable setting in either one counts, because the
+    // environment Claude Code runs in may differ from this command's.
+    const homeUser = files[0];
     if (process.env.CLAUDE_CONFIG_DIR) files[0] = join(process.env.CLAUDE_CONFIG_DIR, 'settings.json');
+    const disableOnly = [...new Set([homeUser, ...(await checkoutLocalSettings(rootPath))])].filter(f => !files.includes(f));
     // A settings file that is not a small regular file is not read; the import stays.
     const policy = await managedFiles(managed);
-    const states = await Promise.all([...files, ...policy].map(settingsFileState));
+    const states = await Promise.all([...files, ...disableOnly, ...policy].map(settingsFileState));
     if (states.includes('refused')) return false;
-    if (await hooksDisabled(files, policy)) return false;
+    if (await hooksDisabled([...files, ...disableOnly], policy)) return false;
     const { hooks, missing } = await assessHookWiring(files);
     const inject = hooks.filter(h => h.event === 'UserPromptSubmit' && h.step === 'orient --inject');
     const repoScoped = inject.filter(h => !isUserScopeCommand(h.command));
@@ -122,7 +144,8 @@ export async function slimDigestWithheldByConfig(rootPath: string): Promise<stri
   if (promptSubmittedOff(rootPath)) return '`hooks.prompt-submitted` is false in .openlore/config.json';
   try {
     const cfg = resolveInjectionConfig((await readOpenLoreConfig(rootPath))?.contextInjection);
-    if (cfg.mode === 'off') return '`contextInjection.mode` is "off" in .openlore/config.json';
+    // The merged read the hook uses (project over user config), so the file is not named.
+    if (cfg.mode === 'off') return '`contextInjection.mode` is "off" in the OpenLore config';
   } catch { /* unreadable config: the hook uses its defaults */ }
   return null;
 }

@@ -136,14 +136,16 @@ const ARTIFACT_DIGEST = 'CODEBASE.md';
 /** The import line an older `openlore analyze --ai-configs` wrote into `CLAUDE.md`. */
 const LEGACY_DIGEST_IMPORT = `@${OPENLORE_DIR}/${OPENLORE_ANALYSIS_SUBDIR}/${ARTIFACT_DIGEST}`;
 const CLAUDE_MD_MAX_BYTES = 1_048_576;
+const ANY_DIGEST_IMPORT = /@\S*codebase\.md/i;
 
 /**
  * Lines of the repository's `CLAUDE.md` that the agent loads (outside the managed block, code
  * fences, and HTML comments) and that are exactly the legacy import or the generated pointer.
  */
 function scanClaudeMd(text: string): { imports: number[]; pointers: number[]; anyImport: boolean } {
-  // Any import of the digest, in any spelling or place, means the agent may already load it.
-  const anyImport = /@\S*CODEBASE\.md/.test(text);
+  // Any other import of the digest in this file (any path or case, even in a fence) means the agent
+  // may already load it, so the pointer note stays silent.
+  const anyImport = ANY_DIGEST_IMPORT.test(text);
   const imports: number[] = [];
   const pointers: number[] = [];
   const pointer = digestPointerLine(`${OPENLORE_DIR}/${OPENLORE_ANALYSIS_SUBDIR}`);
@@ -218,7 +220,10 @@ export async function findDigestNotes(
   if (imports.length) {
     return (await reaches(rootPath)) ? { legacyDigestImport: { file: 'CLAUDE.md', lines: imports, digestBytes } } : {};
   }
-  if (pointers.length && !anyImport) {
+  // CLAUDE.local.md is loaded beside CLAUDE.md; an import there also feeds the agent.
+  let localImport = false;
+  try { localImport = ANY_DIGEST_IMPORT.test(await readFileConfined(rootPath, 'CLAUDE.local.md', CLAUDE_MD_MAX_BYTES)); } catch { /* absent */ }
+  if (pointers.length && !anyImport && !localImport) {
     const reason = await withheld(rootPath);
     if (reason) return { unservedDigestPointer: { file: 'CLAUDE.md', lines: pointers, reason } };
   }

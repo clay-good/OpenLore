@@ -105,7 +105,8 @@ Wire OpenLore into your agent's context:
 **Claude Code** — run `openlore install`. It writes a short managed block (8 lines or fewer) into `CLAUDE.md` and
 wires the hooks that push evidence while the agent works. Do not `@`-import
 `.openlore/analysis/CODEBASE.md`: it would load on every turn, and the prompt hook gives the agent the
-slim digest once per session (unless `contextInjection.mode` is `"off"`). A task that needs the full digest reads the file. Each MCP tool's description
+slim digest on the first prompt of a session and again when it changes (unless injection or the
+prompt moment is off, or the digest does not fit the token budget). A task that needs the full digest reads the file. Each MCP tool's description
 says when to use it, so no tool table is needed.
 
 **Claude Code — MCP config (token-efficient two-server setup)**
