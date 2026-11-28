@@ -77,7 +77,7 @@ export function renderInstructionBlock(
     : '`openlore orient "<task>"`';
   // LF on every platform, so a CRLF checkout writes the same block and the same fingerprint.
   return `${template.replace(/\r\n/g, '\n').trimEnd().replace('{{orient}}', orient)}\n` +
-    `Wired MCP surface: \`${preset}\`; \`openlore install --preset <name>\` changes it and rewrites this block.\n`;
+    `Wired MCP surface: \`${preset}\`; \`openlore install --preset <name>\` changes it.\n`;
 }
 
 export interface InstallOptions {

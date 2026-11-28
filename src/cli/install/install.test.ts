@@ -797,6 +797,14 @@ describe('install writes the short block in both scopes', () => {
     }
   });
 
+  it('a re-install with another preset rewrites a block that git checked out with CRLF', async () => {
+    expect(await runInstall({ cwd: dir, agent: 'agents-md', analyze: false, home, repoOnly: true })).toBe(0);
+    const lf = await readFile(join(dir, 'AGENTS.md'), 'utf8');
+    await writeFile(join(dir, 'AGENTS.md'), lf.split('\n').join('\r\n'));
+    expect(await runInstall({ cwd: dir, agent: 'agents-md', analyze: false, home, repoOnly: true, preset: 'navigation' })).toBe(0);
+    expect(managedBody(await readFile(join(dir, 'AGENTS.md'), 'utf8'))).toContain('Wired MCP surface: `navigation`');
+  });
+
   it('a re-install replaces an old long block inside its markers and keeps the text around it', async () => {
     // The block an older version wrote: its own fingerprint, so it is not a hand edit.
     const oldBody = [

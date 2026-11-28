@@ -425,6 +425,7 @@ describe('analyze command', () => {
       expect(tip).toContain('openlore install');
       expect(tip).toContain('.openlore/analysis/CODEBASE.md');
       expect(tip).not.toMatch(/\|/);
+      expect(agentSetupTip('build/out')).toContain('build/out/CODEBASE.md');
       for (const tool of ['search_code', 'get_subgraph', 'orient', 'suggest_insertion_points', 'check_spec_drift', 'search_specs']) {
         expect(tip).not.toContain(tool);
       }

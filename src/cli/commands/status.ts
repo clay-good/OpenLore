@@ -16,7 +16,7 @@ import { formatAge } from '../../utils/command-helpers.js';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { ARTIFACT_SLIM_DIGEST, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
+import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import { OPENLORE_BLOCK_BEGIN, OPENLORE_BLOCK_END } from '../../utils/openlore-managed-file.js';
 import { LOOP_MOMENTS } from '../../core/services/hook-session.js';
 import { formatBuildProgress, readBuildProgress, type BuildProgress } from '../../core/services/build-progress.js';
@@ -125,16 +125,19 @@ const CLAUDE_MD_MAX_BYTES = 1_048_576;
 
 /**
  * Find a legacy full-digest `@`-import in the repository's `CLAUDE.md`. Reported only when it is
- * dead weight: the slim digest and the full digest both exist, and the line is outside the
- * managed block (a user-owned line; `openlore install` never touches it). Read-only and
- * fail-soft: an unreadable or oversized file reports nothing.
+ * dead weight: the slim digest reaches the agent through the prompt hook (`reaches`), the full
+ * digest exists, and the line is outside the managed block and outside a code fence (a
+ * user-owned import; `openlore install` never touches it). Read-only and fail-soft: an unreadable
+ * or oversized file reports nothing.
  */
-export async function findLegacyDigestImport(rootPath: string): Promise<LegacyDigestImport | null> {
-  const analysisDir = join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+export async function findLegacyDigestImport(
+  rootPath: string,
+  // Loaded lazily: the status line imports this module on every render and never needs it.
+  reaches: (rootPath: string) => Promise<boolean> = async root => (await import('./slim-digest-delivery.js')).slimDigestReachesAgent(root),
+): Promise<LegacyDigestImport | null> {
   let digestBytes: number;
   try {
-    if (!statSync(join(analysisDir, ARTIFACT_SLIM_DIGEST)).isFile()) return null;
-    const digest = statSync(join(analysisDir, ARTIFACT_DIGEST));
+    const digest = statSync(join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DIGEST));
     if (!digest.isFile()) return null;
     digestBytes = digest.size;
   } catch {
@@ -148,20 +151,28 @@ export async function findLegacyDigestImport(rootPath: string): Promise<LegacyDi
   }
   const lines: number[] = [];
   let inBlock = false;
+  let fence: string | null = null;
   text.split(/\r?\n/).forEach((line, i) => {
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
+    if (marker && (fence === null || (marker[0] === fence[0] && marker.length >= fence.length))) {
+      fence = fence === null ? marker : null;
+      return;
+    }
     if (line.includes(OPENLORE_BLOCK_BEGIN)) inBlock = true;
-    if (!inBlock && line.trim() === LEGACY_DIGEST_IMPORT) lines.push(i + 1);
+    // An indented line is a Markdown code block, where Claude Code does not evaluate an import.
+    if (!inBlock && fence === null && line.trimEnd() === LEGACY_DIGEST_IMPORT) lines.push(i + 1);
     if (line.includes(OPENLORE_BLOCK_END)) inBlock = false;
   });
-  return lines.length ? { file: 'CLAUDE.md', lines, digestBytes } : null;
+  if (!lines.length) return null;
+  return (await reaches(rootPath)) ? { file: 'CLAUDE.md', lines, digestBytes } : null;
 }
 
-/** The one status line for a legacy import, with the command that deletes it. */
+/** The one status line for a legacy import, naming the lines to delete. */
 export function formatLegacyDigestImport(found: LegacyDigestImport): string {
   const where = found.lines.map(n => `${found.file}:${n}`).join(', ');
-  const script = found.lines.map(n => `${n}d`).join(';');
+  const which = found.lines.length === 1 ? `line ${found.lines[0]}` : `lines ${found.lines.join(', ')}`;
   return `${where} imports ${LEGACY_DIGEST_IMPORT.slice(1)} (${found.digestBytes.toLocaleString('en-US')} bytes) on every turn; ` +
-    `where the prompt hook is wired, the slim digest reaches the agent once per session instead. Delete it: sed -i.bak '${script}' ${found.file}`;
+    `the prompt hook already gives the agent the slim digest once per session. Delete ${which} of ${found.file}.`;
 }
 
 export type SessionStatus =

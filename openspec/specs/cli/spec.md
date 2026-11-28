@@ -3860,7 +3860,7 @@ not current SHALL be rebuilt or removed rather than served.
 
 The block `openlore install` manages SHALL be 8 lines and 700 bytes or fewer and SHALL name no
 OpenLore tool the wired preset does not expose. A generated `CLAUDE.md` SHALL NOT `@`-import the full
-`CODEBASE.md` when the slim digest exists; it SHALL name the path in one line instead. Its workflow
+`CODEBASE.md` when the prompt hook delivers the slim digest; it SHALL name the path in one line. Its workflow
 section SHALL be 10 lines or fewer. Every MCP tool description SHALL be 800 characters or fewer.
 
 #### Scenario: A fresh install loads little text
@@ -3870,9 +3870,9 @@ section SHALL be 10 lines or fewer. Every MCP tool description SHALL be 800 char
 - **THEN** the generated `CLAUDE.md` holds the managed block of 8 lines or fewer and no `@`-import
   of `CODEBASE.md`
 
-#### Scenario: No slim digest yet
+#### Scenario: The slim digest does not reach the agent
 
-- **GIVEN** an index that has `CODEBASE.md` and no `CODEBASE.slim.md`
+- **GIVEN** an index with no `CODEBASE.slim.md`, or no wired prompt hook, or context injection off
 - **WHEN** a `CLAUDE.md` is generated
 - **THEN** it keeps the `@`-import, so the agent still gets repository shape
 
@@ -3882,7 +3882,7 @@ section SHALL be 10 lines or fewer. Every MCP tool description SHALL be 800 char
 - **WHEN** `openlore install` runs again
 - **THEN** that line is unchanged
 - **AND** `openlore status` names the line and its size once, and does not edit the file
-- **AND** it says nothing while no slim digest exists
+- **AND** it says nothing while the slim digest does not reach the agent
 
 #### Scenario: A preset without orient
 

@@ -95,11 +95,8 @@ describe('generateAiConfigs', () => {
     expect(content).not.toContain('<!--');
   });
 
-  it('with the slim digest, CLAUDE.md names the full digest instead of importing it', async () => {
-    await mkdir(join(tmpDir, '.openlore', 'analysis'), { recursive: true });
-    await writeFile(join(tmpDir, '.openlore', 'analysis', 'CODEBASE.md'), '# full digest\n', 'utf-8');
-    await writeFile(join(tmpDir, '.openlore', 'analysis', 'CODEBASE.slim.md'), '# slim digest\n', 'utf-8');
-    await generateAiConfigs({ rootDir: tmpDir, analysisDir: '.openlore/analysis', projectName: 'my-project', tools: ['claude', 'cursor'] });
+  it('when the slim digest reaches the agent, CLAUDE.md names the full digest instead of importing it', async () => {
+    await generateAiConfigs({ rootDir: tmpDir, analysisDir: '.openlore/analysis', projectName: 'my-project', tools: ['claude', 'cursor'], slimDigestDelivered: true });
 
     const claude = await readFile(join(tmpDir, 'CLAUDE.md'), 'utf-8');
     expect(claude).not.toMatch(/^@/m);
@@ -112,10 +109,11 @@ describe('generateAiConfigs', () => {
     expect(cursor).toContain('`.openlore/analysis/CODEBASE.md`');
   });
 
-  it('without the slim digest, CLAUDE.md keeps the import so the agent still gets repository shape', async () => {
+  it('when the slim digest does not reach the agent, CLAUDE.md keeps the import, even with the slim file on disk', async () => {
     await mkdir(join(tmpDir, '.openlore', 'analysis'), { recursive: true });
     await writeFile(join(tmpDir, '.openlore', 'analysis', 'CODEBASE.md'), '# full digest\n', 'utf-8');
-    await generateAiConfigs({ rootDir: tmpDir, analysisDir: '.openlore/analysis', projectName: 'my-project', tools: ['claude'] });
+    await writeFile(join(tmpDir, '.openlore', 'analysis', 'CODEBASE.slim.md'), '# slim digest\n', 'utf-8');
+    await generateAiConfigs({ rootDir: tmpDir, analysisDir: '.openlore/analysis', projectName: 'my-project', tools: ['claude'], slimDigestDelivered: false });
 
     const claude = await readFile(join(tmpDir, 'CLAUDE.md'), 'utf-8');
     expect(claude.split('\n')).toContain('@.openlore/analysis/CODEBASE.md');
@@ -161,6 +159,9 @@ describe('generateAiConfigs', () => {
     // The situation table is gone: each tool's description already says when to use it.
     expect(content).not.toContain('search_code');
     expect(content).not.toContain('Then, by situation');
+    // Install never rewrites this file, so the section does not promise a regeneration.
+    expect(content).not.toMatch(/regenerat/i);
+    expect(content).toContain('OpenLore does not rewrite this file');
   });
 
   it('creates nested directory for .clinerules/openlore.md', async () => {

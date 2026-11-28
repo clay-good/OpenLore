@@ -16,7 +16,6 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
 import { resolveWiredPreset, presetToolNames, enablingCommandFor } from '../services/wired-preset.js';
-import { ARTIFACT_SLIM_DIGEST } from '../../constants.js';
 
 // ============================================================================
 // TYPES
@@ -44,6 +43,13 @@ export interface AiConfigOptions {
    * (change: align-generated-guidance-with-installed-preset).
    */
   preset?: string;
+  /**
+   * True only when the slim digest reaches the agent through the prompt hook (the caller checks
+   * `slimDigestReachesAgent`). Then the generated `CLAUDE.md` names the full digest instead of
+   * `@`-importing it. Omitted = false: the import stays, so the agent keeps its repository shape
+   * (change: trim-standing-agent-instructions).
+   */
+  slimDigestDelivered?: boolean;
 }
 
 // ============================================================================
@@ -134,7 +140,7 @@ function buildMcpSection(
   return [
     '## openlore MCP workflow',
     '',
-    `_Written for the wired \`${preset}\` surface. Re-run \`openlore install --preset <name>\` after changing it so this section is regenerated._`,
+    `_Written for the wired \`${preset}\` surface. OpenLore does not rewrite this file; after a preset change, edit or delete this section._`,
     '',
     orientLine(available),
     '',
@@ -174,12 +180,12 @@ function buildContent(
   projectName: string,
   forClaude: boolean,
   mcpSection: string,
-  slimDigestExists: boolean,
+  slimDigestDelivered: boolean,
 ): string {
-  // With the slim digest, the prompt hook gives the agent repository shape once per session, so
-  // the full digest is named, not loaded on every turn. Without it, the import is the only
-  // repository shape the agent gets (change: trim-standing-agent-instructions).
-  const digestRef = slimDigestExists
+  // When the prompt hook gives the agent the slim digest once per session, the full digest is
+  // named, not loaded on every turn. Otherwise the import is the only repository shape the agent
+  // gets (change: trim-standing-agent-instructions).
+  const digestRef = slimDigestDelivered
     ? `Full repository digest, for a task that needs it: \`${analysisDir}/CODEBASE.md\`.`
     : forClaude
       ? `@${analysisDir}/CODEBASE.md`
@@ -239,12 +245,12 @@ export async function generateAiConfigs(options: AiConfigOptions): Promise<AiCon
   const available = await presetToolNames(wired.preset);
   const enablingCommand = await enablingCommandFor('record_decision', wired.preset);
   const mcpSection = buildMcpSection(wired.preset, available, enablingCommand);
-  const slimDigestExists = await fileExists(join(rootDir, analysisDir, ARTIFACT_SLIM_DIGEST));
+  const slimDigestDelivered = options.slimDigestDelivered === true;
 
   return Promise.all(
     targets.map(async ({ rel, forClaude }) => {
       const absPath = join(rootDir, rel);
-      const content = buildContent(analysisDir, projectName, forClaude, mcpSection, slimDigestExists);
+      const content = buildContent(analysisDir, projectName, forClaude, mcpSection, slimDigestDelivered);
       const created = await writeIfAbsent(absPath, content);
       return { rel, created };
     })

@@ -42,6 +42,8 @@ trusts the answer.
 | Prompt briefing `keepExactAnchors` | Drops the spec domain that an exact `Implementation` anchor links | Keep linked spec domains for the resolved symbol |
 | `sanitizeForTerminal` (`misc.ts`) | Unicode tag characters and other invisible format characters survive every served frame | Strip them; the slim digest already refuses them |
 | `openlore doctor` / `status --json` | Doctor warns about an LLM key on every fresh repository; `status --json` says no hook moment is wired while doctor counts 9 | Treat the optional LLM as optional; report wiring the same way in both |
+| Decisions-gate block (`agentInstructionsBlock`, `decisions.ts`) | An install in a git repository adds about 2.2 KB of standing text: a playbook for a gate the default autopilot never blocks | Keep the record command; write the playbook only when blocking review is on |
+| Managed block on Cline and `AGENTS.md` | Says "Wired MCP surface" and names the `orient` tool where those adapters register no MCP server | Write the CLI-only form for a surface with no MCP registration |
 
 ## Next release (in this order)
 

@@ -72,11 +72,11 @@ Single-context; no `CONTEXT.md` yet, and ADRs live in `openspec/decisions/`, not
 Use this standard for your chat replies: **ASD-STE100 Simplified Technical English** (**STE**). Also consider ELI18 and TLDR. Apart from that: silence is gold
 
 <!-- BEGIN OPENLORE (managed — edits inside this block will be overwritten) -->
-<!-- openlore-fingerprint: 236194f2d8a690e4 -->
+<!-- openlore-fingerprint: 10ce2067b8190104 -->
 Where OpenLore hooks are wired, they push evidence about code you touch, and stay silent when they have nothing new.
-For code you have not read in this session, the `orient` tool (or `openlore orient "<task>"`) returns the relevant functions, callers, and specs in one lookup.
+For code you have not read in this session, the `orient` tool (or `openlore orient "<task>"`) returns its functions, callers, and specs in one lookup.
 Record a significant design choice: `openlore decisions record --title "<decision>" --rationale "<why>"`.
-The full repository digest is `.openlore/analysis/CODEBASE.md`; read it when a task needs it.
+In an indexed repository, the full digest is `.openlore/analysis/CODEBASE.md` by default; read it when a task needs it.
 A tool reply may start with a freshness note (the Epistemic Lease); it is informational.
-Wired MCP surface: `substrate`; `openlore install --preset <name>` changes it and rewrites this block.
+Wired MCP surface: `substrate`; `openlore install --preset <name>` changes it.
 <!-- END OPENLORE -->

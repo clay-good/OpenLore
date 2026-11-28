@@ -214,7 +214,8 @@ export interface CycleReport {
  * each tool's description says when to use it.
  */
 export function agentSetupTip(outputDir: string): string {
-  return `  Agent setup: run \`openlore install\`. A task that needs the full repository digest can read ${outputDir}CODEBASE.md.`;
+  const dir = outputDir.endsWith('/') || outputDir.endsWith('\\') ? outputDir : `${outputDir}/`;
+  return `  Agent setup: run \`openlore install\`. A task that needs the full repository digest can read ${dir}CODEBASE.md.`;
 }
 
 /**
@@ -696,6 +697,7 @@ After analysis, agents query the index (openlore orient, or the MCP server). Spe
                   analysisDir: opts.output.replace(/\/$/, ''),
                   projectName: repoStructure.projectName ?? 'project',
                   tools: selectedTools,
+                  slimDigestDelivered: await (await import('./slim-digest-delivery.js')).slimDigestReachesAgent(rootPath),
                 });
                 logger.blank();
                 console.log('  Agent config files:');
@@ -1025,6 +1027,7 @@ After analysis, agents query the index (openlore orient, or the MCP server). Spe
             analysisDir: opts.output.replace(/\/$/, ''),
             projectName: result.repoMap.metadata.projectName,
             tools: selectedTools,
+            slimDigestDelivered: await (await import('./slim-digest-delivery.js')).slimDigestReachesAgent(rootPath),
           });
         }
       }

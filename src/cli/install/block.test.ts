@@ -78,4 +78,14 @@ describe('block', () => {
     expect(fingerprint('a')).toBe(fingerprint('a'));
     expect(fingerprint('a')).not.toBe(fingerprint('b'));
   });
+
+  it('a CRLF checkout of an untouched block is not a hand edit (change: trim-standing-agent-instructions)', () => {
+    const lf = upsertBlock('# project\n', 'line one\nline two').next;
+    const crlf = lf.split('\n').join('\r\n');
+    const block = extractBlock(crlf)!;
+    expect(block.inner).toContain('\r\n');
+    expect(isHandEdited(block)).toBe(false);
+    // A real edit is still one.
+    expect(isHandEdited(extractBlock(crlf.replace('line two', 'edited'))!)).toBe(true);
+  });
 });
