@@ -27,6 +27,20 @@ they work.**
 
 Shipped work is in `CHANGELOG.md` and `openspec/changes/archive/`.
 
+## Fix first: open issues (trust bar, ADR-0038 item 1)
+
+Bug PRs, one per issue, before new evidence kinds ship. Ordered by harm to an agent that trusts the answer.
+
+| Issue | Harm | Fix |
+|-------|------|-----|
+| [#805](https://github.com/clay-good/OpenLore/issues/805) `get_function_body` with an unanalyzed `ref` | Returns a call site as the definition: a silent wrong answer | Say "not assessed: ref not analyzed", never a line-scan guess |
+| [#807](https://github.com/clay-good/OpenLore/issues/807) `structural_diff` parse failures | Files are skipped from check-weakening without a signal | Name the revision and cause; list skipped files as not assessed |
+| [#810](https://github.com/clay-good/OpenLore/issues/810) "not ready" answers | Clients cannot tell "no analysis" from an answer | Use MCP `isError`, or document the not-ready shape in each tool's schema |
+| [#806](https://github.com/clay-good/OpenLore/issues/806) `search_code` text mode on a large monorepo | Crashes the analyzer daemon, again on retry | Bounded memory, or a clean error |
+| [#808](https://github.com/clay-good/OpenLore/issues/808) stale artifact lock | A dead analyzer's lock blocks the next build | Check the holder is alive before honoring the lock |
+| [#809](https://github.com/clay-good/OpenLore/issues/809) interrupted background build | The index stays half-built | The next run detects it and restarts the build |
+| [#811](https://github.com/clay-good/OpenLore/issues/811) `analyze --directory` | Drivers must `cd` into each repository | Add the flag, as other commands have |
+
 ## Next release (in this order)
 
 | # | Change | What it does for the agent | Needs |
