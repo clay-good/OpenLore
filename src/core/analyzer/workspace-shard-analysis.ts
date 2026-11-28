@@ -493,7 +493,7 @@ export async function runShardScopedAnalysis(args: {
           recomputed: ['call-graph.db', 'index-attestation.json', 'workspace-shards.json'],
           retained: [
             'repo-structure.json', 'llm-context.json', 'dependency-graph.json', 'SUMMARY.md',
-            'CODEBASE.md', 'dependencies.mermaid', 'parse-health.json', 'style-fingerprint.json',
+            'CODEBASE.md', 'CODEBASE.slim.md', 'dependencies.mermaid', 'parse-health.json', 'style-fingerprint.json',
             'vector index', 'BM25 corpus', 'repository vocabulary', 'text-line index',
           ],
         },

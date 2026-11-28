@@ -1,7 +1,7 @@
 # Five short skills and a slim digest for the Claude Code plugin
 
-> Priority: P1 for groups 1-2 (the slim digest and its delivery), P2 for group 3 (skills) · Not built
-> Reaches the agent through: the prompt-submitted moment (slim digest), and plugin skills that call `orient`, `blast_radius`, `verify_change`, `verify_claim`, and `recall`
+> Priority: P1 · Built (archived with the PR that built it)
+> Reaches the agent through: the prompt-submitted moment (slim digest), and plugin skills that call `orient`, `blast_radius`, `verify_claim`, `recall`, and the other navigation tools the plugin wires
 > Why it helps the agent: the agent gets a few lines of repository shape once per session and five short recipes, not a long file on every turn.
 
 ## Problem
@@ -18,18 +18,25 @@ agent has no short recipe for "debug this," "review my change," or "which tests 
 ## What changes
 
 - **A slim digest.** `generateCodebaseDigest` also writes `.openlore/analysis/CODEBASE.slim.md`
-  (new file): at most 12 lines. It holds the function and edge counts, the three highest fan-in
-  hubs, the languages with a call graph, where specs and decisions live (when the repository has
-  any), and one pointer line to `orient`. Repository-derived lines go through
-  `frameServedContent`, like the full digest.
-- **Printed once per session at the prompt-submitted moment.** `buildInjection`
-  (`src/cli/commands/orient-inject.ts`) puts the slim digest before the task block on the first
-  prompt of a session. It records the delivery under the payload's `session_id` in the per-session
-  record that `src/core/services/hook-session.ts` keeps (hook-reliability task 3.1), so later prompts do not repeat it. A rebuilt
-  index with a different digest is printed once more. No `session_id`: the digest is not printed.
+  (new file): at most 12 lines. It holds the count of functions outside test, generated and
+  vendored files, the distinct resolved caller-callee pairs between them, up to three of them with
+  the most callers (two or more, no arbitrary pick from a tie), the
+  languages with a call graph, where specs and ADRs live (when the repository has any), and one
+  pointer line to `orient`. The facts sit inside a `frameServedContent` frame, and each fact line
+  follows a fixed grammar (numbers, plain names, plain paths, registered languages), so no sentence
+  from the repository fits. Every analyze path (CLI, MCP, API) writes it after it publishes an
+  index, and the CLI's "up to date" path rebuilds one that is missing or out of date.
+- **Printed once per session at the prompt-submitted moment.** `injectOutput`
+  (`src/cli/commands/orient.ts`, where the hook's `session_id` is known) puts the slim digest before
+  the task block on the first prompt of a session. It records the delivery in the per-session
+  record that `src/core/services/hook-session.ts` keeps, so later prompts do not repeat it. A
+  digest that names something new (numbers alone do not count), or one lost to a compaction, is
+  printed once more. It is not printed without a
+  `session_id`, without an index on this machine, for an imported index, or for a file that is not
+  byte-for-byte what `openlore analyze` writes. Sub-agent briefings (`buildInjection`) do not carry it.
 - **Five plugin skills.** The plugin ships `openlore-orient`, `openlore-debug`,
   `openlore-review-changes`, `openlore-write-tests`, and `openlore-implement-story`. Each `SKILL.md`
-  in `skills/` is cut to 80 lines or fewer, names only tools in the `plugin` preset, and ends
+  in `skills/` is cut to 80 lines or fewer, names only tools that both the `plugin` preset and the preset `plugin/.mcp.json` wires expose, and ends
   with one of three actions: fix it, record a decision with the proof, or raise it to the human.
   The copies under `plugin/skills/` are byte-identical to `skills/`.
 - **A guard test** pins the skill list, the line budgets, the tool names, and the digest size.

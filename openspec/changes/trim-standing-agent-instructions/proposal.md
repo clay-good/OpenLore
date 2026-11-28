@@ -55,5 +55,5 @@ agent to do work that OpenLore now does by itself.
 
 ## Depends on
 
-- `adopt-agent-context-interop` group 1-2 (the slim digest and its once-per-session delivery). Until
-  that ships, the `@`-import stays, so no install loses repository shape.
+- `adopt-agent-context-interop` (shipped): the slim digest `CODEBASE.slim.md` and its once-per-session
+  delivery. Every analyze path writes it, so dropping the `@`-import loses no repository shape.

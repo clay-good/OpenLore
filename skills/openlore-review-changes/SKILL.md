@@ -5,128 +5,61 @@ description: Review code changes using OpenLore risk, call, coverage, and cluste
 
 # openlore: Review Changes
 
-## When to use this skill
+Review a diff from structural evidence. Do not edit code in this skill.
 
-Trigger this skill whenever the user asks to **review, audit, or check the safety of recent changes**, with phrasings like:
-- "review my changes"
-- "what did I break?"
-- "is this branch safe to merge?"
-- "pre-PR check"
-- "what's risky in this diff?"
-- "check the blast radius of my changes"
-- explicit command `/openlore-review-changes`
+## Step 1 — Scope
 
-**No code is written.** Output is a risk-ranked review with a go/no-go recommendation.
+Confirm the repository and the base ref (default: `main`). Pass it as `baseRef`: without it,
+`blast_radius` grades only uncommitted changes.
 
----
+## Step 2 — What the diff reaches
 
-## Step 1 — Confirm directory and base ref
+Call `blast_radius` with `baseRef`. It returns the changed symbols with their caller count, risk
+level, and layers crossed; each symbol's strongest test evidence (`asserts-on`, `exercises`,
+`reaches`); the tests to run (`tests.files` lists the files); the decisions and memories anchored
+to the changed code; and the specs that drifted.
 
-Ask: which project? Diff against which base? (default: `main`)
+Rank the changed symbols:
 
-Store as `$DIRECTORY` and `$BASE_REF`.
+| Risk | Rule |
+|------|------|
+| High | Callers that cross a layer, or many callers, and no test that `asserts-on` it |
+| Medium | Callers, with an asserting test |
+| Low | No callers |
 
----
+## Step 3 — Inspect each high-risk symbol
 
-## Step 2 — Detect changed functions and risk scores
+For each one, call `get_subgraph` with `direction: "both"` and `analyze_impact` (depth 2). State:
 
-Call the openlore MCP tool `detect_changes` with:
-```json
-{"directory": "$DIRECTORY", "base": "$BASE_REF"}
+```
+<symbol> (<file>):
+  Callers outside the file: <count, files>
+  Signature or contract changed: yes | no
+  Strongest test evidence: asserts-on | exercises | reaches | none
+  Verdict: safe | needs a direct test first | coordinate with callers
 ```
 
-The risk score is **multiplicative**: `likelihood × impact`.
-- `likelihood` = how much was changed × how poorly covered it is (`"called"` tests count full; `"imported"`-only count 0.3×)
-- `impact` = structural blast radius (log fanIn + distance-weighted transitive callers weighted by callType + external boundary calls)
+Check each claim you will make with `verify_claim` (for example kind `safe-to-change`, or `calls`).
+Call `recall` for facts recorded about the symbol; a stale memory is not evidence.
 
-A function with fanIn=0 calling nothing external scores 0 regardless of change size — correct; focus on non-zero scores.
+## Step 4 — Report
 
-Present a risk-ranked table:
+- **Summary:** changed symbols, high-risk count, symbols with no asserting test.
+- **Risk table** from Step 2, and the verdicts from Step 3.
+- **Tests to run:** `tests.files` from `blast_radius`.
+- **Recommendation:** safe to merge, merge after the named tests, or do not merge yet.
 
-| Rank | Function | File | riskScore | blastRadius | fanIn | testedBy |
-|---|---|---|---|---|---|---|
+## Constraints
 
-Flag:
-- `riskScore ≥ 5` → 🔴 HIGH — must inspect
-- `riskScore 2–5` → 🟡 MEDIUM — inspect if time allows
-- `riskScore < 2` → 🟢 LOW
+- Every risk statement names its proof: a caller, an edge, a test, or a `verify_claim` receipt.
+- An unsupported language or a not-assessed result is reported as such, never as "safe".
 
----
+## Close with one action per finding
 
-## Step 3 — Deep-inspect each HIGH function
-
-For each function with `riskScore ≥ 5`, call `get_minimal_context`:
-```json
-{"directory": "$DIRECTORY", "functionName": "$FUNCTION_NAME"}
-```
-
-**What to read:**
-
-- `function.riskLevel` — `"high"` means the tool expanded caller/callee lists to 24. All shown entries are in the blast radius.
-- `callers[*].callType` — all `"awaited"` = async interface frozen; any signature change breaks every caller without a compile error in JS. Mixed = looser coupling.
-- `callees[*].isExternal: true` — function touches an external boundary (HTTP/DB). Failures here propagate outward and may not be caught in unit tests.
-- `testedBy[*].confidence` — `"called"` = direct test (strong safety net). `"imported"` = test file only imports the module; `vi.mock()` can neutralize it entirely. Only `"imported"` = effectively untested.
-
-For each HIGH function, state:
-```
-$FUNCTION_NAME ($FILE):
-  Interface frozen? [yes — all callers await | no — mixed]
-  External boundary? [yes: $CALLEES | no]
-  Effective coverage: [strong (called) | weak (imported only) | none]
-  Verdict: [safe | needs direct tests first | coordinate with callers before merge]
-```
-
----
-
-## Step 4 — Check cluster density for non-safe HIGH functions
-
-For any HIGH function whose verdict is not "safe":
-```json
-{"directory": "$DIRECTORY", "functionName": "$FUNCTION_NAME"}
-// get_cluster
-```
-
-Read `stats.clusterDensity`:
-
-| Density | Meaning | Action |
-|---|---|---|
-| < 0.05 | Sparse — shared utilities | Change isolated; safe to land independently |
-| 0.05–0.15 | Moderate coupling | Review `internalCallGraph` for transitively dependent functions |
-| > 0.15 | Dense — tightly interwoven | Coordinate whole cluster; consider feature flag or staged rollout |
-
----
-
-## Step 5 — Coverage gap check
-
-For each HIGH or MEDIUM function with `testedBy` empty or all `"imported"`:
-
-> "⚠️ `$FUNCTION_NAME` has no direct test coverage. Changes here are not caught by the test suite unless a test directly calls this function. Recommend adding a characterisation test before merging."
-
-Suggest a concrete test scenario based on the function body from `get_minimal_context`.
-
----
-
-## Step 6 — Output the review
-
-### Summary
-- Total changed: N | HIGH: N | MEDIUM: N | Coverage gaps: N
-
-### Risk table
-(from Step 2)
-
-### Function verdicts (HIGH only)
-(from Steps 3–4)
-
-### Go / No-Go
-- ✅ **Safe to merge** — no HIGH-risk uncovered functions
-- ⚠️ **Merge with caution** — HIGH-risk functions exist but covered by direct tests
-- 🛑 **Do not merge** — HIGH-risk uncovered functions with frozen interfaces or external boundaries
-
----
-
-## Absolute constraints
-
-- Never skip Step 3 for HIGH-risk functions — riskScore alone is not enough
-- Always interpret `callType` — determines whether interface change is breaking
-- Always interpret `testedBy.confidence` — `"imported"` is not strong coverage
-- Do not recommend merging any function with `riskScore ≥ 5`, zero direct tests, and an external callee
+- **Fix it** (or name the fix, since this skill does not edit), with the proof.
+- **Record a decision** when the author accepted a risk on purpose:
+  `openlore decisions record --title "<choice>" --rationale "<proof>" --files <paths>` where the
+  CLI is installed; with the plugin alone, state the decision and its proof in your final message.
+- **Raise it to the human** only when the evidence warrants it: a breaking change to a contract used
+  outside the repository, overriding an accepted decision, an added secret, or a finding that
+  cannot be settled from the evidence.

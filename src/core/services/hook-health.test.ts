@@ -125,6 +125,13 @@ describe('readFindingOutcomes (task 7.2)', () => {
     expect(o.fixed + o.decided + o.open + o.notAssessed).toBe(o.total);
   });
 
+  it('a once-per-session notice is not a finding, even when marked fixed', async () => {
+    const root = fresh();
+    const notice = (state?: string) => ({ ...f(state), code: 'notice', subject: 'slim-digest' });
+    writeRecord(root, 'one', { [ids[0]]: notice('fixed'), [ids[1]]: notice(), [ids[2]]: f('open') });
+    expect(await readFindingOutcomes(root)).toEqual({ total: 1, fixed: 0, decided: 0, open: 1, notAssessed: 0 });
+  });
+
   it('with no records, all zero; a corrupt record counts nothing', async () => {
     const root = fresh();
     expect(await readFindingOutcomes(root)).toEqual({ total: 0, fixed: 0, decided: 0, open: 0, notAssessed: 0 });

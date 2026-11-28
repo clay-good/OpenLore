@@ -17,6 +17,7 @@ import {
   CLONE_MEMBERS_SHOWN,
   INVENTORY_ITEMS_SHOWN,
 } from '../../utils/capped-list.js';
+import { lstatSync } from 'node:fs';
 import { mkdir, readFile, realpath, stat, open as openFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
@@ -33,6 +34,7 @@ import {
   ARTIFACT_REFACTOR_PRIORITIES,
   ARTIFACT_REPO_STRUCTURE,
   ARTIFACT_LLM_CONTEXT,
+  ARTIFACT_SLIM_DIGEST,
   ARTIFACT_DEPENDENCY_GRAPH,
   DEFAULT_MAX_FILES,
   OPENLORE_ANALYSIS_REL_PATH,
@@ -49,7 +51,7 @@ import {
   buildArchitectureOverview,
   writeArchitectureMd,
 } from '../../core/analyzer/architecture-writer.js';
-import { generateCodebaseDigest } from '../../core/analyzer/codebase-digest.js';
+import { ensureSlimDigestCurrent, generateCodebaseDigest } from '../../core/analyzer/codebase-digest.js';
 import { generateAiConfigs, AI_TOOL_TARGETS, type AiTool, type AiConfigResult } from '../../core/analyzer/ai-config-generator.js';
 import {
   acquireAnalysisOwnership,
@@ -657,6 +659,12 @@ After analysis, agents query the index (openlore orient, or the MCP server). Spe
               opts.wait ?? false,
             );
 
+            // The digests are written only by a full run, so an index built before the slim digest
+            // existed (or by an older format of it) would never get one while the source stays
+            // unchanged. Rebuild both from the cached analysis when the slim one is not current
+            // (change: adopt-agent-context-interop). Same inputs, so CODEBASE.md is unchanged.
+            await ensureSlimDigestCurrent(llmContext, { rootPath, outputDir: outputPath, repoStructure, openspecPath: openloreConfig.openspecPath });
+
             // If --ai-configs is requested, generate them even from cached analysis
             if (opts.aiConfigs) {
               let selectedTools: AiTool[] | undefined;
@@ -1049,7 +1057,15 @@ After analysis, agents query the index (openlore orient, or the MCP server). Spe
         console.log(`    ${digestWritten ? '├─' : '└─'} ${safe(opts.output)}SUMMARY.md`);
       }
       if (digestWritten) {
-        console.log(`    └─ ${safe(opts.output)}CODEBASE.md`);
+        // The slim digest can fail on its own (CODEBASE.md is still written): list only what exists.
+        let slimWritten = false;
+        try { slimWritten = lstatSync(join(outputPath, ARTIFACT_SLIM_DIGEST)).isFile(); } catch { /* absent */ }
+        if (slimWritten) {
+          console.log(`    ├─ ${safe(opts.output)}CODEBASE.md`);
+          console.log(`    └─ ${safe(opts.output)}CODEBASE.slim.md`);
+        } else {
+          console.log(`    └─ ${safe(opts.output)}CODEBASE.md`);
+        }
         // Agent-onboarding tip — skipped when `openlore install` runs analyze
         // (install wires CLAUDE.md/.mcp.json/hooks itself, so this would contradict it).
         if (!options.embedded) {

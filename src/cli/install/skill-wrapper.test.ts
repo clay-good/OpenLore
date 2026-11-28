@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
@@ -20,6 +20,23 @@ const HELPER = resolve(REPO_ROOT, 'skills/openlore-orient/scripts/orient-via-mcp
 const SH = resolve(REPO_ROOT, 'skills/openlore-orient/scripts/orient.sh');
 const PS1 = resolve(REPO_ROOT, 'skills/openlore-orient/scripts/orient.ps1');
 const SKILL_MD = resolve(REPO_ROOT, 'skills/openlore-orient/SKILL.md');
+
+/** The five skills the Claude Code plugin ships (change: adopt-agent-context-interop). */
+const PLUGIN_SKILLS = [
+  'openlore-debug',
+  'openlore-implement-story',
+  'openlore-orient',
+  'openlore-review-changes',
+  'openlore-write-tests',
+];
+const MAX_SKILL_LINES = 80;
+
+/** Every OpenLore tool a text names (as a whole word) that is not in `allowed`, sorted. */
+export function uncallableTools(text: string, known: readonly string[], allowed: ReadonlySet<string>): string[] {
+  // A bare name, or one qualified by an MCP client (`mcp__openlore__<tool>`).
+  return known.filter((t) => !allowed.has(t)
+    && new RegExp(`(?:(?<![A-Za-z0-9_])|mcp__[A-Za-z0-9_-]+__)${t}(?![A-Za-z0-9_])`).test(text)).sort();
+}
 
 describe('openlore-orient skill bundle', () => {
   it('orient-via-mcp.mjs exists and references the MCP server', async () => {
@@ -83,5 +100,61 @@ describe('openlore-orient skill bundle', () => {
     expect(sh.mode & 0o111).not.toBe(0);
     const ps1 = await stat(PS1);
     expect(ps1.mode & 0o111).not.toBe(0);
+  });
+});
+
+describe('plugin skills (change: adopt-agent-context-interop)', () => {
+  const read = async (rel: string) => (await readFile(resolve(REPO_ROOT, rel), 'utf8')).split('\r\n').join('\n');
+
+  /** Tools a plugin skill may name: those the `plugin` preset exposes AND the preset `plugin/.mcp.json` wires. */
+  async function callableInPlugin(): Promise<{ known: string[]; allowed: Set<string> }> {
+    const { TOOL_DEFINITIONS, TOOL_PRESETS } = await import('../commands/mcp.js');
+    const mcp = JSON.parse(await read('plugin/.mcp.json')) as { mcpServers: { openlore: { args: string[] } } };
+    const args = mcp.mcpServers.openlore.args;
+    const wired = args[args.indexOf('--preset') + 1];
+    expect(TOOL_PRESETS[wired], `plugin/.mcp.json wires unknown preset "${wired}"`).toBeDefined();
+    const allowed = new Set([...TOOL_PRESETS.plugin].filter((t) => TOOL_PRESETS[wired].has(t)));
+    return { known: TOOL_DEFINITIONS.map((d: { name: string }) => d.name), allowed };
+  }
+
+  it('the plugin ships exactly the five skills', async () => {
+    const dirs = (await readdir(resolve(REPO_ROOT, 'plugin/skills'), { withFileTypes: true }))
+      .filter((d) => d.isDirectory()).map((d) => d.name).sort();
+    expect(dirs).toEqual(PLUGIN_SKILLS);
+  });
+
+  it.each(PLUGIN_SKILLS)('%s is short, has portable frontmatter, and ends with the three actions', async (name) => {
+    const text = await read(`skills/${name}/SKILL.md`);
+    expect(text.trimEnd().split('\n').length).toBeLessThanOrEqual(MAX_SKILL_LINES);
+    const frontmatter = text.match(/^---\n([\s\S]*?)\n---/)?.[1];
+    expect(frontmatter?.split('\n').map((line) => line.split(':', 1)[0])).toEqual(['name', 'description']);
+    expect(text).toMatch(new RegExp(`^name:\\s*${name}$`, 'm'));
+    expect(text).toMatch(/^description:\s*.+Use when.+$/m);
+    const lastSection = text.slice(text.lastIndexOf('\n## '));
+    expect(lastSection).toMatch(/^\n## Close with one action per finding/);
+    for (const action of ['**Fix it**', '**Record a decision**', '**Raise it to the human**']) {
+      expect(lastSection).toContain(action);
+    }
+  });
+
+  it.each(PLUGIN_SKILLS)('%s names only tools the plugin can call', async (name) => {
+    const { known, allowed } = await callableInPlugin();
+    expect(uncallableTools(await read(`skills/${name}/SKILL.md`), known, allowed)).toEqual([]);
+  });
+
+  it('the tool check catches a tool the plugin does not expose', async () => {
+    const { known, allowed } = await callableInPlugin();
+    expect(uncallableTools('Then call `get_change_coupling` and check_spec_drift.', known, allowed))
+      .toEqual(['check_spec_drift', 'get_change_coupling']);
+    // A word that only contains a tool name is not a mention of it.
+    expect(uncallableTools('my_get_change_coupling_helper', known, allowed)).toEqual([]);
+    // An MCP-qualified name is.
+    expect(uncallableTools('call `mcp__openlore__get_change_coupling`', known, allowed)).toEqual(['get_change_coupling']);
+  });
+
+  it.each(PLUGIN_SKILLS)('plugin/skills/%s/SKILL.md is byte-identical to skills/', async (name) => {
+    const canonical = await readFile(resolve(REPO_ROOT, `skills/${name}/SKILL.md`));
+    const copy = await readFile(resolve(REPO_ROOT, `plugin/skills/${name}/SKILL.md`));
+    expect(copy.equals(canonical)).toBe(true);
   });
 });

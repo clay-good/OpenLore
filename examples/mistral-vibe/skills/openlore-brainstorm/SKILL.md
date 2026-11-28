@@ -163,7 +163,7 @@ Only proceed to Step 6 once the user has acknowledged the failure modes.
 Mitigations go into `## Technical Constraints` in the story.
 
 > Note: this IS a gate (waits for user input) because brainstorm is a design phase
-> where changing course is cheap. In contrast, `openlore-implement-story` Step 4b
+> where changing course is cheap. In contrast, `openlore-implement-story` Step 4
 > is a mandatory self-check that does NOT gate — because by implementation time
 > the design decision is already made.
 

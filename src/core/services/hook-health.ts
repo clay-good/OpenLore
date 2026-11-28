@@ -157,9 +157,12 @@ export async function readFindingOutcomes(root: string, now = Date.now()): Promi
       } finally {
         closeSync(fd);
       }
-      const rec = JSON.parse(text) as { findings?: Record<string, { state?: unknown }> };
+      const rec = JSON.parse(text) as { findings?: Record<string, { state?: unknown; code?: unknown }> };
       for (const [identity, f] of Object.entries(rec.findings ?? {})) {
         if (!/^[0-9a-f]{64}$/.test(identity) || !f || typeof f !== 'object') continue;
+        // A once-per-session notice (the no-index line, the silence contract, the slim digest) is
+        // not a finding: counting it would report deliveries as findings shown or fixed.
+        if (f.code === 'notice') continue;
         const prior = findings.get(identity);
         const state = typeof f.state === 'string' ? f.state : undefined;
         // One finding in two sessions: its best outcome counts.

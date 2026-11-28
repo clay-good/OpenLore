@@ -5,68 +5,72 @@ description: Retrieve relevant functions, callers, spec sections, and insertion 
 
 # OpenLore — orient before you read
 
-This project uses **OpenLore** to maintain a deterministic, graph-native model of the codebase: every function, every caller, every spec section, every file. The `orient` tool collapses what would otherwise be a chain of `analyze_codebase → search_code → search_specs → suggest_insertion_points` into a single call.
-
-The single most important habit when working in this repo: **call `orient` before opening source files for any non-trivial task.**
+This project uses **OpenLore** to keep a deterministic, graph-native model of the codebase: every
+function, its callers, the tests that reach it, and the specs and decisions that govern it. One
+`orient` call replaces a chain of searches and file reads.
 
 ## When to use this skill
 
-Call `orient` at the start of any of these:
+- **A task in an area you have not read this session.** Call `orient` before you open files.
+- **An unknown function or symbol.** Ask `orient`, or `search_code`, instead of grepping blind.
+- **A cross-module change.** `orient` ranks insertion points by structural fit.
+- **A freshness note on a tool answer.** When an answer says your context is stale, orient again.
 
-- **New task in the repo** — even ones that feel small. The graph knows things the file tree doesn't.
-- **Unknown function or symbol** — instead of grepping blind, ask `orient` and let it return the function, its callers, and the spec section that owns it.
-- **Planning a cross-module change** — `orient` returns insertion points ranked by structural fit, so you start at the right boundary instead of the most-recently-viewed file.
-- **After an Epistemic Lease prefix appears** — when a tool response says you're stale, re-orient before continuing. Acting on stale context is the most common failure mode.
-
-If you are reading source files without having called `orient` first, you are probably wasting tokens.
+Skip it for a file you are already working in. The prompt hook briefs a prompt only when it names
+code that resolves exactly in the index, so no briefing does not mean there is nothing to find.
 
 ## How to use it
 
-### Preferred: via the OpenLore MCP server
+Call the `orient` MCP tool with the user's own words as `task`. If the tool is not available and
+the CLI is installed, run `openlore orient --json --task "<task>"` (or, when this skill folder has
+them, `bash scripts/orient.sh "<task>"`; on Windows `powershell -File scripts/orient.ps1 "<task>"`).
+Read the result in this order:
 
-If `openlore` is registered as an MCP server in this project (look for `.mcp.json` → `mcpServers.openlore` — the project-scope file Claude Code reads; **not** `.claude/settings.json`, which it ignores for MCP), call the `orient` tool directly through the MCP interface. This is the lowest-latency path and gives the model access to whatever tool surface the server was wired with — the lean 10-tool `navigation` preset by default (`openlore install --preset full` wires all 62), not just `orient`.
+1. **`specDomains`** — the written intent that owns the files, when the repository has any.
+2. **`callPaths`** — who calls the top functions: this is what breaks if you change them.
+3. **`insertionPoints`** — where to make the change. Open source files only here.
 
-### Fallback: via the shell wrapper
+Other fields: `relevantFunctions` (scored, with `filePath` and `startLine`), `relevantFiles`,
+`changeCoupling`, `provenance`, and `suggestedTools`. Pass `lean: true` for a quick "who calls X"
+lookup; it returns only the navigation core.
 
-```sh
-bash scripts/orient.sh "<task description>"
-```
+For a narrower question, use one tool:
 
-(On Windows: `powershell -File scripts/orient.ps1 "<task description>"`)
+| Question | Tool |
+|----------|------|
+| Where is this concept handled? | `search_code` |
+| What calls this, and what does it call? | `get_subgraph` (`direction: "both"`) / `analyze_impact` |
+| How does A reach B? | `find_path` |
+| What does this file contain, without the bodies? | `get_function_skeleton` |
+| What is known about this code from earlier sessions? | `recall` |
+| Is this claim about the code true? | `verify_claim` |
+| What will my diff break? | `blast_radius` |
 
-The wrapper tries the direct CLI subcommand first (`npx --yes openlore orient --json --task "<task>"`) and falls back to driving the `openlore mcp` server over stdio JSON-RPC via the sibling `orient-via-mcp.mjs` helper on older openlore versions that predate the CLI subcommand. Either path produces real orient JSON on stdout. Parse these arrays from the result:
+## What not to do
 
-The result fields are **camelCase** (matching `orient --json`):
+- Do not open source files for a non-trivial task before `orient` returns.
+- Do not call `orient` before every edit. Orient again when the task moves or the answer is stale.
+- Do not paraphrase the task. The user's words match the graph best.
+- Do not treat a quiet result as "nothing there" when the language is not supported; the answer
+  says what was not assessed.
 
-- **`relevantFunctions`** — top scored functions for the task, each with `name`/`file`/`line`, role classification, and a short reason.
-- **`callPaths`** — caller/callee neighbourhood for the top functions. This is where "who breaks if I change this" lives.
-- **`specDomains`** — OpenSpec domains that own the relevant files, including the requirements they encode. Read these before reading code.
-- **`insertionPoints`** — ranked candidate locations to make the change, with structural justification.
-- **`relevantFiles`**, **`provenance`**, **`changeCoupling`**, **`suggestedTools`**, **`nextSteps`** — supporting context. **`searchMode`** is `semantic` when embeddings are built or `bm25_fallback` otherwise.
+## When it fails
 
-Always start by reading **`specDomains`**, then **`callPaths`**, then jump into source only at the **`insertionPoints`** you actually plan to edit.
+- **Empty `relevantFunctions`.** Rephrase with a module, function, or domain name. If that fails,
+  say that `orient` found no match, then grep inside one module.
+- **`isError` with "No analysis found".** The index is not built yet. The hooks start a build on
+  their own; retry after it finishes, or run `openlore analyze` once where the CLI is installed.
+- **A stale index.** Answers still come back with a freshness note. Do not rely on insertion points
+  until the index is rebuilt.
 
-### Lean mode for shallow lookups (cheaper)
+Always tell the user when you fell back to grep, so they can rebuild the index.
 
-For a quick "who calls X" / "where is Y defined" lookup, pass **`lean: true`** (or `orient --lean`): it returns just the navigation core (`relevantFunctions` with `expand` handles, `callPaths`, `specDomains`) — ~40% smaller — and drops the provenance / change-coupling / insertion-points / specs / decisions enrichment, each still one `expand` handle or dedicated tool call away. Omit `lean` when you actually need that enrichment (planning an edit, checking specs/decisions). Caveat (measured, Spec 27): on a *trivial* lookup in a small/familiar repo, even a lean orient call can cost more than just grepping — `orient` earns its keep on unfamiliar or multi-hop work, not one-line facts you could find in 2 reads.
+## Close with one action per finding
 
-> **Note:** the `openlore orient --json --task` CLI subcommand is available, so the wrappers use it directly. The MCP fallback in the wrappers only kicks in on older openlore versions that predate the subcommand.
-
-> **Want to measure it on your own repo?** Pass `--metrics` (off by default) to have `orient` report its wall time and output size to stderr. Nothing is measured or printed unless you ask for it.
-
-## What NOT to do
-
-- **Do not open source files before `orient` has returned.** This is the single most expensive mistake — you'll re-derive what the graph already knows.
-- **Do not call `orient` on every edit.** It's a session-start and re-orient-on-staleness tool, not a per-call helper. Respect the Epistemic Lease signal — if no prefix appears, your context is still fresh.
-- **Do not paraphrase the task** when passing it to `orient`. Use the user's words. The semantic search matches better when the query language matches the eventual prompt.
-- **Do not ignore `specDomains`.** Reading specs first is faster and more accurate than reading code first, in this repo.
-
-## Failure modes
-
-If `orient` returns an empty result or errors:
-
-1. **Empty `relevantFunctions` array** — the task description didn't match the graph. Try rephrasing using a known module name, function name, or domain word from the spec. Do not fall back silently — tell the user that `orient` didn't match and you're going to grep.
-2. **Wrapper output contains `"error": "No analysis found"`** — the codebase hasn't been analyzed yet. Run `npx openlore analyze` once to seed the graph, then retry. The wrapper itself is healthy in this case; the underlying tool is telling you what's missing.
-3. **Graph is stale (mtime older than recent edits)** — the JSON output will still come back, but the insertion points may be wrong. Re-run `npx openlore analyze` to rebuild.
-
-In all failure cases, the correct fallback is a *targeted* `grep`/file read scoped to a single module — not opening the whole repo. And **always tell the user the skill silently degraded** so they can rebuild the graph if needed.
+- **Fix it**, with the caller, edge, or test from the answer as proof.
+- **Record a decision** when the answer made you choose: `openlore decisions record --title
+  "<choice>" --rationale "<proof>" --files <paths>` where the CLI is installed; with the plugin
+  alone, state the decision and its proof in your final message.
+- **Raise it to the human** only when the evidence warrants it: a breaking change to a contract used
+  outside the repository, overriding an accepted decision, an added secret, or a finding you cannot
+  settle from the evidence.

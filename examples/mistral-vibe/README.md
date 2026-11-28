@@ -39,10 +39,10 @@ flowchart TD
     subgraph FEATURE ["⚙️ Feature / Story"]
         E["/openlore-implement-story"] --> F["orient + analyze_impact\nrisk gate ≥ 70 → blocks"]
         F --> F2["adversarial self-check\n+ antipatterns"]
-        F2 --> G["search_specs\nread requirements"]
+        F2 --> G["orient specDomains\nread requirements"]
         G --> H["implement"]
         H --> I["tests green ✅"]
-        I --> J["check_spec_drift"]
+        I --> J["blast_radius\ntests + drift"]
     end
 
     subgraph DEBUG ["🐛 Debug"]
@@ -93,8 +93,8 @@ Copy `antipatterns-template.md` to `.claude/antipatterns.md` in your project:
 cp examples/mistral-vibe/antipatterns-template.md .claude/antipatterns.md
 ```
 
-The antipatterns list is read by `openlore-brainstorm` (Step 1) and `openlore-implement-story` (Step 4b),
-and written by `openlore-debug` (Step 9d) when a bug reveals a cross-cutting failure pattern.
+The antipatterns list is read by `openlore-brainstorm` (Step 1) and `openlore-implement-story` (Step 4),
+and written by `openlore-debug` (Step 7) when a bug reveals a cross-cutting failure pattern.
 
 ## OpenSpec spec baseline
 

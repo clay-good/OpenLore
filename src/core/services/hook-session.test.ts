@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -29,6 +29,47 @@ describe('hook session record', () => {
     await writeSession(root, 's1', rec(['a'], HEAD));
     await writeSession(root, 's1', rec(['b'], 'b'.repeat(40)));
     expect(readSession(root, 's1')).toEqual(rec(['a', 'b'], HEAD));
+  });
+
+  it('never writes or prunes through a symlinked record directory (a repository can commit one)', async () => {
+    const root = fresh();
+    const victim = fresh();
+    writeFileSync(join(victim, 'precious-old.txt'), 'keep');
+    const old = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+    utimesSync(join(victim, 'precious-old.txt'), old, old);
+    mkdirSync(join(root, '.openlore', 'session-ledger'), { recursive: true });
+    symlinkSync(victim, join(root, '.openlore', 'session-ledger', 'hook-delivered'));
+    await writeSession(root, 's1', rec(['a']));
+    expect(readdirSync(victim)).toEqual(['precious-old.txt']);
+    // A symlinked session-ledger folder is refused the same way.
+    const root1 = fresh();
+    mkdirSync(join(root1, '.openlore'));
+    symlinkSync(victim, join(root1, '.openlore', 'session-ledger'));
+    await writeSession(root1, 's1', rec(['a']));
+    expect(readdirSync(victim)).toEqual(['precious-old.txt']);
+    // A symlinked .openlore itself is refused the same way.
+    const root2 = fresh();
+    symlinkSync(victim, join(root2, '.openlore'));
+    await writeSession(root2, 's1', rec(['a']));
+    expect(readdirSync(victim)).toEqual(['precious-old.txt']);
+  });
+
+  it('prunes only its own old records, never another file in the folder', async () => {
+    const root = fresh();
+    await writeSession(root, 'old', rec(['a']));
+    const dir = dirname(deliveredPath(root, 'old'));
+    const tmp = join(dir, `.${'a'.repeat(24)}.json.tmp-999-0`);
+    writeFileSync(join(dir, 'notes.txt'), 'keep');
+    writeFileSync(join(dir, 'config.json'), '{}');
+    writeFileSync(tmp, 'partial');
+    const old = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+    for (const f of [deliveredPath(root, 'old'), join(dir, 'notes.txt'), join(dir, 'config.json'), tmp]) utimesSync(f, old, old);
+    await writeSession(root, 'new', rec(['b']));
+    expect(existsSync(deliveredPath(root, 'old'))).toBe(false);
+    // A stale temp file of an interrupted write is cleaned up too.
+    expect(existsSync(tmp)).toBe(false);
+    expect(existsSync(join(dir, 'notes.txt'))).toBe(true);
+    expect(existsSync(join(dir, 'config.json'))).toBe(true);
   });
 
   it('without a session id, reads nothing and writes nothing', async () => {

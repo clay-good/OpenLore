@@ -94,6 +94,8 @@ export const ARTIFACT_FINGERPRINT = 'fingerprint.json';
 
 /** Factual origin of the live analysis corpus (`source-derived` or `imported`). */
 export const ARTIFACT_ANALYSIS_ORIGIN = 'analysis-origin.json';
+/** The once-per-session slim digest beside `CODEBASE.md` (change: adopt-agent-context-interop). */
+export const ARTIFACT_SLIM_DIGEST = 'CODEBASE.slim.md';
 
 /** Filename for the SQLite call-graph edge store */
 export const ARTIFACT_CALL_GRAPH_DB = 'call-graph.db';

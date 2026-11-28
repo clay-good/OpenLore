@@ -26,6 +26,7 @@ import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { snapshotOldNodes, carryForwardContinuity } from '../decisions/continuity-carry-forward.js';
 import { withAnalysisLock } from '../runtime/advisory-lock.js';
 import { publishGeneration, readCurrentGeneration, REQUIRED_ANALYSIS_ARTIFACTS } from '../runtime/analysis-generation.js';
+import { generateCodebaseDigest } from './codebase-digest.js';
 import {
   clearPartialIndex,
   flushPartialIndex,
@@ -478,6 +479,12 @@ export async function runAnalysisCore(
   // otherwise never collect it. Any published generation supersedes every partial index for
   // this directory, whoever wrote it.
   await clearPartialIndex(outputPath);
+  // The digests describe this generation, whichever path analyzed it (CLI, MCP, API), so the slim
+  // one the prompt hook prints is never left from an older source and its pointer names a file
+  // that exists (change: adopt-agent-context-interop). Non-fatal.
+  await generateCodebaseDigest(artifacts.llmContext, depGraph, {
+    rootPath, outputDir: outputPath, repoStructure: artifacts.repoStructure, openspecPath: config?.openspecPath,
+  });
 
   if (artifacts.extractionLaneNote) emit({ stage: 'artifacts', status: 'warning', detail: artifacts.extractionLaneNote });
   if (artifacts.pass1CacheNote) emit({ stage: 'artifacts', status: 'info', detail: artifacts.pass1CacheNote });
