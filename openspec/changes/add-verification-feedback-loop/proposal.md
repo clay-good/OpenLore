@@ -1,6 +1,6 @@
 # Finish the verify_change receipt: every diff check in one place, before and after the edit
 
-> Priority: P2 · Partly built (the `verify_change` tool and its before-stop hook shipped)
+> Priority: P1 for group 4 (the hand-back at stop) and the fold-ins; P2 for the new findings and the speculative patch · Partly built (the `verify_change` tool and its before-stop hook shipped)
 > Reaches the agent through: `verify_change`; the before-stop hook moment
 > Why it helps the agent: one receipt names every break the diff causes, with proof, at the moment the agent can still fix it.
 
@@ -53,8 +53,8 @@ Receipt shape and inputs:
 **The before-stop receipt speaks to the agent** (roadmap item `stop-hook-speaks-to-agent`). Today
 the before-stop hook prints the receipt as a `systemMessage` (`hook.ts`), so the user sees it, and
 the model sees it only when `enforcement.policy` blocks. This change also makes the receipt reach the
-agent as context, and keeps it quiet when no item is new since the last stop. The design is a later
-task.
+agent: open items that are new since the last stop are handed back once, so the agent fixes them
+or records a decision (ADR-0038, item 4). The design is in `design.md`.
 
 ## What does not change
 

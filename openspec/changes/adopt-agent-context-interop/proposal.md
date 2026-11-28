@@ -1,6 +1,6 @@
 # Five short skills and a slim digest for the Claude Code plugin
 
-> Priority: P2 · Not built
+> Priority: P1 for groups 1-2 (the slim digest and its delivery), P2 for group 3 (skills) · Not built
 > Reaches the agent through: the prompt-submitted moment (slim digest), and plugin skills that call `orient`, `blast_radius`, `verify_change`, `verify_claim`, and `recall`
 > Why it helps the agent: the agent gets a few lines of repository shape once per session and five short recipes, not a long file on every turn.
 
@@ -38,8 +38,9 @@ agent has no short recipe for "debug this," "review my change," or "which tests 
 
 - No new tool, preset, command, or config key. `contextInjection.mode: "off"` also turns the slim
   digest off.
-- `CODEBASE.md` keeps its name, content, and the `@`-import that `openlore install` writes. Current
-  npm, MCP, and Pi users see no difference. Pi keeps `pi.contextMode`.
+- `CODEBASE.md` keeps its name and content. This change does not remove the `@`-import that a
+  generated `CLAUDE.md` holds; `trim-standing-agent-instructions` replaces it with a path pointer
+  once the slim digest exists. Pi keeps `pi.contextMode`.
 - `openlore setup` still installs the full skill set for the harnesses it supports.
 - Local only, no LLM. Works with no spec framework: the spec and decision line is left out when the
   repository has none.
@@ -58,3 +59,10 @@ agent has no short recipe for "debug this," "review my change," or "which tests 
 - `ship-claude-code-plugin` (separate change, folder `plugin/`): it builds the plugin, its hooks,
   and the copy of `openlore-orient`. This change only sets the skill content and the digest.
 - Shipped: `generateCodebaseDigest`, `orient --inject`, the per-session hook record.
+
+## Used by
+
+- `trim-standing-agent-instructions`: drops the full-digest `@`-import once this slim digest ships.
+- `add-session-catch-up-briefing`: prints its catch-up in the same once-per-session block, after the
+  slim digest. Task 2.3's budget rule covers both: the task block is kept first, then the digest,
+  then the catch-up.

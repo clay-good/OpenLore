@@ -27,7 +27,8 @@
       budget in `src/cli/commands/orient-inject-render.ts`. Test:
       `src/cli/commands/orient-inject.test.ts`. Done when digest plus task block never exceeds
       `contextInjection.tokenBudget`, and the task block is the part that is kept when both do not
-      fit.
+      fit. Leave room in the same order for the catch-up block of
+      `add-session-catch-up-briefing` (task block, then digest, then catch-up).
 
 ## 3. Plugin skills
 

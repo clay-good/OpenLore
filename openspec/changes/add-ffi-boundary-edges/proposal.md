@@ -1,6 +1,6 @@
 # Callers across a language boundary appear in the graph
 
-> Priority: P3 · Not built
+> Priority: Later · Not built
 > Reaches the agent through: `blast_radius`, `orient`, `verify_claim` (they become correct across a language seam)
 > Why it helps the agent: it stops calling a Rust or Go function "dead" or "safe to change" when another language calls it through a binding.
 

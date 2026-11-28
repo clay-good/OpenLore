@@ -45,9 +45,12 @@ shipped and are not listed here.
 
 ## 4. Before-stop receipt speaks to the agent (`stop-hook-speaks-to-agent`)
 
-- [ ] 4.1 Design and build delivery of the before-stop receipt to the agent as context, quiet when
-      no item is new since the last stop (`src/cli/commands/hook.ts`). Test: `hook.test.ts`. Done
-      when the design is written here and a repeat stop with no new item prints nothing.
+- [ ] 4.1 Build the hand-back in `design.md` (`src/cli/commands/hook.ts`, `before-stop`). Test:
+      `hook.test.ts`. Done when a stop with a new open item returns `decision: "block"` with the
+      receipt once, a stop with `stop_hook_active: true` never blocks, a repeat stop with the same
+      item set prints nothing to the agent, and `hooks.before-stop: false` turns it off.
+- [ ] 4.2 Record each hand-back and its outcome (fixed, decided, still open) for
+      `add-pushed-evidence-yield`. Test: `src/core/services/hook-session.test.ts`.
 
 ## 5. Docs and parity
 

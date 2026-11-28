@@ -1,6 +1,6 @@
 # Comment and format edits stop marking the index stale
 
-> Priority: P2 · Not built
+> Priority: P1 · Not built (a false "stale" flag costs trust the way a wrong grep result would)
 > Reaches the agent through: the after-edit moment (the index is current sooner, with no false stale flags), and the freshness note on `orient`, `recall`, and `blast_radius`
 > Why it helps the agent: after an edit that changed no structure, answers stay fresh and the agent is not told to re-orient for nothing.
 

@@ -1,6 +1,6 @@
 # A smaller product: one copy of each skill, fewer docs, a lean package, a short README
 
-> Priority: P1 · Not built
+> Priority: P2 · Not built (the skill and digest parts that reach the agent are in `adopt-agent-context-interop` and `trim-standing-agent-instructions`)
 > Reaches the agent through: the skills that the plugin, `openlore setup` and Pi offer; `openlore --help`. No hook moment and no tool answer changes.
 > Why it helps the agent: the agent is offered 11 current skills and no stale ones, and a person finds the few things that matter first.
 

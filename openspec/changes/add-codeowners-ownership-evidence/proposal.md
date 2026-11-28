@@ -1,6 +1,6 @@
 # Name the owners a change touches, from the repository's CODEOWNERS file
 
-> Priority: P3 · Not built
+> Priority: Later · Not built
 > Reaches the agent through: `blast_radius`, `verify_change` (and so the before-stop hook)
 > Why it helps the agent: it can name the right human in its final message or PR body.
 

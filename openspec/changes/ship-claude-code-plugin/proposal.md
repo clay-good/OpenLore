@@ -1,5 +1,9 @@
 # Ship OpenLore as a Claude Code plugin
 
+> Priority: P1 · Mostly built (#727, pinned to 3.8.0 in #801). Left: a week of daily use on three OS, the `doctor` double-wiring check, and the directory submission
+> Reaches the agent through: every hook moment and the `plugin` tool set, from one install
+> Why it helps the agent: the evidence arrives with no setup, and stays current.
+
 ## Why
 
 Claude Code users install OpenLore with `npm install -g openlore && openlore install`. That works,

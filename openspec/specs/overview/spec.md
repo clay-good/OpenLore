@@ -32,6 +32,7 @@ This system is organized into the following domains (each link resolves to a spe
 | Architecture | The layered architecture, the unified structural substrate, and the six closed capability families every MCP tool declares. | [spec.md](../architecture/spec.md) |
 | Cli | The `openlore` command surface (analyze, orient, mcp, install, decisions, drift, status, …) and its progress/output rendering. | [spec.md](../cli/spec.md) |
 | Config | Reads, writes, and merges `.openlore/config.json` and `openspec/config.yaml`, including directory setup and the spec-store binding. | [spec.md](../config/spec.md) |
+| Configuration-assistant | Inspects a repository and recommends, plans, applies, verifies, and rolls back OpenLore configuration with evidence (shipped in #720). | [spec.md](../configuration-assistant/spec.md) |
 | Drift | Detects spec/code drift between changes and the spec corpus, and computes memory/decision staleness against git history. | [spec.md](../drift/spec.md) |
 | Generator | Generates OpenSpec-formatted specifications and mapping artifacts from analysis results. | [spec.md](../generator/spec.md) |
 | Llm | A unified interface over LLM providers (Anthropic, OpenAI-compatible, Gemini, CLI-backed providers) used for the generation paths, with a mock provider for tests. | [spec.md](../llm/spec.md) |

@@ -4,12 +4,11 @@
 
 ### Requirement: ExtractionFactEarlyCutoff
 
-The incremental update SHALL compute a deterministic digest of each changed file's extracted facts
-with byte positions left out, and SHALL stop propagation when the digest equals the stored digest
-for that file: the file's own records are updated, no dependent file is parsed again, and no file
-is marked stale. The comparison SHALL use extracted facts only, never modification times. The
-digest SHALL carry a version stamp, and digests with different stamps SHALL NOT be compared. When
-the digests differ, behavior SHALL be the same as before this change.
+The incremental update SHALL compute a deterministic digest of each changed file's extracted
+facts, without byte positions, and SHALL stop propagation when it equals the stored digest: only
+that file's records are updated, no dependent file is parsed again, and no file is marked stale.
+The comparison SHALL use extracted facts only, never modification times. Digests with different
+version stamps SHALL NOT be compared. When the digests differ, behavior SHALL NOT change.
 
 #### Scenario: A comment-only edit costs one parse
 

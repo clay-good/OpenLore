@@ -13,7 +13,7 @@
 ## 2. Before the directory submission
 
 - [ ] 2.1 Use the plugin daily for one week through the self-hosted marketplace on macOS, Windows, and Linux; record problems in this file.
-- [ ] 2.2 After 3.7.0 is on npm: run `node scripts/sync-plugin-version.mjs 3.7.0`; merge `chore(plugin): pin openlore 3.7.0`. Accept: `plugin-smoke` passes on all three OS.
+- [x] 2.2 (done for 3.8.0 in #801) After 3.7.0 is on npm: run `node scripts/sync-plugin-version.mjs 3.7.0`; merge `chore(plugin): pin openlore 3.7.0`. Accept: `plugin-smoke` passes on all three OS.
 - [ ] 2.3 `openlore doctor` reports when both the plugin and CLI wiring are present, and names `openlore uninstall`. Files: `src/cli/commands/doctor.ts`. Test: a doctor test with a settings file carrying `_openlore` hooks and a plugin entry in `installed_plugins.json`.
 - [ ] 2.4 Submit at claude.ai/directory/manage. Expect a human hold for the runtime install; answer the data-handling questions from the README's disclosure.
 

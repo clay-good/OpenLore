@@ -1,6 +1,6 @@
 # A log line or error message arrives with the code that emitted it
 
-> Priority: P2 · Not built
+> Priority: P1 · Not built
 > Reaches the agent through: the after-edit hook moment (`after-tools`, a failed shell command) and the prompt-submitted hook moment (`orient --inject`); optionally a `verify_claim` kind
 > Why it helps the agent: it starts at the emitting line instead of grepping fragments of an interpolated message.
 

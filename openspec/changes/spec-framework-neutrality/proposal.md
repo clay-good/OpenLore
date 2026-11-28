@@ -1,6 +1,6 @@
 # Work with any spec or test workflow, and with none
 
-> Priority: P1 · Not built
+> Priority: P2 · Partly built (groups 1-5 shipped: #751, #753, #754, #756, #772, #771, #773, #798). Next: group 8 (ADR folders), then 6-7, 9-11
 > Reaches the agent through: `orient`, `blast_radius`, `verify_change`, `verify_claim`, and `recall` (no new tool, no new hook)
 > Why it helps the agent: it gets the repo's written intent from where the team keeps it (OpenSpec, Spec Kit, BMAD, ADRs, plain requirements, tests), and an honest "no spec source found" when there is none. OpenLore works the same with no spec framework.
 
@@ -48,8 +48,8 @@ not fit.
 - **Config:** `openspecPath` becomes optional. One new optional key, `adrPaths`, names extra ADR
   folders to read.
 - **Text:** tool descriptions, install messages, skills and docs say "spec source" where the
-  behavior is general and "OpenSpec" only where the format is OpenSpec. The prompt hint for other
-  workflows is `add-openspec-proposal-orientation`.
+  behavior is general and "OpenSpec" only where the format is OpenSpec. A prompt hint for other
+  workflows was planned in `add-openspec-proposal-orientation`; it is cut (ROADMAP "Not doing").
 
 ## What does not change
 
