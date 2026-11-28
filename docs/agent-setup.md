@@ -139,7 +139,7 @@ If you only need one server entry and want every tool searchable, use `alwaysLoa
 The full surface stays navigable despite its size because every tool declares one of six **capability families** — `navigate` · `change` · `remember` · `verify` · `coordinate` · `federate` — carried in its MCP `annotations.family`, so a client (or Tool Search) can group rather than face a flat list. Inspect any surface grouped by family with `openlore mcp --preset full --list-tools`.
 
 **Cline / Roo Code / Kilocode** — run `openlore install --agent cline`. It writes the same short
-managed block into `.clinerules/openlore.md`. These hosts run no OpenLore hooks, so the agent calls
+managed block into the `.clinerules` file. These hosts run no OpenLore hooks, so the agent calls
 `openlore orient "<task>"` itself and reads `.openlore/analysis/CODEBASE.md` when a task needs it.
 
 > **Note:** `.openlore/analysis/` is git-ignored — each developer generates it locally. Re-run `openlore analyze` after significant structural changes to keep the digest current.

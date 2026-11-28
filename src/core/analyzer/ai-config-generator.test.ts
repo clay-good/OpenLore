@@ -119,17 +119,21 @@ describe('generateAiConfigs', () => {
     expect(claude.split('\n')).toContain('@.openlore/analysis/CODEBASE.md');
   });
 
-  it('non-Claude format uses HTML comment reference', async () => {
-    await generateAiConfigs({
-      rootDir: tmpDir,
-      analysisDir: '.openlore/analysis',
-      projectName: 'my-project',
-      tools: ['cursor'],
-    });
-
-    const content = await readFile(join(tmpDir, '.cursorrules'), 'utf-8');
-    expect(content).toContain('<!-- Import or paste .openlore/analysis/CODEBASE.md here');
-    expect(content).not.toContain('@.openlore/analysis/CODEBASE.md');
+  it('non-Claude formats name the digest path whether or not the Claude prompt hook delivers it', async () => {
+    for (const slimDigestDelivered of [false, true]) {
+      await rm(join(tmpDir, '.cursorrules'), { force: true });
+      await generateAiConfigs({
+        rootDir: tmpDir,
+        analysisDir: '.openlore/analysis',
+        projectName: 'my-project',
+        tools: ['cursor'],
+        slimDigestDelivered,
+      });
+      const content = await readFile(join(tmpDir, '.cursorrules'), 'utf-8');
+      expect(content).toContain('Full repository digest, for a task that needs it: `.openlore/analysis/CODEBASE.md`.');
+      expect(content).not.toContain('Import or paste');
+      expect(content).not.toContain('@.openlore/analysis/CODEBASE.md');
+    }
   });
 
   it('content contains project name', async () => {
@@ -161,7 +165,7 @@ describe('generateAiConfigs', () => {
     expect(content).not.toContain('Then, by situation');
     // Install never rewrites this file, so the section does not promise a regeneration.
     expect(content).not.toMatch(/regenerat/i);
-    expect(content).toContain('OpenLore does not rewrite this file');
+    expect(content).toContain('OpenLore does not rewrite this section');
   });
 
   it('creates nested directory for .clinerules/openlore.md', async () => {

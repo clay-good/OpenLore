@@ -10,7 +10,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { collectHookMoments, collectIndexStatus, collectWiringScope, findLegacyDigestImport, formatHookHealth, formatLegacyDigestImport, statusCommand } from './status.js';
+import { collectHookMoments, collectIndexStatus, collectWiringScope, findDigestNotes, findLegacyDigestImport, formatHookHealth, formatLegacyDigestImport, formatUnservedDigestPointer, statusCommand } from './status.js';
 import { renderBlock } from '../install/block.js';
 import { renderSlimDigest } from '../../core/analyzer/codebase-digest.js';
 import { _resetVectorIndexCachesForTesting } from '../../core/analyzer/vector-index.js';
@@ -459,7 +459,7 @@ describe('openlore status — a legacy full-digest import', () => {
   });
 
   /** The real delivery check end to end: a digest analyze would write, and the prompt hook wired or not. */
-  async function statusThroughRealCheck(wired: boolean, args: string[] = []): Promise<string> {
+  async function statusThroughRealCheck(wired: boolean, args: string[] = [], line = '@.openlore/analysis/CODEBASE.md'): Promise<string> {
     await withDigest();
     await writeFile(join(root, ANALYSIS, 'llm-context.json'), '{}', 'utf-8');
     await writeFile(join(root, ANALYSIS, 'CODEBASE.slim.md'), renderSlimDigest({
@@ -474,7 +474,7 @@ describe('openlore status — a legacy full-digest import', () => {
         hooks: { UserPromptSubmit: [{ _openlore: true, hooks: [{ type: 'command', command: 'npx --yes openlore orient --inject' }] }] },
       }), 'utf-8');
     }
-    await writeFile(join(root, 'CLAUDE.md'), '# demo\n\n@.openlore/analysis/CODEBASE.md\n', 'utf-8');
+    await writeFile(join(root, 'CLAUDE.md'), `# demo\n\n${line}\n`, 'utf-8');
     const cwd = process.cwd();
     const lines: string[] = [];
     const log = console.log;
@@ -533,6 +533,7 @@ describe('openlore status — a legacy full-digest import', () => {
     const blockLines = block.split('\n').length;
     const found = await findLegacyDigestImport(root, reaches);
     expect(found?.lines).toEqual([1, blockLines + 7]);
+    expect(formatLegacyDigestImport(found!)).toContain(`CLAUDE.md lines 1, ${blockLines + 7} import .openlore/analysis/CODEBASE.md`);
     expect(formatLegacyDigestImport(found!)).toContain(`Delete lines 1, ${blockLines + 7} of CLAUDE.md.`);
   });
 
@@ -545,6 +546,30 @@ describe('openlore status — a legacy full-digest import', () => {
     ].join('\n');
     await writeFile(join(root, 'CLAUDE.md'), file, 'utf-8');
     expect((await findLegacyDigestImport(root, reaches))?.lines).toEqual([9]);
+  });
+
+  it('skips an import inside a multi-line HTML comment', async () => {
+    await withDigest();
+    await writeFile(join(root, 'CLAUDE.md'), ['<!--', '@.openlore/analysis/CODEBASE.md', '-->', '@.openlore/analysis/CODEBASE.md'].join('\n'), 'utf-8');
+    expect((await findLegacyDigestImport(root, reaches))?.lines).toEqual([4]);
+  });
+
+  it('names a generated pointer line when the slim digest does not reach the agent', async () => {
+    await withDigest();
+    await writeFile(join(root, 'CLAUDE.md'), '# demo\n\nFull repository digest, for a task that needs it: `.openlore/analysis/CODEBASE.md`.\n', 'utf-8');
+    const notes = await findDigestNotes(root, doesNotReach);
+    expect(notes).toEqual({ unservedDigestPointer: { file: 'CLAUDE.md', lines: [3] } });
+    const line = formatUnservedDigestPointer(notes.unservedDigestPointer!);
+    expect(line).toContain('CLAUDE.md:3 names .openlore/analysis/CODEBASE.md instead of importing it');
+    expect(line).toContain('Replace the line with @.openlore/analysis/CODEBASE.md');
+    // While the digest reaches the agent, the pointer is right and nothing is said.
+    expect(await findDigestNotes(root, reaches)).toEqual({});
+  });
+
+  it('prints the pointer note through the real delivery check when no hook is wired', async () => {
+    const out = await statusThroughRealCheck(false, [], 'Full repository digest, for a task that needs it: `.openlore/analysis/CODEBASE.md`.');
+    expect(out.split('\n').filter(line => line.includes('Digest pointer'))).toHaveLength(1);
+    expect(await statusThroughRealCheck(true, [], 'Full repository digest, for a task that needs it: `.openlore/analysis/CODEBASE.md`.')).not.toContain('Digest pointer');
   });
 
   it('says nothing without a CLAUDE.md or without the full digest', async () => {

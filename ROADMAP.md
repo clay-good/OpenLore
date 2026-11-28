@@ -44,6 +44,8 @@ trusts the answer.
 | `openlore doctor` / `status --json` | Doctor warns about an LLM key on every fresh repository; `status --json` says no hook moment is wired while doctor counts 9 | Treat the optional LLM as optional; report wiring the same way in both |
 | Decisions-gate block (`agentInstructionsBlock`, `decisions.ts`) | An install in a git repository adds about 2.2 KB of standing text: a playbook for a gate the default autopilot never blocks | Keep the record command; write the playbook only when blocking review is on |
 | Managed block on Cline and `AGENTS.md` | Says "Wired MCP surface" and names the `orient` tool where those adapters register no MCP server | Write the CLI-only form for a surface with no MCP registration |
+| `openlore analyze --output <dir in the repository>` | Always fails with "Source files changed during analysis publication … Retry analysis": the output is written inside the source tree, so retrying cannot help | Leave the output directory out of the source fingerprint |
+| `install --agent cline` / `claude-code` path refusal | Stops when `.clinerules` is a directory (which `analyze --ai-configs` creates) or `CLAUDE.md` links to `AGENTS.md`, and says a link resolves outside the repository when none does | Name the real cause; write into the `.clinerules` directory form |
 
 ## Next release (in this order)
 

@@ -191,6 +191,7 @@ const ALLOWED_RAW_INTERPOLATIONS: Record<string, readonly string[]> = {
     "label('Wiring scope')",
     "label('Session ledger')",
     "label('Legacy import')",
+    "label('Digest pointer')",
     "label('Loop hooks')",
     "label('Hook health')",
     "label('Index build')",

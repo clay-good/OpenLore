@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
 import { OPENLORE_BLOCK_BEGIN, OPENLORE_BLOCK_END } from '../../utils/openlore-managed-file.js';
+import { digestPointerLine } from '../../core/analyzer/ai-config-generator.js';
 import { LOOP_MOMENTS } from '../../core/services/hook-session.js';
 import { formatBuildProgress, readBuildProgress, type BuildProgress } from '../../core/services/build-progress.js';
 import { readFindingOutcomes, readHookHealth, type FindingOutcomes, type MomentHealth } from '../../core/services/hook-health.js';
@@ -107,6 +108,17 @@ export interface IndexStatus {
    * trim-standing-agent-instructions). Set by `openlore status` only; status never edits the file.
    */
   legacyDigestImport?: LegacyDigestImport;
+  /**
+   * A generated `CLAUDE.md` pointer line (no import) while the slim digest does not reach the
+   * agent, for example after injection was turned off. Set by `openlore status` only.
+   */
+  unservedDigestPointer?: UnservedDigestPointer;
+}
+
+export interface UnservedDigestPointer {
+  file: 'CLAUDE.md';
+  /** 1-based line numbers of each generated pointer line outside the managed block. */
+  lines: number[];
 }
 
 export interface LegacyDigestImport {
@@ -124,61 +136,109 @@ const LEGACY_DIGEST_IMPORT = `@${OPENLORE_DIR}/${OPENLORE_ANALYSIS_SUBDIR}/${ART
 const CLAUDE_MD_MAX_BYTES = 1_048_576;
 
 /**
- * Find a legacy full-digest `@`-import in the repository's `CLAUDE.md`. Reported only when it is
- * dead weight: the slim digest reaches the agent through the prompt hook (`reaches`), the full
- * digest exists, and the line is outside the managed block and outside a code fence (a
- * user-owned import; `openlore install` never touches it). Read-only and fail-soft: an unreadable
- * or oversized file reports nothing.
+ * Lines of the repository's `CLAUDE.md` that the agent loads (outside the managed block, code
+ * fences, and HTML comments) and that are exactly the legacy import or the generated pointer.
  */
-export async function findLegacyDigestImport(
-  rootPath: string,
-  // Loaded lazily: the status line imports this module on every render and never needs it.
-  reaches: (rootPath: string) => Promise<boolean> = async root => (await import('./slim-digest-delivery.js')).slimDigestReachesAgent(root),
-): Promise<LegacyDigestImport | null> {
-  let digestBytes: number;
-  try {
-    const digest = statSync(join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DIGEST));
-    if (!digest.isFile()) return null;
-    digestBytes = digest.size;
-  } catch {
-    return null;
-  }
-  let text: string;
-  try {
-    text = await readFileConfined(rootPath, 'CLAUDE.md', CLAUDE_MD_MAX_BYTES);
-  } catch {
-    return null;
-  }
-  const lines: number[] = [];
+function scanClaudeMd(text: string): { imports: number[]; pointers: number[] } {
+  const imports: number[] = [];
+  const pointers: number[] = [];
+  const pointer = digestPointerLine(`${OPENLORE_DIR}/${OPENLORE_ANALYSIS_SUBDIR}`);
   let inBlock = false;
+  let inComment = false;
   let fence: string | null = null;
   text.split(/\r?\n/).forEach((line, i) => {
     // CommonMark fences: up to 3 spaces of indent; a closing fence repeats the opening character
     // at least as many times, with nothing after it but spaces.
-    if (fence === null) {
+    if (fence === null && !inComment) {
       const open = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
       if (open) { fence = open; return; }
-    } else {
+    } else if (fence !== null) {
       const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line)?.[1];
       if (close && close[0] === fence[0] && close.length >= fence.length) fence = null;
       return;
     }
     if (line.includes(OPENLORE_BLOCK_BEGIN)) inBlock = true;
+    // A multi-line HTML comment: whether Claude Code reads an import there is not assumed.
+    const wasComment = inComment;
+    const open = line.lastIndexOf('<!--');
+    const close = line.lastIndexOf('-->');
+    if (open > close) inComment = true;
+    else if (close >= 0 && inComment) inComment = false;
     // Only the exact unindented line counts: an indented one may be a code block, where Claude
     // Code does not evaluate an import, so it is left unreported (the safe direction).
-    if (!inBlock && line.trimEnd() === LEGACY_DIGEST_IMPORT) lines.push(i + 1);
+    if (!inBlock && !wasComment && !inComment) {
+      const exact = line.trimEnd();
+      if (exact === LEGACY_DIGEST_IMPORT) imports.push(i + 1);
+      else if (exact === pointer) pointers.push(i + 1);
+    }
     if (line.includes(OPENLORE_BLOCK_END)) inBlock = false;
   });
-  if (!lines.length) return null;
-  return (await reaches(rootPath)) ? { file: 'CLAUDE.md', lines, digestBytes } : null;
+  return { imports, pointers };
 }
+
+export interface DigestNotes {
+  legacyDigestImport?: LegacyDigestImport;
+  unservedDigestPointer?: UnservedDigestPointer;
+}
+
+/**
+ * The two `CLAUDE.md` notes `openlore status` gives about the full digest, both decided by whether
+ * the slim digest reaches the agent (`reaches`):
+ * - a legacy `@`-import while the slim digest reaches the agent: dead weight on every turn;
+ * - a generated pointer line while it does not: the agent gets neither digest by itself.
+ * Read-only and fail-soft: no full digest, or an unreadable or oversized file, gives no note.
+ */
+export async function findDigestNotes(
+  rootPath: string,
+  // Loaded lazily: the status line imports this module on every render and never needs it.
+  reaches: (rootPath: string) => Promise<boolean> = async root => (await import('./slim-digest-delivery.js')).slimDigestReachesAgent(root),
+): Promise<DigestNotes> {
+  let digestBytes: number;
+  try {
+    const digest = statSync(join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DIGEST));
+    if (!digest.isFile()) return {};
+    digestBytes = digest.size;
+  } catch {
+    return {};
+  }
+  let text: string;
+  try {
+    text = await readFileConfined(rootPath, 'CLAUDE.md', CLAUDE_MD_MAX_BYTES);
+  } catch {
+    return {};
+  }
+  const { imports, pointers } = scanClaudeMd(text);
+  if (!imports.length && !pointers.length) return {};
+  const delivered = await reaches(rootPath);
+  if (delivered && imports.length) return { legacyDigestImport: { file: 'CLAUDE.md', lines: imports, digestBytes } };
+  if (!delivered && pointers.length && !imports.length) return { unservedDigestPointer: { file: 'CLAUDE.md', lines: pointers } };
+  return {};
+}
+
+/** The legacy-import note alone (see `findDigestNotes`). */
+export async function findLegacyDigestImport(
+  rootPath: string,
+  reaches?: (rootPath: string) => Promise<boolean>,
+): Promise<LegacyDigestImport | null> {
+  return (await findDigestNotes(rootPath, reaches)).legacyDigestImport ?? null;
+}
+
+const where = (file: string, lines: number[]): string =>
+  lines.length === 1 ? `${file}:${lines[0]}` : `${file} lines ${lines.join(', ')}`;
 
 /** The one status line for a legacy import, naming the lines to delete. */
 export function formatLegacyDigestImport(found: LegacyDigestImport): string {
-  const where = found.lines.map(n => `${found.file}:${n}`).join(', ');
   const which = found.lines.length === 1 ? `line ${found.lines[0]}` : `lines ${found.lines.join(', ')}`;
-  return `${where} imports ${LEGACY_DIGEST_IMPORT.slice(1)} (${found.digestBytes.toLocaleString('en-US')} bytes) on every turn; ` +
+  return `${where(found.file, found.lines)} ${found.lines.length === 1 ? 'imports' : 'import'} ${LEGACY_DIGEST_IMPORT.slice(1)} ` +
+    `(${found.digestBytes.toLocaleString('en-US')} bytes) on every turn; ` +
     `the prompt hook already gives the agent the slim digest once per session. Delete ${which} of ${found.file}.`;
+}
+
+/** The one status line for a pointer the slim digest does not back up. */
+export function formatUnservedDigestPointer(found: UnservedDigestPointer): string {
+  return `${where(found.file, found.lines)} names ${LEGACY_DIGEST_IMPORT.slice(1)} instead of importing it, but the prompt hook ` +
+    `does not give the agent the slim digest here, so neither digest reaches it by itself. ` +
+    `Replace the line with ${LEGACY_DIGEST_IMPORT}, or wire the prompt hook with \`openlore install\`.`;
 }
 
 export type SessionStatus =
@@ -457,8 +517,7 @@ Read-only: this never builds, rebuilds, or locks the index.
       hookMoments: collectHookMoments(rootPath),
       ...(health.length ? { hookHealth: health, hookOutcomes: await readFindingOutcomes(rootPath) } : {}),
     };
-    const legacyImport = await findLegacyDigestImport(rootPath);
-    if (legacyImport) status.legacyDigestImport = legacyImport;
+    Object.assign(status, await findDigestNotes(rootPath));
 
     if (options.json) {
       console.log(jsonOutput(status));
@@ -492,6 +551,9 @@ Read-only: this never builds, rebuilds, or locks the index.
 
     if (status.legacyDigestImport) {
       console.log(`  ${label('Legacy import')} ${c.yellow(safe(formatLegacyDigestImport(status.legacyDigestImport)))}`);
+    }
+    if (status.unservedDigestPointer) {
+      console.log(`  ${label('Digest pointer')} ${c.yellow(safe(formatUnservedDigestPointer(status.unservedDigestPointer)))}`);
     }
 
     // Everything printed below that came from the repository — its config, its index
