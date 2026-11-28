@@ -26,6 +26,8 @@ import { validateDirectory, readCachedContext, safeJoin } from './utils.js';
 import { isGitRepository, getRepoPrefix, resolveBaseRef, validateGitRef, getChangedFiles } from '../../drift/git-diff.js';
 import { gitPathArgs } from '../../../utils/git-args.js';
 import { CallGraphBuilder, serializeCallGraph } from '../../analyzer/call-graph.js';
+import type { FileParseHealth } from '../../analyzer/parse-health.js';
+import { emittedText } from '../generated-file-guard.js';
 import { detectLanguage } from '../../analyzer/signature-extractor.js';
 import { signatureShape } from '../../scip/moniker.js';
 import { readOpenLoreConfig } from '../config-manager.js';
@@ -256,6 +258,10 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
     ...(oldBuild.failed ? ['old (base)'] : []),
     ...(newBuild.failed ? ['new (head)'] : []),
   ];
+  const parseFailures = [
+    ...oldBuild.unparsed.map(u => ({ ...u, file: emittedText(u.file), revision: 'base' as const })),
+    ...newBuild.unparsed.map(u => ({ ...u, file: emittedText(u.file), revision: 'head' as const })),
+  ];
 
   const oldList = oldGraph.nodes.filter(isCode);
   const newList = newGraph.nodes.filter(isCode);
@@ -433,8 +439,10 @@ export async function handleStructuralDiff(input: StructuralDiffInput): Promise<
         gated: deprecatedGate.gated,
       },
     } : {}),
+    // Per file and revision; `base` is the merge-base the old side was read at (#807).
+    ...(parseFailures.length ? { parseFailures } : {}),
     checkWeakening: weakening,
-    soundness: diffSoundness(false, failedSnapshots),
+    soundness: diffSoundness(false, failedSnapshots, parseFailures.length),
   };
 }
 
@@ -607,15 +615,33 @@ function edgePair(e: { callerId: string; calleeId: string; calleeName: string },
   const caller = g.nodes.find(n => n.id === e.callerId);
   return { caller: caller?.name ?? e.callerId, callee: e.calleeName, file: caller?.filePath ?? '' };
 }
-async function safeBuild(files: InFile[]): Promise<{ graph: SerializedCallGraph; failed: boolean }> {
+async function safeBuild(files: InFile[]): Promise<{ graph: SerializedCallGraph; failed: boolean; unparsed: Array<{ file: string; cause: string }> }> {
   // An empty file set is a legitimate empty snapshot (e.g. an all-added change has
   // no old files), NOT a build failure — only the catch path is a parse boundary.
-  if (files.length === 0) return { graph: emptyGraph(), failed: false };
+  if (files.length === 0) return { graph: emptyGraph(), failed: false, unparsed: [] };
   try {
-    return { graph: serializeCallGraph(await new CallGraphBuilder().build(files)), failed: false };
+    const result = await new CallGraphBuilder().build(files);
+    return { graph: serializeCallGraph(result), failed: false, unparsed: unparsedFiles(result.parseHealthByFile) };
   } catch {
-    return { graph: emptyGraph(), failed: true };
+    return { graph: emptyGraph(), failed: true, unparsed: [] };
   }
+}
+
+/**
+ * Files of one snapshot that did not parse cleanly, with the cause. Their symbols can be missing
+ * from that side, so an add or remove there may be a parse artifact (#807).
+ */
+function unparsedFiles(health: ReadonlyMap<string, FileParseHealth> | undefined): Array<{ file: string; cause: string }> {
+  const out: Array<{ file: string; cause: string }> = [];
+  for (const h of health?.values() ?? []) {
+    if (h.parseFailed) out.push({ file: h.filePath, cause: 'could not be parsed' });
+    else if (h.errorCount > 0 || h.missingCount > 0) {
+      const lines = h.errorLines.slice(0, 3);
+      const more = h.truncated || h.errorLines.length > 3 ? ', …' : '';
+      out.push({ file: h.filePath, cause: lines.length > 0 ? `syntax error at line${lines.length > 1 ? 's' : ''} ${lines.join(', ')}${more}` : 'syntax error' });
+    }
+  }
+  return out.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
 }
 function emptyGraph(): SerializedCallGraph {
   return { nodes: [], edges: [], classes: [], inheritanceEdges: [], hubFunctions: [], entryPoints: [], layerViolations: [],
@@ -624,7 +650,7 @@ function emptyGraph(): SerializedCallGraph {
 function emptySummary() {
   return { addedFunctions: 0, removedFunctions: 0, signatureChanges: 0, addedEdges: 0, removedEdges: 0, staleCallers: 0, renameCandidates: 0, deprecatedCallsAdded: 0 };
 }
-function diffSoundness(empty: boolean, failedSnapshots?: string[]): { posture: string; caveats: string[] } {
+function diffSoundness(empty: boolean, failedSnapshots?: string[], unparsedFiles = 0): { posture: string; caveats: string[] } {
   const caveats = [
 'A cross-file pair sharing a content-addressed stable id (name + parameter shape) is reported as a move with confidence "stable-id" — a strong signal, but NOT proof: a symbol that was deleted and independently replaced by a same-name/same-shape homonym is indistinguishable, so verify rather than assume "same symbol". The stable id is matched only when unique within the changed-file set (a same-shape symbol in an unchanged file is not considered). Identifier renames and symbols without a stable id (anonymous/synthetic) stay heuristic — paired by signature shape and reported separately.',
     'Signature-change detection is limited to what the analyzer extracts per language; cross-language signature notions differ.',
@@ -636,6 +662,9 @@ function diffSoundness(empty: boolean, failedSnapshots?: string[]): { posture: s
   if (failedSnapshots && failedSnapshots.length > 0) {
     const plural = failedSnapshots.length > 1;
     caveats.push(`The ${failedSnapshots.join(' and ')} snapshot${plural ? 's' : ''} could not be parsed into a call graph (build failure); ${plural ? 'their' : 'its'} side of the delta is unavailable and this comparison is NOT authoritative — symbols shown as added or removed against the failed side may be parse artifacts, not real changes. Disclosed parse-failure boundary, not a clean empty comparison.`);
+  }
+  if (unparsedFiles > 0) {
+    caveats.push(`${unparsedFiles} file revision(s) did not parse cleanly (see \`parseFailures\`); symbols there can be missing from that side, so an add or remove in those files may be a parse artifact.`);
   }
   return { posture: 'structural-complement-to-git-diff', caveats };
 }

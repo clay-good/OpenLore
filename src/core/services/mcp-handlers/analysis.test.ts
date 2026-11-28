@@ -325,15 +325,16 @@ describe('handleGetSignatures', () => {
   it('returns error message when no cached context', async () => {
     readCachedContext.mockResolvedValue(null);
     const { handleGetSignatures } = await import('./analysis.js');
-    const result = await handleGetSignatures(tmpDir);
-    expect(result).toContain('No analysis found');
+    const result = await handleGetSignatures(tmpDir) as { error: string; notReady: boolean };
+    expect(result.error).toContain('No analysis found');
+    expect(result.notReady).toBe(true);
   });
 
   it('returns error message when context has no signatures', async () => {
     readCachedContext.mockResolvedValue(makeMinimalLLMContext());
     const { handleGetSignatures } = await import('./analysis.js');
-    const result = await handleGetSignatures(tmpDir);
-    expect(result).toContain('No signatures available');
+    const result = await handleGetSignatures(tmpDir) as { error: string };
+    expect(result.error).toContain('No signatures available');
   });
 
   it('returns formatted signatures when available', async () => {
@@ -346,7 +347,7 @@ describe('handleGetSignatures', () => {
     const { handleGetSignatures } = await import('./analysis.js');
     const result = await handleGetSignatures(tmpDir);
     expect(typeof result).toBe('string');
-    expect(result.length).toBeGreaterThan(0);
+    expect((result as string).length).toBeGreaterThan(0);
   });
 
   it('filters signatures by filePattern', async () => {

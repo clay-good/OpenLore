@@ -101,6 +101,23 @@ describe('renderMarkdown (conclusion-shaped briefing)', () => {
     expect(renderHuman(b)).toContain('test-disabled: `it.skip` was added');
   });
 
+  it('names files the weakening checks could not assess, with the reason (#807)', () => {
+    const reason = 'the file could not be parsed in the new state (syntax error at line 3)';
+    const structural = { ...structuralWithDelta, checkWeakening: { findings: [], notAssessed: [{ file: 'src/a.test.ts', reason }] } };
+    const b: ReviewBriefing = { base: 'main', head: 'working tree', structural, blast: blastBriefing, caveats: [], status: 'ok' };
+    expect(renderMarkdown(b)).toContain('### Not checked for weakened checks');
+    expect(renderMarkdown(b)).toContain(`\`src/a.test.ts\`: ${reason}`);
+    expect(renderHuman(b)).toContain(`not checked for weakening: src/a.test.ts: ${reason}`);
+  });
+
+  it('names file revisions that did not parse (#807)', () => {
+    const structural = { ...structuralWithDelta, parseFailures: [{ file: 'src/a.ts', revision: 'head', cause: 'syntax error at line 3' }] };
+    const b: ReviewBriefing = { base: 'main', head: 'working tree', structural, blast: blastBriefing, caveats: [], status: 'ok' };
+    expect(renderMarkdown(b)).toContain('### Files that did not parse');
+    expect(renderMarkdown(b)).toContain('`src/a.ts` (head): syntax error at line 3');
+    expect(renderHuman(b)).toContain('did not parse (head): src/a.ts: syntax error at line 3');
+  });
+
   it('renders the frozen/new ratchet receipt and initialization action', () => {
     const md = renderMarkdown({
       base: 'main', head: 'working tree', structural: structuralWithDelta, blast: blastBriefing,

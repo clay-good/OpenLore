@@ -247,6 +247,7 @@ openlore run [options]
 
 ```bash
 openlore analyze [options]
+  --directory <path>     # Repository to analyze (default: current directory)
   --output <path>        # Output directory (default: .openlore/analysis/)
   --max-files <n>        # Max files (default: 500)
   --include <glob>       # Additional include patterns

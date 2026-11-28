@@ -159,6 +159,26 @@ describe('spec-12 MCP protocol conformance (via SDK Client over stdio)', () => {
     expect(text).toMatch(/call "get_subgraph" again, for example with: \{.*"functionName":"example"/);
   });
 
+  // #810: a plain \`{ error }\` result (no structured notReady) is an error too.
+  it('returns plain handler errors and text-tool not-ready answers as isError results', async () => {
+    if (guard()) return;
+    const dir = mkdtempSync(join(tmpdir(), 'openlore-plain-error-'));
+    try {
+      // get_spec answers a missing domain with a plain { error }, no notReady field.
+      const spec = await client!.callTool({ name: 'get_spec', arguments: { directory: dir, domain: 'nope' } });
+      const specText = (spec.content as Array<{ text?: string }>).map((b) => b.text ?? '').join('\n');
+      expect(specText).toMatch(/"error":/);
+      expect(specText).not.toMatch(/notReady/);
+      expect(spec.isError).toBe(true);
+      // get_signatures used to answer an unanalyzed repository with bare text.
+      const sigs = await client!.callTool({ name: 'get_signatures', arguments: { directory: dir } });
+      expect((sigs.content as Array<{ text?: string }>)[0]?.text).toMatch(/"notReady":\s*true/);
+      expect(sigs.isError).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('returns an unknown tool as an isError result (documented posture), not a crash', async () => {
     if (guard()) return;
     const res = await client!.callTool({ name: 'definitely_not_a_real_tool', arguments: { directory: REPO_ROOT } });
@@ -354,11 +374,14 @@ describe('spec — lean default surface + breadth pointer (via SDK Client over s
       expect(alias.isError).toBe(true);
       expect((alias.content as Array<{ text?: string }>)[0]?.text).toMatch(/get_ui_component_inventory.*substrate.*full/i);
 
-      // A member still reaches its handler. An unanalyzed temp repo returns a
-      // structured domain error, not the preset boundary error.
+      // A member still reaches its handler. An unanalyzed temp repo returns the
+      // not-ready conclusion as an isError result (#810), not the preset boundary error.
       const member = await c.callTool({ name: 'orient', arguments: { directory: dir, task: 'anything' } });
-      expect(member.isError).toBeFalsy();
-      expect((member.content as Array<{ text?: string }>)[0]?.text).not.toMatch(/not available in the active/i);
+      const memberText = (member.content as Array<{ text?: string }>).map((b) => b.text ?? '').join('\n');
+      expect(memberText).not.toMatch(/not available in the active/i);
+      expect(member.isError).toBe(true);
+      expect(memberText).toMatch(/"notReady":\s*true/);
+      expect(memberText).toMatch(/"remedy":/);
     } finally {
       await c.close();
       rmSync(dir, { recursive: true, force: true });
@@ -523,7 +546,9 @@ describe('spec — lean default surface + breadth pointer (via SDK Client over s
         name: 'orient',
         arguments: { directory: dir, task: 'retain shared daemon' },
       });
-      expect(member.isError).toBeFalsy();
+      // `dir` is unanalyzed, so orient answers with the not-ready conclusion (#810).
+      expect(member.isError).toBe(true);
+      expect((member.content as Array<{ text?: string }>).map((b) => b.text ?? '').join('\n')).toMatch(/"notReady":\s*true/);
       await new Promise((resolve) => setTimeout(resolve, 1000));
 
       // If the 403 had evicted the endpoint, orient would run locally and the

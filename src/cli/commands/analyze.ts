@@ -17,7 +17,7 @@ import {
   CLONE_MEMBERS_SHOWN,
   INVENTORY_ITEMS_SHOWN,
 } from '../../utils/capped-list.js';
-import { mkdir, readFile, open as openFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, stat, open as openFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { openBuildProgress, reportBuildPhase, reportFileDone } from '../../core/services/build-progress.js';
@@ -39,7 +39,7 @@ import {
   OPENLORE_CONFIG_REL_PATH,
 } from '../../constants.js';
 import type { AnalyzeOptions, OpenLoreConfig } from '../../types/index.js';
-import { readOpenLoreConfig } from '../../core/services/config-manager.js';
+import { readOpenLoreConfig, retargetPrimaryConfigRoot } from '../../core/services/config-manager.js';
 import type { RepositoryMap } from '../../core/analyzer/repository-mapper.js';
 import type { CloneGroup, CloneInstance } from '../../core/analyzer/duplicate-detector.js';
 import type { DependencyGraphResult } from '../../core/analyzer/dependency-graph.js';
@@ -103,6 +103,8 @@ interface ExtendedAnalyzeOptions extends AnalyzeOptions {
   freshSpecDirectory?: boolean;
   /** Follow an analysis another process already owns instead of exiting. */
   wait?: boolean;
+  /** Repository to analyze (default: current directory). */
+  directory?: string;
   /** Repeatable workspace package names to recompute against the retained graph. */
   shard?: string[];
   /**
@@ -363,6 +365,7 @@ export async function runAnalysis(
 
 export const analyzeCommand = new Command('analyze')
   .description('Run static analysis on the codebase (no LLM required)')
+  .option('--directory <path>', 'Repository to analyze (default: current directory)')
   .option(
     '--output <path>',
     'Directory to write analysis results',
@@ -463,8 +466,17 @@ After analysis, agents query the index (openlore orient, or the MCP server). Spe
   )
   .action(async (options: Partial<ExtendedAnalyzeOptions>) => {
     const startTime = Date.now();
-    const rootPath = process.cwd();
-
+    // Canonical like `process.cwd()` (which the OS reports resolved, e.g. /private/tmp on macOS),
+    // so `--directory` and a run from inside the repo name it the same way in the ownership lock.
+    const requested = options.directory === undefined ? undefined : resolve(options.directory);
+    const rootPath = requested === undefined
+      ? process.cwd()
+      : await realpath(requested).then(async (p) => ((await stat(p)).isDirectory() ? p : null), () => null);
+    if (rootPath === null) {
+      logger.error(`--directory is not a directory: ${safe(requested ?? '')}`);
+      process.exitCode = 1;
+      return;
+    }
     const opts: ExtendedAnalyzeOptions = {
       output: options.output ?? `${OPENLORE_ANALYSIS_REL_PATH}/`,
       maxFiles: typeof options.maxFiles === 'string'
@@ -496,6 +508,8 @@ After analysis, agents query the index (openlore orient, or the MCP server). Spe
       return;
     }
 
+    // Global --config is keyed to cwd when it is parsed; point it at the repository analyzed.
+    const restoreConfigRoot = retargetPrimaryConfigRoot(rootPath);
     try {
       // ========================================================================
       // PHASE 1: VALIDATION
@@ -1099,6 +1113,8 @@ After analysis, agents query the index (openlore orient, or the MCP server). Spe
         console.error(error);
       }
       process.exitCode = 1;
+    } finally {
+      restoreConfigRoot();
     }
   });
 

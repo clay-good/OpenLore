@@ -452,20 +452,21 @@ describe('handleGetSignatures', () => {
   });
   afterEach(async () => { await removeFixture(testDir); });
 
-  it('returns error string when no cache exists', async () => {
-    const r = await handleGetSignatures(testDir);
-    expect(r).toMatch(/analyze_codebase first/);
+  it('returns a not-ready result when no cache exists', async () => {
+    const r = await handleGetSignatures(testDir) as { error: string; notReady: boolean };
+    expect(r.notReady).toBe(true);
+    expect(r.error).toMatch(/analyze_codebase first/);
   });
 
   it('returns message when cache has no signatures', async () => {
     await writeCacheFixture(testDir, makeCallGraph(), []);
-    const r = await handleGetSignatures(testDir);
-    expect(r).toMatch(/No signatures available/);
+    const r = await handleGetSignatures(testDir) as { error: string };
+    expect(r.error).toMatch(/No signatures available/);
   });
 
   it('returns formatted signatures when present', async () => {
     await writeCacheFixture(testDir, makeCallGraph(), makeSignatures());
-    const r = await handleGetSignatures(testDir);
+    const r = await handleGetSignatures(testDir) as string;
     expect(typeof r).toBe('string');
     expect(r.length).toBeGreaterThan(0);
     expect(r).toContain('handleRequest');

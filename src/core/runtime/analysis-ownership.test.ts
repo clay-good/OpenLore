@@ -176,6 +176,13 @@ describe('analysis ownership — reclamation', () => {
     expect(stale).toBe(false);
   });
 
+  // #808: an owner killed between truncate and write (older versions) left an empty lock.
+  it('reclaims an empty lock once its heartbeat is stale, never while fresh', () => {
+    expect(isOwnershipStale(Date.now() - OWNERSHIP_HEARTBEAT_STALE_MS - 1_000, '', '/repo')).toBe(true);
+    expect(isOwnershipStale(Date.now(), '', '/repo')).toBe(false);
+    expect(isOwnershipStale(Date.now() - OWNERSHIP_HEARTBEAT_STALE_MS - 1_000, 'not json', '/repo')).toBe(false);
+  });
+
   it('fails closed after prolonged silence when the PID still looks alive', () => {
     // Silence cannot distinguish a recycled PID from a live but wedged owner.
     // Requiring manual cleanup is safer than authorizing a concurrent writer.

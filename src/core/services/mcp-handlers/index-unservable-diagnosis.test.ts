@@ -363,10 +363,11 @@ describe('graph and conclusion handlers serve the diagnosis, not the flat senten
     await publish(JSON.stringify({ signatures: [], callGraph: null }));
     await rewriteWithoutRepublishing();
 
-    const result = await handleGetSignatures(root);
+    const result = await handleGetSignatures(root) as { error: string; notReady: boolean };
 
-    expect(result).toMatch(/does NOT match its published generation/);
-    expect(result).not.toContain('No analysis found');
+    expect(result.notReady).toBe(true);
+    expect(result.error).toMatch(/does NOT match its published generation/);
+    expect(result.error).not.toContain('No analysis found');
   });
 
   it('no handler answers a null cached context with the hard-coded sentence', async () => {
