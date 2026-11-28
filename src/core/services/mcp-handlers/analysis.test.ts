@@ -17,6 +17,7 @@ import { mkdtemp, mkdir, writeFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   OPENLORE_DIR,
   OPENLORE_ANALYSIS_SUBDIR,
@@ -699,6 +700,42 @@ describe('handleGetFunctionBody', () => {
 
     expect(result.error).toContain('no definition with that name');
     expect(result.body).toBeUndefined();
+  });
+
+  // #805: an indexed byte range describes the file as analyzed; after an edit it can land on a call.
+  describe('when the indexed span may no longer match the file', () => {
+    const analyzed = 'function helper(n: number) {\n  return n * 2;\n}\nexport function run() {\n  return helper(2);\n}\n';
+    const edited = 'export function run() {\n  return helper(2);\n}\nfunction helper(n: number) {\n  return n * 2;\n}\n';
+    const node = { id: 'h.ts::helper', name: 'helper', filePath: 'h.ts', language: 'TypeScript', startIndex: 0, endIndex: analyzed.indexOf('}') + 1 };
+    const sha = (text: string) => createHash('sha256').update(text).digest('hex');
+
+    it('serves the indexed span when the file hash still matches', async () => {
+      await writeFile(join(tmpDir, 'h.ts'), analyzed, 'utf-8');
+      readCachedContext.mockResolvedValue({ callGraph: { nodes: [node] }, edgeStore: { getFileHash: () => sha(analyzed) }, artifactMtimeMs: 0 });
+      const { handleGetFunctionBody } = await import('./analysis.js');
+      const result = await handleGetFunctionBody(tmpDir, 'h.ts', 'helper') as Record<string, unknown>;
+      expect(result.body).toBe('function helper(n: number) {\n  return n * 2;\n}');
+      expect(result.startIndex).toBe(0);
+      expect(result.note).toBeUndefined();
+    });
+
+    it('parses the edited file instead of slicing stale offsets', async () => {
+      await writeFile(join(tmpDir, 'h.ts'), edited, 'utf-8');
+      readCachedContext.mockResolvedValue({ callGraph: { nodes: [node] }, edgeStore: { getFileHash: () => sha(analyzed) }, artifactMtimeMs: Date.now() + 60_000 });
+      const { handleGetFunctionBody } = await import('./analysis.js');
+      const result = await handleGetFunctionBody(tmpDir, 'h.ts', 'helper') as Record<string, unknown>;
+      expect(result.body).toBe('function helper(n: number) {\n  return n * 2;\n}');
+      expect(result.startLine).toBe(4);
+      expect(result.note).toContain('changed after analysis');
+    });
+
+    it('parses the file when no hash is recorded and it is newer than the analysis', async () => {
+      await writeFile(join(tmpDir, 'h.ts'), edited, 'utf-8');
+      readCachedContext.mockResolvedValue({ callGraph: { nodes: [node] }, artifactMtimeMs: 0 });
+      const { handleGetFunctionBody } = await import('./analysis.js');
+      const result = await handleGetFunctionBody(tmpDir, 'h.ts', 'helper') as Record<string, unknown>;
+      expect(result.body).toBe('function helper(n: number) {\n  return n * 2;\n}');
+    });
   });
 
   it('returns error when function not found in file', async () => {

@@ -589,13 +589,27 @@ async function handleGetFunctionBodyUnfocused(
   // single-symbol tool, and parsing the whole multi-megabyte artifact per call — outside
   // the cache, so without its size ceiling or generation check — made it as expensive as
   // get_call_graph. (change: optimize-serving-hot-path-caches)
+  let changedSinceAnalysis = false;
   try {
     const ctx = await readCachedContext(absDir);
     if (ctx?.callGraph?.nodes) {
       const node = ctx.callGraph.nodes.find(
         n => n.name === functionName && (n.filePath === filePath || n.filePath.endsWith('/' + filePath.replace(/^\//, '')))
       );
+      // The byte range describes the file as analyzed. Once the file changes it can land on
+      // any text, a call site included, so a changed file is parsed now instead (#805).
       if (node && node.startIndex < node.endIndex) {
+        let baselineFileHash: string | null = null;
+        try { baselineFileHash = ctx.edgeStore?.getFileHash(node.filePath) ?? null; } catch { /* no record: use mtimes */ }
+        const sourceMtimeMs = (await stat(absFile)).mtimeMs;
+        changedSinceAnalysis = node.endIndex > source.length || resolveFileFreshness({
+          baselineFileHash,
+          currentFileHash: createHash('sha256').update(source).digest('hex'),
+          sourceMtimeMs,
+          artifactMtimeMs: ctx.artifactMtimeMs ?? 0,
+        }) === 'stale';
+      }
+      if (node && node.startIndex < node.endIndex && !changedSinceAnalysis) {
         const body = source.slice(node.startIndex, node.endIndex);
         return {
           functionName,
@@ -612,12 +626,14 @@ async function handleGetFunctionBodyUnfocused(
     }
   } catch { /* no call graph — fall through to line-scan */ }
 
-  // Fallback: the index does not cover this function.
+  // Fallback: the index does not cover this function, or the file changed after analysis.
   const parsed = await parseDefinitionNow(source, filePath, functionName);
   if ('error' in parsed) return parsed;
   return {
     ...parsed,
-    note: 'Not in the analysis index; extracted by parsing the file now. Run analyze_codebase to index it.',
+    note: changedSinceAnalysis
+      ? 'The file changed after analysis; extracted by parsing the file now. Run analyze_codebase to refresh the index.'
+      : 'Not in the analysis index; extracted by parsing the file now. Run analyze_codebase to index it.',
     provenance: REPO_CONTENT_PROVENANCE,
   };
 }
