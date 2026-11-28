@@ -38,7 +38,7 @@ trusts the answer.
 | Prompt briefing `names()` (`orient-inject-render.ts`) | Shows 3 callers of a function with 5, with no "+2 more", and unqualified names | Say how many were left out; qualify class methods |
 | Handoff briefing (`handoff.ts`) | Says "the index is behind the working tree" right after a fresh analyze, whenever any part is not assessed | Print the staleness line only when the index is stale; name the parts not assessed |
 | Silence contract (`orient-inject.ts`) | A backticked name that does not resolve because the index is behind looks like "no such code" | Say the index is behind when an anchor does not resolve and the index is stale |
-| `CODEBASE.md` workflow section and `orient` "Next steps" | Name tools the wired preset does not expose | Filter by the wired preset, as the prompt briefing does (`trim-standing-agent-instructions` covers the digest) |
+| `CODEBASE.md` workflow section and `orient` "Next steps" | Name tools the wired preset does not expose | Filter by the wired preset, as the prompt briefing does (since `trim-standing-agent-instructions`, `CODEBASE.md` is read on demand, not loaded every turn) |
 | Prompt briefing `keepExactAnchors` | Drops the spec domain that an exact `Implementation` anchor links | Keep linked spec domains for the resolved symbol |
 | `sanitizeForTerminal` (`misc.ts`) | Unicode tag characters and other invisible format characters survive every served frame | Strip them; the slim digest already refuses them |
 | `openlore doctor` / `status --json` | Doctor warns about an LLM key on every fresh repository; `status --json` says no hook moment is wired while doctor counts 9 | Treat the optional LLM as optional; report wiring the same way in both |
@@ -48,7 +48,7 @@ trusts the answer.
 | # | Change | What it does for the agent | Needs |
 |---|--------|----------------------------|-------|
 | 1 | `adopt-agent-context-interop` (shipped; [archived](openspec/changes/archive/2026-11-27-adopt-agent-context-interop)) | A 9-line digest once per session, and five short plugin skills | — |
-| 2 | [`trim-standing-agent-instructions`](openspec/changes/trim-standing-agent-instructions) | Standing instructions are a few lines; tool descriptions are 800 characters or fewer; the full-digest `@`-import goes | 1 (shipped) |
+| 2 | `trim-standing-agent-instructions` (shipped; [archived](openspec/changes/archive/2026-11-27-trim-standing-agent-instructions)) | Standing instructions are a few lines; tool descriptions are 800 characters or fewer; the full-digest `@`-import goes | — |
 | 3 | [`add-incremental-early-cutoff`](openspec/changes/add-incremental-early-cutoff) | A comment or format edit no longer marks answers stale, so "stale" can be trusted | — |
 | 4 | [`add-pushed-evidence-yield`](openspec/changes/add-pushed-evidence-yield) | We see which pushed lines the agent uses, so dead weight is cut | — |
 | 5 | [`add-first-touch-file-briefing`](openspec/changes/add-first-touch-file-briefing) | The first read of a file shows its callers elsewhere, its decisions, its contracts, and its tests | 4 to measure it |

@@ -25,6 +25,7 @@ import { continueAdapter } from './adapters/continue.js';
 import { piAdapter } from './adapters/pi.js';
 import { codexAdapter } from './adapters/codex.js';
 import type { ProveEligibility } from '../../core/agent-eval/tasks.js';
+import { presetToolNames } from '../../core/services/wired-preset.js';
 
 const ADAPTERS: Record<AgentName, Adapter> = {
   'agents-md': agentsMdAdapter,
@@ -55,6 +56,28 @@ async function loadTemplate(): Promise<string> {
   throw new Error(
     'openlore install: could not locate agent-instructions.md template (looked in dist + src)'
   );
+}
+
+/**
+ * The managed instruction block for one wired preset (change: trim-standing-agent-instructions).
+ *
+ * The block is loaded on every turn, so it stays a few lines. It names the `orient` MCP tool
+ * only when the wired surface exposes it (`tools === null` is the full surface); otherwise it
+ * names the CLI form, which works on any preset. The last line names the surface, so the
+ * block's fingerprint changes with the preset and a re-install with another preset rewrites it
+ * (change: align-generated-guidance-with-installed-preset).
+ */
+export function renderInstructionBlock(
+  template: string,
+  preset: string,
+  tools: ReadonlySet<string> | null,
+): string {
+  const orient = tools === null || tools.has('orient')
+    ? 'the `orient` tool (or `openlore orient "<task>"`)'
+    : '`openlore orient "<task>"`';
+  // LF on every platform, so a CRLF checkout writes the same block and the same fingerprint.
+  return `${template.replace(/\r\n/g, '\n').trimEnd().replace('{{orient}}', orient)}\n` +
+    `Wired MCP surface: \`${preset}\`; \`openlore install --preset <name>\` changes it and rewrites this block.\n`;
 }
 
 export interface InstallOptions {
@@ -471,9 +494,7 @@ export async function runInstall(opts: InstallOptions): Promise<number> {
   // than leave stale instructions in place
   // (change: align-generated-guidance-with-installed-preset).
   const guidancePreset = effectivePreset ?? LEAN_DEFAULT_PRESET;
-  const instructionTemplate = `${template.trimEnd()}\n\nWired MCP surface: \`${guidancePreset}\`. ` +
-    'This guidance is written for that surface; re-run `openlore install --preset <name>` to change it ' +
-    'and regenerate these instructions.\n';
+  const instructionTemplate = renderInstructionBlock(template, guidancePreset, await presetToolNames(guidancePreset));
 
   // Adapters that de-duplicate against the user scope (Codex's proposal hook) must see it even
   // under --repo-only, which never WRITES there. Reading is fail-soft: no home, no de-duplication.

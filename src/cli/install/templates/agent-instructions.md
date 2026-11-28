@@ -1,27 +1,5 @@
-This project uses OpenLore for persistent architectural memory.
-
-Call `orient "<task description>"` (via the openlore MCP server, or
-`npx openlore orient --json`) **before touching a module you have not yet read in
-this session**, and when a task spans several modules. It returns the relevant
-functions, callers, spec sections, and insertion points in one structural lookup
-instead of file-by-file rediscovery.
-
-Skip it for work you are already inside: repeated edits to a file you have read
-this session do not need re-orientation. Reach for it again when the task moves
-to unfamiliar code.
-
-OpenLore prefixes tool responses with a brief, factual freshness note (the
-Epistemic Lease) once your cached context has aged or the repo has moved since
-your last `orient()`. It is informational — re-`orient()` if you are relying on
-cached cross-module structure; otherwise carry on.
-
-When you make a significant design choice, record it:
-`openlore decisions record --title "<decision>" --rationale "<why>"` (add
-`--files` for the files it governs). Decision autopilot is the default — the gate
-records and never blocks a commit — so the decision is accepted at once and synced
-to the specs wherever a spec corpus exists; the user reviews the trail with
-`openlore decisions review`. Blocking review is opt-in
-(`{ "governance": { "autopilot": false } }` in `.openlore/config.json`).
-
-For the MCP setup, ensure `openlore mcp` is configured as an MCP server.
-See https://github.com/clay-good/OpenLore for details.
+Where OpenLore hooks are wired, they push evidence about code you touch, and stay silent when they have nothing new.
+For code you have not read in this session, {{orient}} returns the relevant functions, callers, and specs in one lookup.
+Record a significant design choice: `openlore decisions record --title "<decision>" --rationale "<why>"`.
+The full repository digest is `.openlore/analysis/CODEBASE.md`; read it when a task needs it.
+A tool reply may start with a freshness note (the Epistemic Lease); it is informational.

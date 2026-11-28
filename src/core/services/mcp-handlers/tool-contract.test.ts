@@ -355,3 +355,28 @@ describe('enforceConclusionContract (runtime, dispatch-path)', () => {
     expect(f.message).toContain('some_tool');
   });
 });
+
+// ============================================================================
+// StandingInstructionsStayShort (cli spec, change: trim-standing-agent-instructions).
+// Every tool description is paid on every session; none may pass 800 characters.
+// ============================================================================
+const MAX_TOOL_DESCRIPTION_CHARS = 800;
+
+function descriptionsOverLimit(tools: ReadonlyArray<{ name: string; description: string }>): string[] {
+  return tools
+    .filter(t => t.description.length > MAX_TOOL_DESCRIPTION_CHARS)
+    .map(t => `${t.name} (${t.description.length} chars)`);
+}
+
+describe('tool descriptions stay at most 800 characters', () => {
+  it('no description in TOOL_DEFINITIONS passes the limit', () => {
+    expect(TOOL_DEFINITIONS.length).toBeGreaterThan(0);
+    expect(descriptionsOverLimit(TOOL_DEFINITIONS)).toEqual([]);
+  });
+
+  it('the guard names a tool whose description is one character too long', () => {
+    const atLimit = { name: 'at_limit', description: 'x'.repeat(MAX_TOOL_DESCRIPTION_CHARS) };
+    const over = { name: 'too_long', description: 'x'.repeat(MAX_TOOL_DESCRIPTION_CHARS + 1) };
+    expect(descriptionsOverLimit([atLimit, over])).toEqual(['too_long (801 chars)']);
+  });
+});

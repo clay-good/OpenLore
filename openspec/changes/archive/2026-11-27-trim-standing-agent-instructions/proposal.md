@@ -1,6 +1,6 @@
 # Cut the standing instructions to a few lines
 
-> Priority: P1 · Not built
+> Priority: P1 · Built (archived with the PR that built it)
 > Reaches the agent through: the instruction files the harness loads on every turn (`CLAUDE.md`, `AGENTS.md`), and the MCP tool list
 > Why it helps the agent: it spends its context on the task, not on reading how OpenLore works before it does any work.
 

@@ -16,6 +16,7 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileExists } from '../../utils/command-helpers.js';
 import { resolveWiredPreset, presetToolNames, enablingCommandFor } from '../services/wired-preset.js';
+import { ARTIFACT_SLIM_DIGEST } from '../../constants.js';
 
 // ============================================================================
 // TYPES
@@ -80,55 +81,16 @@ export const AI_TOOL_TARGETS: ToolTarget[] = [
  * "ALWAYS call orient before reading source files" was routinely ignored on the
  * work it does not fit — repeated edits inside one already-read file — and an
  * instruction that is routinely ignored teaches the agent to discount the whole
- * instruction set, including the turns where orienting would have paid. The
- * condition names the case where the lookup actually replaces work.
+ * instruction set. The condition names the case where the lookup replaces work.
+ * One line: the tool descriptions carry the rest (change: trim-standing-agent-instructions).
  */
-const ORIENT_GUIDANCE = `
-## When to orient
-
-Call \`orient "<task description>"\` **before touching a module you have not yet read
-in this session**, and when a task spans several modules. It returns the relevant
-functions, callers, spec sections, and insertion points in one lookup instead of
-file-by-file rediscovery.
-
-Skip it for work you are already inside: repeated edits to a file you have read this
-session do not need re-orientation. Reach for it again when the task moves to
-unfamiliar code.
-`.trim();
-
-/** One workflow entry in the generated guidance, with the tools it needs to be callable. */
-interface GuidanceEntry {
-  /** Tools this entry instructs the agent to call. */
-  requires: string[];
-  /** Rendered when every required tool is available. */
-  render: () => string;
+function orientLine(available: ReadonlySet<string> | null): string {
+  const call = available === null || available.has('orient')
+    ? 'call `orient "<task>"`'
+    : 'run `openlore orient "<task>"`';
+  return `Before touching a module you have not yet read in this session, ${call}: it returns the relevant ` +
+    'functions, callers, and specs in one lookup. Edits inside a file you already read do not need re-orientation.';
 }
-
-const WORKFLOW_ENTRIES: GuidanceEntry[] = [
-  {
-    requires: ['get_schema_inventory', 'get_route_inventory', 'get_env_vars', 'get_ui_component_inventory', 'get_middleware_inventory'],
-    render: () => '- **Data models, APIs, or config** — `get_schema_inventory` · `get_route_inventory` · `get_env_vars` · `get_ui_component_inventory` · `get_middleware_inventory`',
-  },
-  { requires: ['trace_execution_path'], render: () => '- **Debugging a call flow** ("how does X reach Y?") — `trace_execution_path`' },
-  { requires: ['get_subgraph'], render: () => '- **Before modifying a function** — `get_subgraph` for blast radius' },
-  { requires: ['blast_radius'], render: () => '- **Weighing a diff before committing** — `blast_radius`' },
-  { requires: ['check_spec_drift'], render: () => '- **Before opening a PR** — `check_spec_drift`' },
-  { requires: ['recall'], render: () => '- **Touching code others have reasoned about** — `recall` for anchored notes and decisions' },
-  { requires: ['verify_claim'], render: () => '- **About to assert a structural fact to a human** — `verify_claim`, then cite the receipt' },
-  {
-    requires: ['prepare_spec_generation'],
-    render: () => '- **Creating a domain spec** — `prepare_spec_generation <domain>`, exhaust continuation cursors, then author and validate with the host editor',
-  },
-  {
-    requires: ['prepare_spec_repair'],
-    render: () => '- **Repairing an existing spec** — `prepare_spec_repair <domain>`, honor unavailable evidence, then reconcile and validate with the host editor',
-  },
-];
-
-const ON_DEMAND_TOOLS = [
-  'search_code', 'suggest_insertion_points', 'get_spec', 'search_specs',
-  'analyze_impact', 'get_function_body', 'get_function_skeleton', 'find_path', 'get_map',
-];
 
 const DECISIONS_BODY = `
 When making a significant design choice, call \`record_decision\` **before** writing the code.
@@ -151,50 +113,39 @@ Decisions are consolidated in the background immediately after \`record_decision
 `.trim();
 
 /**
- * Build the MCP workflow section for the surface actually wired here.
+ * Build the MCP workflow section for the surface actually wired here: the `orient` line and
+ * the decisions line, nothing more (change: trim-standing-agent-instructions). The generated
+ * file is loaded on every turn, and each tool's own description already says when to use it.
  *
- * `available === null` means the full surface (every tool callable). Otherwise an
- * entry whose tools are absent is dropped, and the decisions workflow — the one
- * whose absence silently blocked a task — is kept but rewritten as a prerequisite
- * with the exact command that enables it, never as a callable instruction.
+ * `available === null` means the full surface (every tool callable). When `record_decision`
+ * is absent, the decisions line names the CLI and the command that exposes the tool, never
+ * the tool as callable.
  */
 function buildMcpSection(
   preset: string,
   available: ReadonlySet<string> | null,
   enablingCommand: string,
 ): string {
-  const has = (tool: string) => available === null || available.has(tool);
-  const lines: string[] = ['## openlore MCP workflow', ''];
-
-  lines.push(`_Written for the wired \`${preset}\` surface. Re-run \`openlore install --preset <name>\` after changing it so this section is regenerated._`, '');
-
-  if (has('orient')) {
-    lines.push(ORIENT_GUIDANCE, '');
-  }
-
-  const entries = WORKFLOW_ENTRIES.filter(e => e.requires.every(has))
-    .map(e => e.render());
-  if (entries.length) {
-    lines.push('**Then, by situation:**', '', ...entries, '');
-  }
-  if (has('prepare_spec_generation') || has('prepare_spec_repair')) {
-    lines.push('Use the specification composites directly; do not routinely reconstruct them by replaying atomic tools.', '');
-  }
-
-  const onDemand = ON_DEMAND_TOOLS.filter(has);
-  if (onDemand.length) {
-    lines.push(`**On-demand** (when orient's results aren't enough): ${onDemand.map(t => `\`${t}\``).join(' · ')}`, '');
-  }
-
-  lines.push('## Architectural decisions', '', buildDecisionsGuidance(preset, available, enablingCommand));
-
-  return lines.join('\n').trimEnd();
+  const record = '`openlore decisions record --title "<decision>" --rationale "<why>"`';
+  const decisions = available === null || available.has('record_decision')
+    ? `When you make a significant design choice, call \`record_decision\` before writing the code (or run ${record}).`
+    : `When you make a significant design choice, run ${record} before writing the code. ` +
+      `\`record_decision\` is **not** part of the wired \`${preset}\` surface; \`${enablingCommand}\` exposes it.`;
+  return [
+    '## openlore MCP workflow',
+    '',
+    `_Written for the wired \`${preset}\` surface. Re-run \`openlore install --preset <name>\` after changing it so this section is regenerated._`,
+    '',
+    orientLine(available),
+    '',
+    decisions,
+  ].join('\n');
 }
 
 /**
  * The "Architectural decisions" body for the wired surface: the MCP workflow when
  * `record_decision` is callable, otherwise the CLI form plus the enabling command.
- * Shared with the decisions gate's agent-file block, so both say the same thing.
+ * Used by the decisions gate's agent-file block.
  */
 export function buildDecisionsGuidance(
   preset: string,
@@ -223,10 +174,16 @@ function buildContent(
   projectName: string,
   forClaude: boolean,
   mcpSection: string,
+  slimDigestExists: boolean,
 ): string {
-  const digestRef = forClaude
-    ? `@${analysisDir}/CODEBASE.md`
-    : `<!-- Import or paste ${analysisDir}/CODEBASE.md here for full project context -->`;
+  // With the slim digest, the prompt hook gives the agent repository shape once per session, so
+  // the full digest is named, not loaded on every turn. Without it, the import is the only
+  // repository shape the agent gets (change: trim-standing-agent-instructions).
+  const digestRef = slimDigestExists
+    ? `Full repository digest, for a task that needs it: \`${analysisDir}/CODEBASE.md\`.`
+    : forClaude
+      ? `@${analysisDir}/CODEBASE.md`
+      : `<!-- Import or paste ${analysisDir}/CODEBASE.md here for full project context -->`;
 
   return [
     `# ${projectName} — AI context (generated by openlore)`,
@@ -282,11 +239,12 @@ export async function generateAiConfigs(options: AiConfigOptions): Promise<AiCon
   const available = await presetToolNames(wired.preset);
   const enablingCommand = await enablingCommandFor('record_decision', wired.preset);
   const mcpSection = buildMcpSection(wired.preset, available, enablingCommand);
+  const slimDigestExists = await fileExists(join(rootDir, analysisDir, ARTIFACT_SLIM_DIGEST));
 
   return Promise.all(
     targets.map(async ({ rel, forClaude }) => {
       const absPath = join(rootDir, rel);
-      const content = buildContent(analysisDir, projectName, forClaude, mcpSection);
+      const content = buildContent(analysisDir, projectName, forClaude, mcpSection, slimDigestExists);
       const created = await writeIfAbsent(absPath, content);
       return { rel, created };
     })

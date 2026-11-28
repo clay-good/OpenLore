@@ -95,6 +95,32 @@ describe('generateAiConfigs', () => {
     expect(content).not.toContain('<!--');
   });
 
+  it('with the slim digest, CLAUDE.md names the full digest instead of importing it', async () => {
+    await mkdir(join(tmpDir, '.openlore', 'analysis'), { recursive: true });
+    await writeFile(join(tmpDir, '.openlore', 'analysis', 'CODEBASE.md'), '# full digest\n', 'utf-8');
+    await writeFile(join(tmpDir, '.openlore', 'analysis', 'CODEBASE.slim.md'), '# slim digest\n', 'utf-8');
+    await generateAiConfigs({ rootDir: tmpDir, analysisDir: '.openlore/analysis', projectName: 'my-project', tools: ['claude', 'cursor'] });
+
+    const claude = await readFile(join(tmpDir, 'CLAUDE.md'), 'utf-8');
+    expect(claude).not.toMatch(/^@/m);
+    expect(claude).not.toContain('@.openlore/analysis/CODEBASE.md');
+    expect(claude.split('\n').filter(line => line.includes('.openlore/analysis/CODEBASE.md'))).toEqual([
+      'Full repository digest, for a task that needs it: `.openlore/analysis/CODEBASE.md`.',
+    ]);
+    const cursor = await readFile(join(tmpDir, '.cursorrules'), 'utf-8');
+    expect(cursor).not.toContain('Import or paste');
+    expect(cursor).toContain('`.openlore/analysis/CODEBASE.md`');
+  });
+
+  it('without the slim digest, CLAUDE.md keeps the import so the agent still gets repository shape', async () => {
+    await mkdir(join(tmpDir, '.openlore', 'analysis'), { recursive: true });
+    await writeFile(join(tmpDir, '.openlore', 'analysis', 'CODEBASE.md'), '# full digest\n', 'utf-8');
+    await generateAiConfigs({ rootDir: tmpDir, analysisDir: '.openlore/analysis', projectName: 'my-project', tools: ['claude'] });
+
+    const claude = await readFile(join(tmpDir, 'CLAUDE.md'), 'utf-8');
+    expect(claude.split('\n')).toContain('@.openlore/analysis/CODEBASE.md');
+  });
+
   it('non-Claude format uses HTML comment reference', async () => {
     await generateAiConfigs({
       rootDir: tmpDir,
@@ -130,8 +156,11 @@ describe('generateAiConfigs', () => {
 
     const content = await readFile(join(tmpDir, '.cursorrules'), 'utf-8');
     expect(content).toContain('openlore MCP workflow');
-    expect(content).toContain('orient');
-    expect(content).toContain('search_code');
+    expect(content).toContain('`orient "<task>"`');
+    expect(content).toContain('openlore decisions record');
+    // The situation table is gone: each tool's description already says when to use it.
+    expect(content).not.toContain('search_code');
+    expect(content).not.toContain('Then, by situation');
   });
 
   it('creates nested directory for .clinerules/openlore.md', async () => {

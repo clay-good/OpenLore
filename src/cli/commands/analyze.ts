@@ -208,6 +208,16 @@ export interface CycleReport {
 }
 
 /**
+ * The one agent-setup line `openlore analyze` prints after the digest
+ * (change: trim-standing-agent-instructions). It names `openlore install`, which wires the
+ * hooks and the MCP server, and the full digest's path. It no longer prints a tool table:
+ * each tool's description says when to use it.
+ */
+export function agentSetupTip(outputDir: string): string {
+  return `  Agent setup: run \`openlore install\`. A task that needs the full repository digest can read ${outputDir}CODEBASE.md.`;
+}
+
+/**
  * Render one `⚠ Cycle:` report line.
  *
  * A cycle is a strongly-connected component, so its length is a property of the
@@ -1070,20 +1080,7 @@ After analysis, agents query the index (openlore orient, or the MCP server). Spe
         // (install wires CLAUDE.md/.mcp.json/hooks itself, so this would contradict it).
         if (!options.embedded) {
           console.log('');
-          console.log('  Agent setup (one-time):');
-          console.log(`    Add to your CLAUDE.md or .clinerules:`);
-          console.log('');
-          console.log(`    @.openlore/analysis/CODEBASE.md`);
-          console.log('');
-          console.log('    ## openlore MCP tools — when to use them');
-          console.log('    | Situation                                       | Tool                              |');
-          console.log('    |-------------------------------------------------|-----------------------------------|');
-          console.log("    | Don't know which file/function handles a concept | search_code                      |");
-          console.log('    | Need call topology across many files            | get_subgraph / analyze_impact     |');
-          console.log('    | Starting a new task on an unfamiliar codebase   | orient                            |');
-          console.log('    | Planning where to add a feature                 | suggest_insertion_points          |');
-          console.log('    | Checking if code still matches spec             | check_spec_drift                  |');
-          console.log('    | Finding spec requirements by meaning            | search_specs                      |');
+          console.log(agentSetupTip(safe(opts.output)));
         }
       }
       // "Agent config files" is install's concern; skip it on the embedded path so a

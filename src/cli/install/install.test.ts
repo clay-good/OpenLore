@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, writeFile, readFile, mkdir, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
-import { formatProveGuidance, runInstall } from './index.js';
+import { formatProveGuidance, renderInstructionBlock, runInstall } from './index.js';
+import { extractBlock, renderBlock } from './block.js';
+import { TOOL_PRESETS } from '../commands/mcp.js';
+import { FULL_PRESET } from '../../constants.js';
 import { formatGuardedHookCommand, resolveOpenloreCommand } from '../../utils/platform-command.js';
 import { logger } from '../../utils/logger.js';
 
@@ -162,7 +165,7 @@ describe('openlore install (end-to-end)', () => {
     expect(code).toBe(0);
     const md = await readFile(join(dir, 'AGENTS.md'), 'utf8');
     expect(md).toContain('BEGIN OPENLORE');
-    expect(md).toContain('orient()');
+    expect(md).toContain('the `orient` tool');
   });
 
   // skipIf(win32): the premise is a symlink, and creating one there needs elevated
@@ -318,7 +321,7 @@ describe('openlore install (end-to-end)', () => {
   it('refuses to overwrite hand-edited block without --force', async () => {
     await runInstall({ cwd: dir, agent: 'agents-md', analyze: false });
     const md = await readFile(join(dir, 'AGENTS.md'), 'utf8');
-    const tampered = md.replace('orient()', 'OOPS-EDITED');
+    const tampered = md.replace('the `orient` tool', 'OOPS-EDITED');
     await writeFile(join(dir, 'AGENTS.md'), tampered, 'utf8');
 
     const code = await runInstall({ cwd: dir, agent: 'agents-md', analyze: false });
@@ -329,14 +332,14 @@ describe('openlore install (end-to-end)', () => {
   it('--force overwrites hand-edited block', async () => {
     await runInstall({ cwd: dir, agent: 'agents-md', analyze: false });
     const md = await readFile(join(dir, 'AGENTS.md'), 'utf8');
-    const tampered = md.replace('orient()', 'OOPS-EDITED');
+    const tampered = md.replace('the `orient` tool', 'OOPS-EDITED');
     await writeFile(join(dir, 'AGENTS.md'), tampered, 'utf8');
 
     const code = await runInstall({ cwd: dir, agent: 'agents-md', force: true, analyze: false });
     expect(code).toBe(0);
     const after = await readFile(join(dir, 'AGENTS.md'), 'utf8');
     expect(after).not.toContain('OOPS-EDITED');
-    expect(after).toContain('orient()');
+    expect(after).toContain('the `orient` tool');
   });
 
   it('--uninstall restores a pre-existing CLAUDE.md byte-for-byte', async () => {
@@ -691,5 +694,131 @@ describe('openlore install — settings.json format preservation', () => {
     expect(await read()).not.toBe(orig); // hook was added
     await runInstall({ cwd: dir, agent: 'claude-code', uninstall: true });
     expect(await read()).toBe(orig); // byte-identical after removal
+  });
+});
+
+// ============================================================================
+// StandingInstructionsStayShort (cli spec, change: trim-standing-agent-instructions).
+// The managed block is loaded on every turn, once per scope, so it stays short.
+// ============================================================================
+const MAX_BLOCK_LINES = 8;
+const MAX_BLOCK_BYTES = 700;
+
+function blockSizeProblems(block: string): string[] {
+  const body = block.trimEnd();
+  const problems: string[] = [];
+  const lines = body.split('\n').length;
+  const bytes = Buffer.byteLength(body, 'utf8');
+  if (lines > MAX_BLOCK_LINES) problems.push(`${lines} lines (max ${MAX_BLOCK_LINES})`);
+  if (bytes > MAX_BLOCK_BYTES) problems.push(`${bytes} bytes (max ${MAX_BLOCK_BYTES})`);
+  return problems;
+}
+
+/** The text between the managed markers, without the fingerprint line. */
+function managedBody(file: string): string {
+  const block = extractBlock(file);
+  expect(block, 'file holds a managed block').not.toBeNull();
+  return block!.inner.replace(/^\n?<!-- openlore-fingerprint: [0-9a-f]+ -->\n/, '').trimEnd();
+}
+
+describe('the managed instruction block stays short', () => {
+  const template = () => readFile(join(process.cwd(), 'src/cli/install/templates/agent-instructions.md'), 'utf8');
+  const presets: Array<[string, ReadonlySet<string> | null]> = [
+    ...Object.entries(TOOL_PRESETS) as Array<[string, ReadonlySet<string>]>,
+    [FULL_PRESET, null],
+  ];
+
+  it('is 8 lines and 700 bytes or fewer for every preset', async () => {
+    const tpl = await template();
+    for (const [preset, tools] of presets) {
+      expect(blockSizeProblems(renderInstructionBlock(tpl, preset, tools)), preset).toEqual([]);
+    }
+  });
+
+  it('fails the guard when the block gains one more line', async () => {
+    const atLimit = Array.from({ length: MAX_BLOCK_LINES }, () => 'x').join('\n');
+    expect(blockSizeProblems(atLimit)).toEqual([]);
+    expect(blockSizeProblems(`${atLimit}\nx`)).toEqual([`${MAX_BLOCK_LINES + 1} lines (max ${MAX_BLOCK_LINES})`]);
+    expect(blockSizeProblems('x'.repeat(MAX_BLOCK_BYTES + 1))).toEqual([`${MAX_BLOCK_BYTES + 1} bytes (max ${MAX_BLOCK_BYTES})`]);
+  });
+
+  it('writes the same LF block from a CRLF checkout', async () => {
+    const tpl = await template();
+    const crlf = tpl.split('\n').join('\r\n');
+    expect(crlf).toContain('\r\n');
+    const block = renderInstructionBlock(crlf, 'substrate', TOOL_PRESETS.substrate);
+    expect(block).not.toContain('\r');
+    expect(block).toBe(renderInstructionBlock(tpl, 'substrate', TOOL_PRESETS.substrate));
+  });
+
+  it('names the orient tool only where the wired preset exposes it', async () => {
+    const tpl = await template();
+    for (const [preset, tools] of presets) {
+      const block = renderInstructionBlock(tpl, preset, tools);
+      expect(block, preset).not.toContain('{{orient}}');
+      expect(block.includes('the `orient` tool'), preset).toBe(tools === null || tools.has('orient'));
+      expect(block, preset).toContain('`openlore orient "<task>"`');
+      expect(block, preset).toContain(`Wired MCP surface: \`${preset}\``);
+    }
+    // `configuration` is the one preset without orient: the block names the CLI only.
+    expect(TOOL_PRESETS.configuration.has('orient')).toBe(false);
+  });
+
+  it('says what the proposal requires and nothing about the old tool tour', async () => {
+    const block = renderInstructionBlock(await template(), 'substrate', TOOL_PRESETS.substrate);
+    expect(block).toContain('stay silent when they have nothing new');
+    expect(block).toContain('openlore decisions record');
+    expect(block).toContain('.openlore/analysis/CODEBASE.md');
+    expect(block).not.toContain('@.openlore');
+    expect(block).not.toMatch(/Decision autopilot|governance.*autopilot/);
+  });
+});
+
+describe('install writes the short block in both scopes', () => {
+  let dir: string;
+  let home: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openlore-short-block-'));
+    home = await mkdtemp(join(tmpdir(), 'openlore-short-block-home-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  });
+
+  it('writes the same short block to the project and the user CLAUDE.md', async () => {
+    expect(await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home })).toBe(0);
+    const tpl = await readFile(join(process.cwd(), 'src/cli/install/templates/agent-instructions.md'), 'utf8');
+    const expected = renderInstructionBlock(tpl, 'substrate', TOOL_PRESETS.substrate).trimEnd();
+    for (const file of [join(dir, 'CLAUDE.md'), join(home, '.claude', 'CLAUDE.md')]) {
+      const body = managedBody(await readFile(file, 'utf8'));
+      expect(body, file).toBe(expected);
+      expect(blockSizeProblems(body), file).toEqual([]);
+    }
+  });
+
+  it('a re-install replaces an old long block inside its markers and keeps the text around it', async () => {
+    // The block an older version wrote: its own fingerprint, so it is not a hand edit.
+    const oldBody = [
+      'This project uses OpenLore for persistent architectural memory.',
+      '',
+      'Call `orient "<task description>"` (via the openlore MCP server, or',
+      '`npx openlore orient --json`) **before touching a module you have not yet read in',
+      'this session**, and when a task spans several modules.',
+      '',
+      'Wired MCP surface: `substrate`. This guidance is written for that surface; re-run `openlore install --preset <name>` to change it and regenerate these instructions.',
+    ].join('\n');
+    const userAbove = '# My project\n\n@.openlore/analysis/CODEBASE.md\n\n';
+    const userBelow = '\n\n## My notes\nkeep me\n';
+    await writeFile(join(dir, 'CLAUDE.md'), `${userAbove}${renderBlock(oldBody)}${userBelow}`);
+
+    expect(await runInstall({ cwd: dir, agent: 'claude-code', analyze: false, home, repoOnly: true })).toBe(0);
+    const after = await readFile(join(dir, 'CLAUDE.md'), 'utf8');
+    expect(after).not.toContain('persistent architectural memory');
+    expect(after.startsWith(userAbove)).toBe(true);
+    expect(after.endsWith(userBelow)).toBe(true);
+    expect(blockSizeProblems(managedBody(after))).toEqual([]);
+    expect(managedBody(after)).toContain('stay silent when they have nothing new');
+    expect(after).not.toContain('This project uses OpenLore for');
   });
 });

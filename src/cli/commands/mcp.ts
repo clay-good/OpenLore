@@ -595,17 +595,15 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'select_tests',
     description:
-      'USE THIS WHEN: you changed code and want to know which tests to run — ' +
-      '"which tests cover parseConfig?", "what should I run for this diff?". ' +
-      'Walks the call graph BACKWARD from the change to every test that transitively reaches it, ' +
-      'with the reaching path per test, and always includes changed and new test files; each test says why it was selected. ' +
-      'Deterministic, offline, no test run. ' +
-      'It is an over-approximate PRIORITIZER (run these first), not a sound replacement for the full ' +
-      'suite — the response states its confidence and coverage. A diff resolves to the symbols that ' +
-      'actually changed (formatting and comments are not changes); a file kept whole says why in ' +
-      'changeGranularity. The exact inverse of report_coverage_gaps ' +
-      '(which finds important code NO test reaches); this finds the reaching tests FOR a change. ' +
-      'Run analyze_codebase first.',
+      'USE THIS WHEN: you changed code and want to know which tests to run — "which tests cover ' +
+      'parseConfig?", "what should I run for this diff?". Walks the call graph BACKWARD from the ' +
+      'change to every test that reaches it, with the reaching path per test, and always includes ' +
+      'changed and new test files; each test says why it was selected. An over-approximate ' +
+      'PRIORITIZER (run these first), not a sound replacement for the full suite; the response ' +
+      'states its confidence and coverage. A diff resolves to the symbols that changed (formatting ' +
+      'and comments are not changes); a file kept whole says why in changeGranularity. The inverse ' +
+      'of report_coverage_gaps (important code NO test reaches). Deterministic, offline, no test ' +
+      'run. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -630,17 +628,15 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'blast_radius',
     description:
-      'USE THIS WHEN: before committing/editing, you want one briefing of what your diff actually ' +
-      'touches — "what is the blast radius of my changes?", "is this change safe to commit?". ' +
-      'Composes existing deterministic analyses over the staged/working diff into a single ' +
-      'conclusion-shaped briefing over the symbols the diff ACTUALLY changed (formatting and comments ' +
+      'USE THIS WHEN: before committing, you want one briefing of what your diff touches — "what is ' +
+      'the blast radius of my changes?", "is this safe to commit?". Composes deterministic analyses ' +
+      'over the staged/working diff, for the symbols it ACTUALLY changed (formatting and comments ' +
       'are not changes; a file kept whole says why in changeGranularity): affected callers and ' +
-      'layers crossed (analyze_impact), the tests ' +
-      'to run (select_tests), the anchored memories/decisions the diff will turn drifted/orphaned and ' +
-      'the specs it will make stale (check_spec_drift). No LLM, no new analysis — pure orchestration. ' +
-      'Advisory: it informs, you act. Distinct from its change-family siblings: structural_diff is the raw ' +
-      'graph delta + newly-stale callers, change_impact_certificate certifies the paths a diff newly opens ' +
-      'into a sensitive surface; this is the all-in-one pre-commit briefing. Run analyze_codebase first.',
+      'layers (analyze_impact), the tests to run (select_tests), the anchored memories/decisions it ' +
+      'will drift or orphan, and the specs it will make stale (check_spec_drift). Advisory. ' +
+      'Siblings: structural_diff is the raw graph delta + newly-stale callers; ' +
+      'change_impact_certificate certifies the paths a diff newly opens into a sensitive surface; ' +
+      'this is the all-in-one pre-commit briefing. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1744,15 +1740,15 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'certify_merge',
     description:
-      'USE THIS WHEN: before landing two branches that merge cleanly — "will these combine correctly, ' +
-      'or does one break what the other calls?". Builds the call graph at the merge-base and each ' +
-      'side, and reports where one side ADDS a call into a symbol the other side changed incompatibly ' +
-      'or removed — the "git merges cleanly, the combination is broken" failure textual merge cannot ' +
-      'see. Verdict per finding: incompatible (removed / breaking signature) or ' +
+      'USE THIS WHEN: before landing two branches that merge cleanly — "will these combine ' +
+      'correctly, or does one break what the other calls?". Builds the call graph at the merge-base ' +
+      'and each side, and reports where one side ADDS a call into a symbol the other side changed ' +
+      'incompatibly or removed: the "git merges cleanly, the combination is broken" failure textual ' +
+      'merge cannot see. Each finding is incompatible (removed / breaking signature) or ' +
       'potentially-incompatible (unprovable), never silently safe; the overall verdict is a sound ' +
-      'lower bound ("no detected incompatibility"). Completes the coordination arc after ' +
-      'plan_parallel_work (dispatch) and map_in_flight_conflicts (in flight); distinct from the ' +
-      'merge-tree oracle (will git textually conflict) — this answers what breaks when it does not. No LLM.',
+      'lower bound ("no detected incompatibility"). Follows plan_parallel_work (dispatch) and ' +
+      'map_in_flight_conflicts (in flight); the merge-tree oracle says whether git textually ' +
+      'conflicts, this says what breaks when it does not. No LLM.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1792,15 +1788,15 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'fleet_status',
     description:
-      'USE THIS WHEN: coordinating parallel agents/branches off a moving base — "which of my recorded ' +
-      'verdicts still hold, and what is the coordination picture?". Re-checks each recorded ' +
-      'coordination verdict (a clean blast radius, a stable public surface, a passed certify_merge) ' +
-      'against the current graph via the freshness lease: still-valid / carried / invalidated / ' +
-      'needs-reverification — a verdict is never served fresh once its base moved without the check. ' +
-      'Composes the coordination arc (plan_parallel_work → map_in_flight_conflicts → certify_merge), ' +
-      'referencing each tool. A record ENDS on board-entry evidence (30 min idle, recorded dir gone, branch ' +
-      'deleted or merged): then a count with its reason, not a live verdict. A rule it could not evaluate is ' +
-      'in unknownPredicates, never read as ended. Advisory.',
+      'USE THIS WHEN: coordinating parallel agents/branches off a moving base — "which of my ' +
+      'recorded verdicts still hold, and what is the coordination picture?". Re-checks each ' +
+      'recorded coordination verdict (a clean blast radius, a stable public surface, a passed ' +
+      'certify_merge) against the current graph via the freshness lease: still-valid / carried / ' +
+      'invalidated / needs-reverification; a verdict is never served fresh once its base moved ' +
+      'without the check. Composes plan_parallel_work → map_in_flight_conflicts → certify_merge. A ' +
+      'record ENDS on board-entry evidence (30 min idle, dir gone, branch deleted or merged): then ' +
+      'a count with its reason, not a live verdict. A rule it could not evaluate is in ' +
+      'unknownPredicates, never read as ended. Advisory.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1850,18 +1846,15 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'map_in_flight_conflicts',
     description:
-      'USE THIS WHEN: many humans/agents edit one codebase (or federation) and you want — before merge — ' +
-      'which in-flight changes collide. Builds ONE cross-actor conflict graph over every change in flight: ' +
-      'local branches, open PRs (via gh), and supplied agent task descriptors, as nodes of the same kind. ' +
-      'Each footprint is derived from the ACTUAL diff (per-symbol append vs modify read off the hunks, so ' +
-      'two PRs appending disjoint registry entries do NOT falsely conflict); the hazard classifier ' +
-      '(WAW/RAW/shared-append/WAR) then runs across all nodes. Returns per conflict: the two actors, ' +
-      'hazard, shared symbols, landing order, and git merge-tree textualMerge. ' +
-      'A change whose diff can\'t be fetched or whose ' +
-      'symbols don\'t resolve is "not assessed", never "no conflict". Read-only, stateless, advisory; ' +
-      'opt-in federation matches across repos by stable id. Same hazard classifier as plan_parallel_work, ' +
-      'different input: this harvests changes already in flight, plan_parallel_work plans a caller-supplied ' +
-      'task list. Run analyze_codebase first.',
+      'USE THIS WHEN: many humans/agents edit one codebase and you want to know, before merge, ' +
+      'which in-flight changes collide. Builds ONE conflict graph over local branches, open PRs ' +
+      '(via gh), and supplied agent task descriptors. Each footprint comes from the ACTUAL diff ' +
+      '(per-symbol append vs modify, so two PRs appending disjoint registry entries do NOT falsely ' +
+      'conflict); the WAW/RAW/shared-append/WAR classifier runs across all of them. Per conflict: ' +
+      'the two actors, hazard, shared symbols, landing order, and git merge-tree textualMerge. A ' +
+      'change whose diff can\'t be fetched or whose symbols don\'t resolve is "not assessed", never ' +
+      '"no conflict". Read-only, advisory. Same classifier as plan_parallel_work, which plans a ' +
+      'caller-supplied task list instead. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1894,13 +1887,12 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'get_language_support',
     description:
-      'USE THIS WHEN: a structural result for some file looks empty/weak and you need to know whether ' +
-      'that means "nothing found" or "this language is only partly supported" — or when evaluating ' +
-      `coverage for a polyglot repo. Returns the deterministic capability matrix (${LANGUAGE_CAPABILITIES.join(', ')}) for the repo's DETECTED ` +
-      'languages, or — with a `language` name — that one language (a pure registry lookup; an unknown ' +
-      'language returns an honest all-unsupported record, never an error). Fail-soft: an unsupported ' +
-      'capability yields nothing, never a guess. Read-only, deterministic. Run analyze_codebase first ' +
-      'for repo mode (named-language mode needs no analysis).',
+      'USE THIS WHEN: a result for a file looks empty or weak and you need to know whether ' +
+      'that means "nothing found" or "this language is only partly supported". Returns the deterministic ' +
+      `capability matrix (${LANGUAGE_CAPABILITIES.join(', ')}) for the repo's DETECTED languages, or, with a ` +
+      '`language` name, that one language (an unknown language returns an all-unsupported record, never ' +
+      'an error). An unsupported capability yields nothing, never a guess. Repo mode needs analyze_codebase ' +
+      'first; a named language does not.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1913,16 +1905,15 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'report_coverage_gaps',
     description:
-      'USE THIS WHEN: you need to know which important code has NO test reaching it — a reviewer ' +
-      'asking "is the risky part of this change tested?", an agent told to "improve coverage" and ' +
-      'needing where to start, or an audit wanting the untested HUBS ranked, not a flat list. ' +
-      'Computes the structural inverse of select_tests over the whole graph (functions in no test\'s ' +
-      'reachable set), ranked by hub/chokepoint significance so load-bearing untested code floats to ' +
-      'the top. SOUND DIRECTION ONLY: it reports "no reaching test" and NEVER claims a symbol is ' +
-      '"tested" — reachable-from-a-test is not behavior-verified. Distinct from find_dead_code (a gap ' +
-      'with no caller at all is labeled also-dead) and from get_test_coverage (spec-tag based). ' +
-      'No runtime, no coverage tool, deterministic. Scope to a diff (changedSymbols/diffRef) or a ' +
-      'region (filePattern). Run analyze_codebase first.',
+      'USE THIS WHEN: you need to know which important code has NO test reaching it — "is the risky ' +
+      'part of this change tested?", where to start improving coverage, or the untested HUBS ' +
+      'ranked. Computes the structural inverse of select_tests over the whole graph (functions in ' +
+      'no test\'s reachable set), ranked by hub/chokepoint significance. SOUND DIRECTION ONLY: it ' +
+      'reports "no reaching test" and NEVER claims a symbol is "tested"; reachable-from-a-test is ' +
+      'not behavior-verified. Distinct from find_dead_code (a gap with no caller at all is labeled ' +
+      'also-dead) and from get_test_coverage (spec-tag based). No runtime, no coverage tool, ' +
+      'deterministic. Scope to a diff (changedSymbols/diffRef) or a region (filePattern). Run ' +
+      'analyze_codebase first.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1939,17 +1930,16 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'certify_public_surface',
     description:
-      'USE THIS WHEN: you are about to ship a change to a library/module and need to know "did I ' +
-      'break my consumers\' contract?" (removed/renamed export, new required param, narrowed types, ' +
-      'reduced visibility). No base ref: the PUBLIC SURFACE (exports + signatures). With a base ' +
-      'ref: a deterministic breaking-change VERDICT for the working-tree ' +
-      'diff: each changed export breaking | non-breaking | potentially-breaking; each breaking one is ' +
-      'breaking-consumed (with its consumers) or breaking-unconsumed-in-index (never "safe"); ' +
-      'federation also counts indexed sibling repos. Breakages accepted in ' +
-      '.openlore/public-surface-baseline.jsonl are listed as accepted, not findings. Unprovable ' +
-      '= potentially-breaking, NEVER silently safe. Renames are reported as renames. Distinct from ' +
-      'change_impact_certificate (paths into a surface). No LLM. Signatures: TS/JS/Python; others ' +
-      'fail-soft. Run analyze_codebase first.',
+      'USE THIS WHEN: you are about to ship a library change — "did I break my consumers\' ' +
+      'contract?" (removed/renamed export, new required param, narrowed types, reduced visibility). ' +
+      'No base ref: the PUBLIC SURFACE (exports + signatures). With a base ref: a breaking-change ' +
+      'VERDICT for the working-tree diff, each changed export breaking | non-breaking | ' +
+      'potentially-breaking; a breaking one is breaking-consumed (with consumers) or ' +
+      'breaking-unconsumed-in-index (never "safe"); federation also counts indexed sibling repos. ' +
+      'Breakages accepted in .openlore/public-surface-baseline.jsonl are listed as accepted. ' +
+      'Unprovable = potentially-breaking. Renames are reported as renames. Distinct from ' +
+      'change_impact_certificate (paths into a surface). Signatures: TS/JS/Python; others ' +
+      'fail-soft.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1964,18 +1954,15 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'get_style_fingerprint',
     description:
-      'USE THIS WHEN: you are about to write or edit code and want to match the codebase\'s house ' +
-      'style instead of your training-prior default. Returns a DESCRIPTIVE, deterministic idiom ' +
-      'profile measured from the AST: per language, the dominant choice for each of a fixed set of ' +
-      'idioms (arrow vs. declared function, const vs. let, ternary vs. if, await vs. .then, template ' +
-      'vs. concatenation, function-naming case) reported as { dominant, ratio, samples }. Repository ' +
-      'profile by default; pass communityId for a region (from get_map) or filePath for one file. ' +
-      'HONEST BY CONSTRUCTION: an idiom below the evidence floor, or one the language/formatter ' +
-      'enforces (e.g. Go ties identifier case to visibility), reports a null signal rather than a ' +
-      'misleading or tautological ratio — never a guess. Descriptive, not prescriptive: it measures ' +
-      'what the code IS, emits no lint judgment and no composite style score. Supported languages: ' +
-      'TypeScript, JavaScript, Python, Go (others contribute nothing, fail-soft). No LLM, offline. ' +
-      'Run analyze_codebase first.',
+      'USE THIS WHEN: you are about to write or edit code and want to match the house style instead ' +
+      'of your training default. Returns a DESCRIPTIVE idiom profile measured from the AST: per ' +
+      'language, the dominant choice for a fixed set of idioms (arrow vs. declared function, const ' +
+      'vs. let, ternary vs. if, await vs. .then, template vs. concatenation, function-naming case) ' +
+      'as { dominant, ratio, samples }. Repository profile by default; pass communityId for a ' +
+      'region (from get_map) or filePath for one file. An idiom below the evidence floor, or one ' +
+      'the language or formatter enforces (Go ties case to visibility), reports a null signal, ' +
+      'never a guess. No lint judgment, no composite style score. Languages: TypeScript, ' +
+      'JavaScript, Python, Go (others fail-soft). Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -2014,14 +2001,13 @@ export const TOOL_DEFINITIONS = [
     description:
       'USE THIS WHEN: you take over in-flight work in a fresh context (after compaction, a cleared ' +
       'session, or another machine) and need the state of the change, not a prose summary. Unlike ' +
-      'blast_radius (reviews a pending diff), briefing_since (catches up on others\' landed changes) ' +
-      'and orient (starts a task), this hands an in-flight change over: the symbols touched (working ' +
-      'tree, plus those this session committed when a session ledger is live) with callers, the open ' +
-      'openspec changes naming them with unchecked tasks quoted, the tests that reach them, anchored ' +
-      'memories and decisions in scope (orphaned ones withheld), specs that may go stale, and the ' +
-      'uncommitted files and index lease. Every element names the call that expands it; a budget trims ' +
-      'the least central sections first with omission receipts. Deterministic: the same repository ' +
-      'state gives the same briefing. A clean tree says nothing is in flight. Reads no transcript.',
+      'blast_radius (a pending diff), briefing_since (others\' landed changes) and orient (a new ' +
+      'task), this hands over an in-flight change: the touched symbols (working tree, plus this ' +
+      'session\'s commits when a session ledger is live) with callers, open openspec changes naming ' +
+      'them with unchecked tasks quoted, reaching tests, in-scope memories and decisions (orphaned ' +
+      'ones withheld), specs that may go stale, uncommitted files, and the index lease. A budget ' +
+      'trims the least central sections first, with omission receipts. A clean tree says nothing is ' +
+      'in flight. Reads no transcript.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -2034,21 +2020,16 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'briefing_since',
     description:
-      'USE THIS WHEN: a lot changed in this repo since you last looked (a large PR to review, ' +
-      'returning after time away, onboarding onto an active codebase) and you want to know which ' +
-      'changes STRUCTURALLY MATTER — not a flat wall of changed lines. Unlike blast_radius / ' +
-      'change_impact_certificate (which brief YOUR pending diff), this briefs everything that ' +
-      'changed SINCE a base ref. Returns the changed production symbols ranked into a fixed tier ' +
-      'order — surprising-change (a high-fan-in hub whose file rarely changed before) > hub-change ' +
-      '(a broad high-fan-in/high-fan-out hub) > chokepoint-change (a high-fan-in funnel) > ' +
-      'ordinary-change — using labels OpenLore already computes, NOT a weighted score. Each briefed ' +
-      'symbol carries its labels and raw evidence (fan-in, fan-out, prior churn), grouped by region, ' +
-      'with the tests to run for the whole change set. HONEST BY CONSTRUCTION: changed symbols are ' +
-      'exact where both revisions hash cleanly (renames are listed under carried), and a file kept ' +
-      'whole says why; the surprising-change label is withheld when git history is too ' +
-      'shallow to say "rarely changed before"; a bounded briefing always carries a truncation receipt ' +
-      '(omitted count + lowest tier reached) and never drops a higher tier for a lower one. The cursor ' +
-      'is the base ref, never wall-clock time. Deterministic, offline, no LLM. Run analyze_codebase first.',
+      'USE THIS WHEN: a lot changed since you last looked (a large PR to review, time away, ' +
+      'onboarding) and you want the changes that STRUCTURALLY MATTER. Unlike blast_radius / ' +
+      'change_impact_certificate (YOUR pending diff), this briefs everything SINCE a base ref. ' +
+      'Changed production symbols are ranked in a fixed tier order, surprising-change (a hub whose ' +
+      'file rarely changed) > hub-change > chokepoint-change > ordinary-change, from existing ' +
+      'labels, NOT a weighted score; each carries raw evidence (fan-in, fan-out, prior churn), ' +
+      'grouped by region, with the tests to run. Renames are listed under carried; ' +
+      'surprising-change is withheld when history is too shallow; a bounded briefing carries a ' +
+      'truncation receipt and never drops a higher tier for a lower one. Run analyze_codebase ' +
+      'first.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -2063,22 +2044,15 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'find_clones',
     description:
-      'USE THIS WHEN: you are about to write a function (or just wrote one) and want to know "does a ' +
-      'near-duplicate already exist that I should reuse or extend instead of reinventing?". Unlike ' +
-      'get_duplicate_report (the whole-repo audit of every clone group), this is SCOPED to one query: ' +
-      'a single symbol or a single snippet. Pass `symbol` (a function name, or name::path, already in ' +
-      'the index) to find clones of an existing function, OR `snippet` (raw code not necessarily in ' +
-      'the index) to check code BEFORE you write it — the pre-write question the whole-repo report ' +
-      'cannot answer. Returns the existing clones ranked: exact (identical after normalization) > ' +
-      'structural (same shape, renamed identifiers) > near (high token-overlap, Jaccard ≥ floor), each ' +
-      'naming the file, function, class, line range, type, similarity, and language (so a cross-language ' +
-      'match is visible) — the canonical implementation ' +
-      'to reuse. Reuses the same detector as get_duplicate_report (no new algorithm or constant), but ' +
-      'one-vs-all so it computes near-clones even on repos where the whole-repo O(n²) pass is skipped. ' +
-      'HONEST BY CONSTRUCTION: an unknown symbol is an explicit not-found (with candidates), never an ' +
-      'empty "unique"; a query below the evidence floor reports "too small to compare", not "no clones"; ' +
-      'the query never matches itself; HTML inline-script symbols are excluded (disclosed). ' +
-      'Deterministic, offline, no LLM. Run analyze_codebase first.',
+      'USE THIS WHEN: you are about to write a function — "does a near-duplicate already exist that ' +
+      'I should reuse?". Unlike get_duplicate_report (the whole-repo audit of every clone group), ' +
+      'this answers ONE query: `symbol` (name or name::path in the index) or `snippet` (raw code, ' +
+      'checked BEFORE you write it). Returns clones ranked exact > structural (renamed identifiers) ' +
+      '> near (token overlap ≥ floor), each with file, function, line range, similarity, and ' +
+      'language. One-vs-all, so it works where the whole-repo O(n²) pass is skipped. An unknown ' +
+      'symbol is not-found with candidates, never "unique"; a query below the evidence floor is ' +
+      '"too small to compare"; the query never matches itself; HTML inline-script symbols are ' +
+      'excluded. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -2094,19 +2068,14 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'locate_symbol_span',
     description:
-      'USE THIS WHEN: you know WHICH symbol to edit and need the byte-exact location to apply the edit at — ' +
-      'instead of re-finding it by string-matching a fresh read (wrong-overload hits, duplicated snippets, ' +
-      'whitespace drift). Resolves `symbol` (a function name, or name::path to disambiguate — the same ' +
-      'addressing as find_clones) and returns the span (startByte/endByte as UTF-16 code-unit offsets + ' +
-      '1-based startLine/endLine) plus a freshness VERDICT: `fresh` (the index still matches the file — the ' +
-      'offsets are safe to edit at, with a contentHash integrity token), `stale` (the file changed since ' +
-      'analysis — returns a re-analyze hint and NO offset, refusing to hand out a location the substrate can ' +
-      'no longer vouch for), `ambiguous` (a bare name matching several symbols → the name::path candidate ' +
-      'list), or `not-found` (unknown symbol → candidates). Unlike suggest_insertion_points (which RANKS where ' +
-      'to ADD new code) this pinpoints an EXISTING symbol\'s current bytes to modify. READ-ONLY: OpenLore ' +
-      'returns the location and the freshness guarantee; the host applies the write with its own edit tool — ' +
-      'no write face, no shell. Computed live from the cached graph + a re-read of the one file the symbol ' +
-      'spans (no new artifact). Deterministic, offline, no LLM. Run analyze_codebase first.',
+      'USE THIS WHEN: you know WHICH symbol to edit and need its exact location, instead of ' +
+      're-finding it by string-matching a fresh read. Resolves `symbol` (a name, or name::path to ' +
+      'disambiguate) and returns the span (startByte/endByte as UTF-16 code-unit offsets + 1-based ' +
+      'startLine/endLine) with a freshness VERDICT: `fresh` (the index matches the file; safe to ' +
+      'edit at, with a contentHash token), `stale` (the file changed since analysis; a re-analyze ' +
+      'hint and NO offset), `ambiguous` (name::path candidates), or `not-found` (candidates). ' +
+      'Unlike suggest_insertion_points (where to ADD code), this pinpoints an EXISTING symbol. ' +
+      'Read-only: the host applies the edit with its own edit tool. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -2120,22 +2089,16 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'analyze_error_propagation',
     description:
-      'USE THIS WHEN: you are about to call a function and want to know "what exceptions can blow out ' +
-      'of here, and is any already handled?" — or you changed a function to throw and need "who is ' +
-      'exposed, and where (if anywhere) is it caught?". The error-handling analogue of analyze_impact: ' +
-      'given a `symbol` (a function name, or name::path, in the index), it returns `escapes` (the ' +
-      'exception types that can propagate OUT of the function to its callers — each with the origin ' +
-      'function/file/line, whether it is a direct throw or propagated from a callee, and the call ' +
-      'path) and `handledInternally` (exceptions thrown in the reachable subtree but caught within ' +
-      'this function, so callers are shielded). Computed live from the cached call graph + a re-read ' +
-      'of the source it spans (no new artifact). SCOPE: TypeScript / JavaScript / Python / Java / C# exceptions, ' +
-      'plus a separate Go returned-error and panic/recover value model (`errorModel: go-value`, with `value` ' +
-      'rather than exception `type` entries) — a symbol in ' +
-      'any other language returns an explicit `unsupported` result, never an empty escape set. HONEST: ' +
-      'a SOUND LOWER BOUND — an un-analyzable callee (external/bodyless/unsupported/over-bound) is ' +
-      'disclosed in `boundaries`, never assumed exception-free; a re-raise/throw whose static type is ' +
-      'unknowable is surfaced as `<dynamic>`, never dropped; Python typed `except` is matched by exact ' +
-      'name only (no subclass hierarchy), disclosed. Deterministic, offline, no LLM. Run analyze_codebase first.',
+      'USE THIS WHEN: you are about to call a function ("what can it throw, and is any of it ' +
+      'handled?") or you made one throw ("who is exposed, and where is it caught?"). The error ' +
+      'analogue of analyze_impact: for a `symbol` (name or name::path), returns `escapes` ' +
+      '(exception types that propagate OUT to callers, each with origin file/line and call path) ' +
+      'and `handledInternally` (caught within this function). SCOPE: TS/JS/Python/Java/C# ' +
+      'exceptions, plus a Go returned-error and panic/recover model (`errorModel: go-value`); any ' +
+      'other language returns `unsupported`, never an empty escape set. A SOUND LOWER BOUND: an ' +
+      'un-analyzable callee is disclosed in `boundaries`, never assumed exception-free; an ' +
+      'unknowable throw type is `<dynamic>`; Python `except` matches exact names. Run ' +
+      'analyze_codebase first.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -2150,19 +2113,15 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'analyze_env_impact',
     description:
-      'USE THIS WHEN: you are about to remove or rename an environment variable and want to know ' +
-      '"what breaks?" — the configuration analogue of analyze_impact. Given an env var `name` (e.g. ' +
-      'DATABASE_URL), it returns the line-precise `readSites` (file/line/enclosing function; a read ' +
-      'outside any function is reported module-level), the `affectedFunctions` (upstream callers that ' +
-      'transitively reach a read — the blast radius), the `reachingTests` to run, whether the var is ' +
-      'declared with a default, and per-site `required` (a read with no site-local fallback is a hard ' +
-      'break). Computed live from the cached call graph + a re-read of the files the env inventory ' +
-      'flags for the var (no new artifact). SCOPE: environment-variable reads in TypeScript / ' +
-      'JavaScript / Python / Go / Ruby — config-object key reads are a disclosed out-of-scope ' +
-      'boundary, never guessed. HONEST: an unknown var returns not-found + candidates (never an empty ' +
-      '"unused"); a module-level read and the call graph\'s resolution limits are disclosed in ' +
-      '`boundaries`, so the blast radius is a SOUND LOWER BOUND. Deterministic, offline, no LLM. Run ' +
-      'analyze_codebase first.',
+      'USE THIS WHEN: you are about to remove or rename an environment variable — "what breaks?". ' +
+      'The config analogue of analyze_impact: for an env var `name`, returns line-precise ' +
+      '`readSites` (file/line/enclosing function, or module-level), `affectedFunctions` (callers ' +
+      'that transitively reach a read), `reachingTests`, whether the var is declared with a ' +
+      'default, and per-site `required` (a read with no site-local fallback is a hard break). ' +
+      'SCOPE: env reads in TS/JS/Python/Go/Ruby; config-object key reads are a disclosed ' +
+      'out-of-scope boundary, never guessed. An unknown var returns not-found + candidates (never ' +
+      '"unused"); module-level reads and call-graph limits are disclosed in `boundaries`, so the ' +
+      'blast radius is a SOUND LOWER BOUND. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -2732,11 +2691,11 @@ export const STANDING_CONTEXT_BUDGETS: Record<string, {
   navigation: { baselineTokens: 3_533, maxTokens: 3_800, rationale: 'Exact v1 wire baseline plus 7.6% headroom.' },
   memory: { baselineTokens: 1_510, maxTokens: 1_610, rationale: 'Re-baselined from 1,216 for remember\'s trigger and pinned inputs (change: add-memory-trigger-predicates), then from 1,399 for its bounded claims input (change: add-memory-claim-verdicts), plus 6.6% headroom.' },
   verify: { baselineTokens: 2_075, maxTokens: 2_220, rationale: 'Grew with verify_change then certify_provenance (add-verification-feedback-loop, add-change-provenance-certificate); exact measured baseline plus 7.0% headroom.' },
-  federation: { baselineTokens: 3_837, maxTokens: 4_100, rationale: 'Exact v1 wire baseline plus 6.9% headroom.' },
-  coordination: { baselineTokens: 3_721, maxTokens: 3_980, rationale: 'Grew with certify_merge, fleet_status, then declare_footprint (add-merge-semantic-certificate, add-fleet-coordination-arc, add-peer-footprint-board), then a description on every input (mcp-quality Complete Input Schemas); exact measured baseline plus 7.0% headroom.' },
-  plugin: { baselineTokens: 4_225, maxTokens: 4_520, rationale: 'The Claude Code plugin set (change: reframe-governance-as-agent-evidence); exact measured baseline plus 7.0% headroom.' },
-  substrate: { baselineTokens: 5_131, maxTokens: 5_500, rationale: 'Exact v1 wire baseline plus 7.2% headroom.' },
-  full: { baselineTokens: 28_680, maxTokens: 30_000, rationale: 'Grew with verify_change, certify_provenance, certify_merge, get_handoff_briefing, certify_service_contract, and declare_footprint; re-baselined at 28,680 measured after a description on each of the 47 inputs that had none (mcp-quality Complete Input Schemas) plus 4.6% headroom.' },
+  federation: { baselineTokens: 3_918, maxTokens: 4_100, rationale: 'Re-baselined at 3,918 measured after map_in_flight_conflicts and briefing_since were cut to 800 characters (change: trim-standing-agent-instructions); plus 4.6% headroom.' },
+  coordination: { baselineTokens: 3_630, maxTokens: 3_880, rationale: 'Grew with certify_merge, fleet_status, then declare_footprint (add-merge-semantic-certificate, add-fleet-coordination-arc, add-peer-footprint-board), then a description on every input (mcp-quality Complete Input Schemas); re-baselined at 3,630 after its long descriptions were cut to 800 characters (change: trim-standing-agent-instructions), plus 6.9% headroom.' },
+  plugin: { baselineTokens: 4_190, maxTokens: 4_450, rationale: 'The Claude Code plugin set (change: reframe-governance-as-agent-evidence); re-baselined at 4,190 after blast_radius and select_tests were cut to 800 characters (change: trim-standing-agent-instructions), plus 6.2% headroom.' },
+  substrate: { baselineTokens: 5_214, maxTokens: 5_500, rationale: 'Re-baselined at 5,214 measured after blast_radius was cut to 800 characters (change: trim-standing-agent-instructions); plus 5.5% headroom.' },
+  full: { baselineTokens: 27_625, maxTokens: 29_000, rationale: 'Grew with verify_change, certify_provenance, certify_merge, get_handoff_briefing, certify_service_contract, and declare_footprint, then a description on each of the 47 inputs that had none (mcp-quality Complete Input Schemas); re-baselined at 27,625 measured after the 15 descriptions over 800 characters were cut (change: trim-standing-agent-instructions), plus 5.0% headroom.' },
 };
 
 /**

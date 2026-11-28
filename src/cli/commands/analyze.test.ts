@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { analyzeCommand, defaultSpecsDir, formatIndexedFunctionPopulation, formatSpecIndexFailure, runAnalysis } from './analyze.js';
+import { agentSetupTip, analyzeCommand, defaultSpecsDir, formatIndexedFunctionPopulation, formatSpecIndexFailure, runAnalysis } from './analyze.js';
 import { ARTIFACT_FINGERPRINT } from '../../constants.js';
 
 // ============================================================================
@@ -414,6 +414,19 @@ describe('analyze command', () => {
 
       for (const file of expectedFiles) {
         expect(file).toBeTruthy();
+      }
+    });
+  });
+
+  describe('agent setup tip (change: trim-standing-agent-instructions)', () => {
+    it('is one line that names install and the digest path, with no tool table', () => {
+      const tip = agentSetupTip('.openlore/analysis/');
+      expect(tip.split('\n')).toHaveLength(1);
+      expect(tip).toContain('openlore install');
+      expect(tip).toContain('.openlore/analysis/CODEBASE.md');
+      expect(tip).not.toMatch(/\|/);
+      for (const tool of ['search_code', 'get_subgraph', 'orient', 'suggest_insertion_points', 'check_spec_drift', 'search_specs']) {
+        expect(tip).not.toContain(tool);
       }
     });
   });

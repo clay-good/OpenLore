@@ -16,7 +16,8 @@ import { formatAge } from '../../utils/command-helpers.js';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
+import { ARTIFACT_SLIM_DIGEST, OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
+import { OPENLORE_BLOCK_BEGIN, OPENLORE_BLOCK_END } from '../../utils/openlore-managed-file.js';
 import { LOOP_MOMENTS } from '../../core/services/hook-session.js';
 import { formatBuildProgress, readBuildProgress, type BuildProgress } from '../../core/services/build-progress.js';
 import { readFindingOutcomes, readHookHealth, type FindingOutcomes, type MomentHealth } from '../../core/services/hook-health.js';
@@ -37,7 +38,7 @@ import {
 } from '../../core/analyzer/embedder.js';
 import { readIndexReceipt, type IndexEmbedFailure } from '../../core/analyzer/analysis-indexes.js';
 import { VectorIndex } from '../../core/analyzer/vector-index.js';
-import { safeJoin } from '../../utils/path-confinement.js';
+import { readFileConfined, safeJoin } from '../../utils/path-confinement.js';
 import { sanitizeForTerminal as safe } from '../../utils/misc.js';
 import { execFileGit } from '../../utils/git-exec.js';
 import { assessWiring, type WiringScope } from '../install/wiring-scope.js';
@@ -100,6 +101,67 @@ export interface IndexStatus {
    * background changes and edit loops — or why they are withheld. Set by `openlore status` only.
    */
   session?: SessionStatus;
+  /**
+   * A `CLAUDE.md` line, outside the managed markers, that `@`-imports the full digest on every
+   * turn while the slim digest already reaches the agent once per session (change:
+   * trim-standing-agent-instructions). Set by `openlore status` only; status never edits the file.
+   */
+  legacyDigestImport?: LegacyDigestImport;
+}
+
+export interface LegacyDigestImport {
+  file: 'CLAUDE.md';
+  /** 1-based line numbers of each import line outside the managed block. */
+  lines: number[];
+  /** Size of the imported `CODEBASE.md`, in bytes: what each turn loads. */
+  digestBytes: number;
+}
+
+/** The full digest `generateCodebaseDigest` writes. */
+const ARTIFACT_DIGEST = 'CODEBASE.md';
+/** The import line an older `openlore analyze --ai-configs` wrote into `CLAUDE.md`. */
+const LEGACY_DIGEST_IMPORT = `@${OPENLORE_DIR}/${OPENLORE_ANALYSIS_SUBDIR}/${ARTIFACT_DIGEST}`;
+const CLAUDE_MD_MAX_BYTES = 1_048_576;
+
+/**
+ * Find a legacy full-digest `@`-import in the repository's `CLAUDE.md`. Reported only when it is
+ * dead weight: the slim digest and the full digest both exist, and the line is outside the
+ * managed block (a user-owned line; `openlore install` never touches it). Read-only and
+ * fail-soft: an unreadable or oversized file reports nothing.
+ */
+export async function findLegacyDigestImport(rootPath: string): Promise<LegacyDigestImport | null> {
+  const analysisDir = join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR);
+  let digestBytes: number;
+  try {
+    if (!statSync(join(analysisDir, ARTIFACT_SLIM_DIGEST)).isFile()) return null;
+    const digest = statSync(join(analysisDir, ARTIFACT_DIGEST));
+    if (!digest.isFile()) return null;
+    digestBytes = digest.size;
+  } catch {
+    return null;
+  }
+  let text: string;
+  try {
+    text = await readFileConfined(rootPath, 'CLAUDE.md', CLAUDE_MD_MAX_BYTES);
+  } catch {
+    return null;
+  }
+  const lines: number[] = [];
+  let inBlock = false;
+  text.split(/\r?\n/).forEach((line, i) => {
+    if (line.includes(OPENLORE_BLOCK_BEGIN)) inBlock = true;
+    if (!inBlock && line.trim() === LEGACY_DIGEST_IMPORT) lines.push(i + 1);
+    if (line.includes(OPENLORE_BLOCK_END)) inBlock = false;
+  });
+  return lines.length ? { file: 'CLAUDE.md', lines, digestBytes } : null;
+}
+
+/** The one status line for a legacy import, with the command that deletes it. */
+export function formatLegacyDigestImport(found: LegacyDigestImport): string {
+  const where = found.lines.map(n => `${found.file}:${n}`).join(', ');
+  const script = found.lines.map(n => `${n}d`).join(';');
+  return `${where} imports ${LEGACY_DIGEST_IMPORT.slice(1)} (${found.digestBytes.toLocaleString('en-US')} bytes) on every turn; ` +
+    `where the prompt hook is wired, the slim digest reaches the agent once per session instead. Delete it: sed -i.bak '${script}' ${found.file}`;
 }
 
 export type SessionStatus =
@@ -378,6 +440,8 @@ Read-only: this never builds, rebuilds, or locks the index.
       hookMoments: collectHookMoments(rootPath),
       ...(health.length ? { hookHealth: health, hookOutcomes: await readFindingOutcomes(rootPath) } : {}),
     };
+    const legacyImport = await findLegacyDigestImport(rootPath);
+    if (legacyImport) status.legacyDigestImport = legacyImport;
 
     if (options.json) {
       console.log(jsonOutput(status));
@@ -407,6 +471,10 @@ Read-only: this never builds, rebuilds, or locks the index.
       console.log(`  ${label('Session ledger')} ${safe(line)}`);
     } else if (session) {
       console.log(`  ${label('Session ledger')} ${c.dim(safe(session.withheld))}`);
+    }
+
+    if (status.legacyDigestImport) {
+      console.log(`  ${label('Legacy import')} ${c.yellow(safe(formatLegacyDigestImport(status.legacyDigestImport)))}`);
     }
 
     // Everything printed below that came from the repository — its config, its index
