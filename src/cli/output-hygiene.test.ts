@@ -190,6 +190,8 @@ const ALLOWED_RAW_INTERPOLATIONS: Record<string, readonly string[]> = {
     'c.dim(\'\u2192 Run "openlore analyze" to build one\')',
     "label('Wiring scope')",
     "label('Session ledger')",
+    "label('Legacy import')",
+    "label('Digest pointer')",
     "label('Loop hooks')",
     "label('Hook health')",
     "label('Index build')",

@@ -106,7 +106,7 @@ describe('openlore install — auto index build', () => {
     }
     const out = chunks.join('\n');
     expect(out).not.toContain('Agent config files: not generated');
-    expect(out).not.toContain('Agent setup (one-time)');
+    expect(out).not.toContain('Agent setup');
     expect(out).not.toContain("Run 'openlore generate'");
   }, 30_000);
 

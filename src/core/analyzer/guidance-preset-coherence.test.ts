@@ -89,19 +89,11 @@ describe('generated guidance ↔ wired preset coherence', () => {
     expect(guidance).not.toContain('`prepare_spec_repair <domain>`');
   });
 
-  it('prescribes both spec workflows on the default substrate surface', async () => {
-    writeMcpConfig(dir, ['--yes', 'openlore', 'mcp', '--preset', LEAN_DEFAULT_PRESET]);
-    const guidance = await generate(dir);
-
-    expect(guidance).toContain('`prepare_spec_generation <domain>`');
-    expect(guidance).toContain('`prepare_spec_repair <domain>`');
-  });
-
-  it('prescribes the decision workflow on the full surface', async () => {
+  it('prescribes the decision tool on the full surface', async () => {
     writeMcpConfig(dir, ['--yes', 'openlore', 'mcp', '--preset', FULL_PRESET]);
     const guidance = await generate(dir);
 
-    expect(guidance).toContain('record_decision({');
+    expect(guidance).toContain('call `record_decision` before writing the code');
     expect(guidance).not.toContain('is **not** part of the wired');
   });
 
@@ -111,7 +103,7 @@ describe('generated guidance ↔ wired preset coherence', () => {
 
     expect(guidance).toContain('`record_decision` is **not** part of the wired');
     expect(guidance).toContain('openlore install --preset');
-    expect(guidance).not.toContain('record_decision({');   // no callable example
+    expect(guidance).not.toContain('call `record_decision`');   // never as callable
     // The CLI records the same draft on any preset (change: add-decisions-record-cli).
     expect(guidance).toContain('openlore decisions record --title');
   });
@@ -153,7 +145,7 @@ describe('generated guidance ↔ wired preset coherence', () => {
 
   it('treats --all-tools as the full surface', async () => {
     writeMcpConfig(dir, ['--yes', 'openlore', 'mcp', '--all-tools']);
-    expect(await generate(dir)).toContain('record_decision({');
+    expect(await generate(dir)).toContain('call `record_decision` before writing the code');
   });
 });
 
@@ -166,7 +158,46 @@ describe('orient guidance is conditional', () => {
 
   it('states the condition and the exemption', async () => {
     const guidance = await generate(dir);
-    expect(guidance).toContain('before touching a module you have not yet read');
+    expect(guidance).toMatch(/before touching a module you have not yet read/i);
     expect(guidance).toContain('do not need re-orientation');
+  });
+});
+
+/** The `## openlore MCP workflow` section through the end of the file. */
+function workflowSection(markdown: string): string {
+  const start = markdown.indexOf('## openlore MCP workflow');
+  expect(start, 'the generated file has a workflow section').toBeGreaterThanOrEqual(0);
+  return markdown.slice(start).trimEnd();
+}
+
+describe('the workflow section is short (change: trim-standing-agent-instructions)', () => {
+  const presets = [...Object.keys(TOOL_PRESETS), FULL_PRESET];
+
+  it('is 10 lines or fewer and names no tool outside the wired preset, for every preset', async () => {
+    for (const preset of presets) {
+      const root = mkdtempSync(join(tmpdir(), `openlore-guidance-${preset}-`));
+      try {
+        writeMcpConfig(root, ['--yes', 'openlore', 'mcp', '--preset', preset]);
+        const section = workflowSection(await generate(root));
+        expect(section.split('\n').length, `${preset}: ${section}`).toBeLessThanOrEqual(10);
+        expect(section, preset).toContain(`Written for the wired \`${preset}\` surface`);
+        expect(section, preset).toContain('openlore decisions record');
+        const wired = preset === FULL_PRESET ? null : TOOL_PRESETS[preset]!;
+        if (wired) {
+          const outside = prescribedTools(withoutUnavailabilityNotes(section)).filter(t => !wired.has(t));
+          expect(outside, preset).toEqual([]);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('names the orient CLI, not the tool, on the one preset without orient', async () => {
+    expect(TOOL_PRESETS.configuration!.has('orient')).toBe(false);
+    writeMcpConfig(dir, ['--yes', 'openlore', 'mcp', '--preset', 'configuration']);
+    const section = workflowSection(await generate(dir));
+    expect(section).toContain('run `openlore orient "<task>"`');
+    expect(section).not.toContain('call `orient');
   });
 });

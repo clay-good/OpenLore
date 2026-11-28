@@ -1,6 +1,6 @@
 # Cut the standing instructions to a few lines
 
-> Priority: P1 · Not built
+> Priority: P1 · Built (archived with the PR that built it)
 > Reaches the agent through: the instruction files the harness loads on every turn (`CLAUDE.md`, `AGENTS.md`), and the MCP tool list
 > Why it helps the agent: it spends its context on the task, not on reading how OpenLore works before it does any work.
 
@@ -48,8 +48,18 @@ agent to do work that OpenLore now does by itself.
 ## Limits we disclose
 
 - A `CLAUDE.md` that an older version created holds the `@`-import outside any marker, so this
-  change does not remove it. `openlore status` names the line and its size once, with the command
-  to delete it; it does not edit the file.
+  change does not remove it. `openlore status` names the line and its size once and says which line to
+  delete; it does not edit the file.
+- A generated `CLAUDE.md` drops the `@`-import only when the slim digest really reaches the agent:
+  the prompt hook is wired (user or project Claude settings), the prompt moment and context
+  injection are on, and the digest is the one analyze writes at the default path. Otherwise the
+  import stays. `openlore status` uses the same check. The check runs where the file is generated:
+  a committed `CLAUDE.md` without the import gives a teammate with no prompt hook only the path line.
+  MDM, registry and server-managed Claude policy, and plugin hooks, are not read; each gap keeps the
+  import.
+- Found in review, left for their own PRs (ROADMAP "Fix first"): the decisions-gate block adds about
+  2.2 KB in a git repository, and the block on Cline and `AGENTS.md` names an MCP surface those
+  adapters do not register.
 - The block is not deduplicated across user and project scope. At 8 lines the copy costs little,
   and the project copy is what teammates without a user-scope install see.
 

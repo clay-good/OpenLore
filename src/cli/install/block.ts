@@ -112,7 +112,9 @@ export function upsertBlock(existing: string, content: string): UpsertResult {
  */
 export function isHandEdited(block: ExtractedBlock): boolean {
   if (!block.fingerprint) return false;
+  // CRLF on disk (git core.autocrlf) is not a hand edit: the fingerprint is over LF content.
   const innerWithoutFingerprintLine = block.inner
+    .replace(/\r\n/g, '\n')
     .replace(/<!-- openlore-fingerprint: [0-9a-f]+ -->\n?/, '')
     .replace(/^\n+/, '')
     .trimEnd();

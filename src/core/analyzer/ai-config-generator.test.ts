@@ -95,17 +95,45 @@ describe('generateAiConfigs', () => {
     expect(content).not.toContain('<!--');
   });
 
-  it('non-Claude format uses HTML comment reference', async () => {
-    await generateAiConfigs({
-      rootDir: tmpDir,
-      analysisDir: '.openlore/analysis',
-      projectName: 'my-project',
-      tools: ['cursor'],
-    });
+  it('when the slim digest reaches the agent, CLAUDE.md names the full digest instead of importing it', async () => {
+    await generateAiConfigs({ rootDir: tmpDir, analysisDir: '.openlore/analysis', projectName: 'my-project', tools: ['claude', 'cursor'], slimDigestDelivered: true });
 
-    const content = await readFile(join(tmpDir, '.cursorrules'), 'utf-8');
-    expect(content).toContain('<!-- Import or paste .openlore/analysis/CODEBASE.md here');
-    expect(content).not.toContain('@.openlore/analysis/CODEBASE.md');
+    const claude = await readFile(join(tmpDir, 'CLAUDE.md'), 'utf-8');
+    expect(claude).not.toMatch(/^@/m);
+    expect(claude).not.toContain('@.openlore/analysis/CODEBASE.md');
+    expect(claude.split('\n').filter(line => line.includes('.openlore/analysis/CODEBASE.md'))).toEqual([
+      'Full repository digest, for a task that needs it: `.openlore/analysis/CODEBASE.md`.',
+    ]);
+    const cursor = await readFile(join(tmpDir, '.cursorrules'), 'utf-8');
+    expect(cursor).not.toContain('Import or paste');
+    expect(cursor).toContain('`.openlore/analysis/CODEBASE.md`');
+  });
+
+  it('when the slim digest does not reach the agent, CLAUDE.md keeps the import, even with the slim file on disk', async () => {
+    await mkdir(join(tmpDir, '.openlore', 'analysis'), { recursive: true });
+    await writeFile(join(tmpDir, '.openlore', 'analysis', 'CODEBASE.md'), '# full digest\n', 'utf-8');
+    await writeFile(join(tmpDir, '.openlore', 'analysis', 'CODEBASE.slim.md'), '# slim digest\n', 'utf-8');
+    await generateAiConfigs({ rootDir: tmpDir, analysisDir: '.openlore/analysis', projectName: 'my-project', tools: ['claude'], slimDigestDelivered: false });
+
+    const claude = await readFile(join(tmpDir, 'CLAUDE.md'), 'utf-8');
+    expect(claude.split('\n')).toContain('@.openlore/analysis/CODEBASE.md');
+  });
+
+  it('non-Claude formats name the digest path whether or not the Claude prompt hook delivers it', async () => {
+    for (const slimDigestDelivered of [false, true]) {
+      await rm(join(tmpDir, '.cursorrules'), { force: true });
+      await generateAiConfigs({
+        rootDir: tmpDir,
+        analysisDir: '.openlore/analysis',
+        projectName: 'my-project',
+        tools: ['cursor'],
+        slimDigestDelivered,
+      });
+      const content = await readFile(join(tmpDir, '.cursorrules'), 'utf-8');
+      expect(content).toContain('Full repository digest, for a task that needs it: `.openlore/analysis/CODEBASE.md`.');
+      expect(content).not.toContain('Import or paste');
+      expect(content).not.toContain('@.openlore/analysis/CODEBASE.md');
+    }
   });
 
   it('content contains project name', async () => {
@@ -130,8 +158,14 @@ describe('generateAiConfigs', () => {
 
     const content = await readFile(join(tmpDir, '.cursorrules'), 'utf-8');
     expect(content).toContain('openlore MCP workflow');
-    expect(content).toContain('orient');
-    expect(content).toContain('search_code');
+    expect(content).toContain('`orient "<task>"`');
+    expect(content).toContain('openlore decisions record');
+    // The situation table is gone: each tool's description already says when to use it.
+    expect(content).not.toContain('search_code');
+    expect(content).not.toContain('Then, by situation');
+    // Install never rewrites this file, so the section does not promise a regeneration.
+    expect(content).not.toMatch(/regenerat/i);
+    expect(content).toContain('OpenLore does not rewrite this section');
   });
 
   it('creates nested directory for .clinerules/openlore.md', async () => {

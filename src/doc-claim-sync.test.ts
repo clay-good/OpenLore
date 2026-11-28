@@ -313,3 +313,16 @@ describe('onboarding claims stay bound to the code', () => {
     expect(new Set(spawned)).toEqual(new Set(['init', 'analyze']));
   });
 });
+
+// change: trim-standing-agent-instructions — this repository dogfoods the short standing text:
+// its CLAUDE.md, loaded on every turn, points to the tool reference instead of copying it.
+describe('this repository CLAUDE.md stays short', () => {
+  const claude = read('CLAUDE.md');
+
+  it('is under 8 KB and points to docs/mcp-tools.md instead of holding a tool table', () => {
+    expect(Buffer.byteLength(claude, 'utf8')).toBeLessThan(8 * 1024);
+    expect(claude).toContain('docs/mcp-tools.md');
+    expect(claude).not.toContain('| Situation | Tool |');
+    expect(claude.split('\n')).not.toContain('@.openlore/analysis/CODEBASE.md');
+  });
+});

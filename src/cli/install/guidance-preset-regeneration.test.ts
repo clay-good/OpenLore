@@ -79,6 +79,6 @@ describe('install regenerates guidance on preset change', () => {
     const md = await readMd();
 
     expect(md).not.toMatch(/ALWAYS call/i);
-    expect(md).toContain('before touching a module you have not yet read in\nthis session');
+    expect(md).toContain('For code you have not read in this session');
   });
 });

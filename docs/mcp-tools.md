@@ -141,11 +141,11 @@ live registry.
 | `navigation` | 10 | 3,616 | 3,800 |
 | `memory` | 3 | 1,602 | 1,610 |
 | `verify` | 5 | 2,104 | 2,220 |
-| `federation` | 10 | 4,005 | 4,100 |
-| `coordination` | 8 | 3,721 | 3,980 |
-| `substrate` | 15 | 5,264 | 5,500 |
-| `plugin` | 11 | 4,240 | 4,520 |
-| `full` | 84 | 28,721 | 30,000 |
+| `federation` | 10 | 3,918 | 4,100 |
+| `coordination` | 8 | 3,630 | 3,880 |
+| `substrate` | 15 | 5,214 | 5,500 |
+| `plugin` | 11 | 4,190 | 4,450 |
+| `full` | 84 | 27,629 | 29,000 |
 <!-- standing-context-cost:end -->
 
 #### Choose MCP or the command line

@@ -700,7 +700,9 @@ describe('tools/list payload budget (spec-28)', () => {
     // measured 111,518 B. The default surface does not include this opt-in tool.
     // A description on each of the 47 inputs that had none (mcp-quality Complete Input
     // Schemas): 112,000 → 115,500 B (measured 114,718 B). The wording was kept short first.
-    expect(payloadBytes({ preset: 'full' })).toBeLessThan(115_500);
+    // The 15 descriptions over 800 characters were cut (change: trim-standing-agent-instructions):
+    // 115,500 → 111,000 B (measured 110,513 B), so the saving cannot silently grow back.
+    expect(payloadBytes({ preset: 'full' })).toBeLessThan(111_000);
   });
 
   it('the DEFAULT surface (no selector) is the substrate payload, well under the full one', () => {
@@ -710,8 +712,10 @@ describe('tools/list payload budget (spec-28)', () => {
     // and Repair available to a default capable MCP host, with no internal LLM calls.
     // 21_000 → 21_100: verify_claim's `tested` kind (change: add-test-evidence-claims), measured
     // 21,053 B; the wording was kept short first.
+    // 21_100 → 20_900: blast_radius cut to 800 characters (change: trim-standing-agent-instructions),
+    // measured 20,853 B.
     expect(payloadBytes({})).toBe(payloadBytes({ preset: 'substrate' }));
-    expect(payloadBytes({})).toBeLessThan(21_100);
+    expect(payloadBytes({})).toBeLessThan(20_900);
     expect(payloadBytes({})).toBeLessThan(payloadBytes({ preset: 'full' }));
   });
 
@@ -729,7 +733,7 @@ describe('tools/list payload budget (spec-28)', () => {
   // the full surface (governance reads only, no inventories/specs/coordination), so
   // an out-of-box agent on the default surface still pays only a small prefix.
   it('substrate preset (navigation + spec workflows + governance reads) stays well under the full surface', () => {
-    expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(21_100);
+    expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(20_900);
     expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(payloadBytes({ preset: 'full' }));
     expect(payloadBytes({ preset: 'substrate' })).toBeGreaterThan(payloadBytes({ preset: 'navigation' }));
   });
