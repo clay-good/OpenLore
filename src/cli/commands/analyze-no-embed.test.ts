@@ -267,3 +267,62 @@ describe('analyze --no-embed builds a keyword (BM25) index', () => {
     );
   });
 });
+
+// #809: a previous analysis that died must not make the next one exit.
+describe('analyze after a previous analysis died', () => {
+  const owned = {
+    state: 'owned', waitedMs: 0,
+    update: vi.fn().mockResolvedValue(undefined), release: vi.fn().mockResolvedValue(undefined),
+  };
+  const heldBy = (pid: number) => ({
+    state: 'in-progress', heartbeatAgeMs: 1_000, elapsedMs: 5_000, progressPath: null,
+    owner: { repository: FAKE_ROOT, pid, startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), stage: 'parsing', progressPath: '' },
+  });
+  let cwdSpy: ReturnType<typeof vi.spyOn>;
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    buildMock.mockReset().mockResolvedValue({
+      hasEmbeddings: false, total: CALL_GRAPH.stats.totalNodes, productionFunctions: CALL_GRAPH.stats.totalNodes,
+      testFunctions: 0, signatureOnlySymbols: 0, reused: 0, embedded: 0,
+    });
+    const cfgMod = await import('../../core/services/config-manager.js');
+    vi.mocked(cfgMod.readOpenLoreConfig).mockResolvedValue(FAKE_CONFIG);
+    cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(FAKE_ROOT);
+    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    process.exitCode = undefined;
+  });
+
+  afterEach(async () => {
+    const ownershipMod = await import('../../core/runtime/analysis-ownership.js');
+    vi.mocked(ownershipMod.acquireAnalysisOwnership).mockReset().mockResolvedValue(owned as never);
+    cwdSpy.mockRestore();
+    consoleSpy.mockRestore();
+    process.exitCode = undefined;
+  });
+
+  it('waits for a dead owner\'s lock and then analyzes', async () => {
+    const ownershipMod = await import('../../core/runtime/analysis-ownership.js');
+    const acquire = vi.mocked(ownershipMod.acquireAnalysisOwnership);
+    acquire.mockReset().mockResolvedValueOnce(heldBy(4194303) as never).mockResolvedValueOnce(owned as never);
+
+    await analyzeCommand.parseAsync(['--no-embed'], { from: 'user' });
+
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(acquire.mock.calls[1][2]).toMatchObject({ wait: true });
+    expect(buildMock).toHaveBeenCalledTimes(1);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('still exits when the owner is alive', async () => {
+    const ownershipMod = await import('../../core/runtime/analysis-ownership.js');
+    const acquire = vi.mocked(ownershipMod.acquireAnalysisOwnership);
+    acquire.mockReset().mockResolvedValue(heldBy(process.pid) as never);
+
+    await analyzeCommand.parseAsync(['--no-embed'], { from: 'user' });
+
+    expect(acquire).toHaveBeenCalledTimes(1);
+    expect(buildMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+});

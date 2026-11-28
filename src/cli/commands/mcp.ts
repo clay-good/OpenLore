@@ -2959,6 +2959,8 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
   // --watch-auto: start the watcher on the first tool call that carries a directory
   let autoWatcher: import('../../core/services/mcp-watcher.js').McpWatcher | undefined;
   let autoWatcherRoot = '';
+  /** The repository whose first build this server started, so a build that died can be restarted. */
+  let autoBootstrapRoot: string | null = null;
 
   // Session ledger (change: add-session-structural-ledger): the symbols this session served and
   // the versions edited symbols took. One per directory, like the tracker; removed on shutdown.
@@ -3109,6 +3111,16 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       }
     }
 
+    if (options.watchAuto && autoBootstrapRoot !== null) {
+      // A first build that died (killed, out of memory) leaves no index, and nothing else
+      // starts it again in this process (#809). The at-most-once latch is cleared only when a
+      // build fails, so this never restarts one that is running or that finished.
+      const { bootstrapAnalysisInBackground, hasAnalysis } = await import('../../core/services/cold-start-bootstrap.js');
+      if (!hasAnalysis(autoBootstrapRoot)) {
+        bootstrapAnalysisInBackground(autoBootstrapRoot, { analyze: buildIndexInChildProcess });
+      }
+    }
+
     if (options.watchAuto && !autoWatcher) {
       const dir = (args as Record<string, unknown>).directory;
       if (typeof dir === 'string') {
@@ -3138,6 +3150,7 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
             bootstrapAnalysisInBackground(root, {
               analyze: buildIndexInChildProcess,
             });
+            autoBootstrapRoot = root;
           }
           const { McpWatcher } = await import('../../core/services/mcp-watcher.js');
           const debounceMs = parseInt(options.watchDebounce ?? '400', 10);
