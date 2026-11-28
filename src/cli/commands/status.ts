@@ -153,14 +153,20 @@ export async function findLegacyDigestImport(
   let inBlock = false;
   let fence: string | null = null;
   text.split(/\r?\n/).forEach((line, i) => {
-    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
-    if (marker && (fence === null || (marker[0] === fence[0] && marker.length >= fence.length))) {
-      fence = fence === null ? marker : null;
+    // CommonMark fences: up to 3 spaces of indent; a closing fence repeats the opening character
+    // at least as many times, with nothing after it but spaces.
+    if (fence === null) {
+      const open = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+      if (open) { fence = open; return; }
+    } else {
+      const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line)?.[1];
+      if (close && close[0] === fence[0] && close.length >= fence.length) fence = null;
       return;
     }
     if (line.includes(OPENLORE_BLOCK_BEGIN)) inBlock = true;
-    // An indented line is a Markdown code block, where Claude Code does not evaluate an import.
-    if (!inBlock && fence === null && line.trimEnd() === LEGACY_DIGEST_IMPORT) lines.push(i + 1);
+    // Only the exact unindented line counts: an indented one may be a code block, where Claude
+    // Code does not evaluate an import, so it is left unreported (the safe direction).
+    if (!inBlock && line.trimEnd() === LEGACY_DIGEST_IMPORT) lines.push(i + 1);
     if (line.includes(OPENLORE_BLOCK_END)) inBlock = false;
   });
   if (!lines.length) return null;

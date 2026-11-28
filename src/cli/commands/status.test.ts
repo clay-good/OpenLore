@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { collectHookMoments, collectIndexStatus, collectWiringScope, findLegacyDigestImport, formatHookHealth, formatLegacyDigestImport, statusCommand } from './status.js';
 import { renderBlock } from '../install/block.js';
+import { renderSlimDigest } from '../../core/analyzer/codebase-digest.js';
 import { _resetVectorIndexCachesForTesting } from '../../core/analyzer/vector-index.js';
 
 const ANALYSIS = join('.openlore', 'analysis');
@@ -457,25 +458,56 @@ describe('openlore status — a legacy full-digest import', () => {
     expect(await findLegacyDigestImport(root, doesNotReach)).toBeNull();
   });
 
-  it('says nothing in a repository without the prompt hook, through the real delivery check', async () => {
+  /** The real delivery check end to end: a digest analyze would write, and the prompt hook wired or not. */
+  async function statusThroughRealCheck(wired: boolean, args: string[] = []): Promise<string> {
     await withDigest();
-    await writeFile(join(root, ANALYSIS, 'CODEBASE.slim.md'), '# slim\n', 'utf-8');
-    await writeFile(join(root, 'CLAUDE.md'), '@.openlore/analysis/CODEBASE.md\n', 'utf-8');
+    await writeFile(join(root, ANALYSIS, 'llm-context.json'), '{}', 'utf-8');
+    await writeFile(join(root, ANALYSIS, 'CODEBASE.slim.md'), renderSlimDigest({
+      counts: { functions: 12, pairs: 30 },
+      hubs: [{ name: 'parseConfig', file: 'src/config.ts', callers: 9 }],
+      callGraphLanguages: ['TypeScript'],
+      fullDigestPath: '.openlore/analysis/CODEBASE.md',
+    }), 'utf-8');
+    if (wired) {
+      await mkdir(join(root, '.claude'), { recursive: true });
+      await writeFile(join(root, '.claude', 'settings.json'), JSON.stringify({
+        hooks: { UserPromptSubmit: [{ _openlore: true, hooks: [{ type: 'command', command: 'npx --yes openlore orient --inject' }] }] },
+      }), 'utf-8');
+    }
+    await writeFile(join(root, 'CLAUDE.md'), '# demo\n\n@.openlore/analysis/CODEBASE.md\n', 'utf-8');
     const cwd = process.cwd();
     const lines: string[] = [];
     const log = console.log;
     const home = process.env.OPENLORE_HOME;
-    process.env.OPENLORE_HOME = root;
+    process.env.OPENLORE_HOME = join(root, 'no-home');
     console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); };
     try {
       process.chdir(root);
-      await statusCommand.parseAsync(['node', 'openlore']);
+      await statusCommand.parseAsync(['node', 'openlore', ...args]);
     } finally {
       console.log = log;
       process.chdir(cwd);
       if (home === undefined) delete process.env.OPENLORE_HOME; else process.env.OPENLORE_HOME = home;
     }
-    expect(lines.join('\n')).not.toContain('Legacy import');
+    return lines.join('\n');
+  }
+
+  it('prints the note once, and the JSON field, when the prompt hook delivers the slim digest', async () => {
+    const out = await statusThroughRealCheck(true);
+    expect(out.split('\n').filter(line => line.includes('Legacy import'))).toHaveLength(1);
+    expect(out).toContain('CLAUDE.md:3 imports .openlore/analysis/CODEBASE.md (11,126 bytes)');
+  });
+
+  it('puts the finding in status --json for agents', async () => {
+    const json = JSON.parse(await statusThroughRealCheck(true, ['--json']));
+    expect(json.legacyDigestImport).toEqual({ file: 'CLAUDE.md', lines: [3], digestBytes: 11_126 });
+  });
+
+  it('prints nothing, and no JSON field, when no prompt hook is wired', async () => {
+    expect(await statusThroughRealCheck(false)).not.toContain('Legacy import');
+    await rm(join(root, 'CLAUDE.md'));
+    await writeFile(join(root, 'CLAUDE.md'), '# demo\n\n@.openlore/analysis/CODEBASE.md\n', 'utf-8');
+    expect(JSON.parse(await statusThroughRealCheck(false, ['--json'])).legacyDigestImport).toBeUndefined();
   });
 
   it('says nothing for a file the new generator wrote', async () => {
@@ -491,6 +523,7 @@ describe('openlore status — a legacy full-digest import', () => {
       '@.openlore/analysis/CODEBASE.md',          // 1: counted
       block,
       '```md',
+      '```md',                                    // an info string does not close a fence
       '@.openlore/analysis/CODEBASE.md',          // in a fence
       '```',
       '    @.openlore/analysis/CODEBASE.md',      // indented code block
@@ -499,8 +532,8 @@ describe('openlore status — a legacy full-digest import', () => {
     await writeFile(join(root, 'CLAUDE.md'), file, 'utf-8');
     const blockLines = block.split('\n').length;
     const found = await findLegacyDigestImport(root, reaches);
-    expect(found?.lines).toEqual([1, blockLines + 6]);
-    expect(formatLegacyDigestImport(found!)).toContain(`Delete lines 1, ${blockLines + 6} of CLAUDE.md.`);
+    expect(found?.lines).toEqual([1, blockLines + 7]);
+    expect(formatLegacyDigestImport(found!)).toContain(`Delete lines 1, ${blockLines + 7} of CLAUDE.md.`);
   });
 
   it('says nothing without a CLAUDE.md or without the full digest', async () => {

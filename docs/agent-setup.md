@@ -23,7 +23,7 @@ There are two ways an agent acquires codebase knowledge:
 - **Passive (zero friction, low token cost):** files listed in `CLAUDE.md` / `.clinerules` are injected at session start, before the agent processes your first message. No decision required, no tool calls, no extra round-trips.
 - **Active (friction, per-call token cost):** MCP tools must be consciously selected, called, and their output integrated. Even when the information would help, agents often skip this and read files directly — it's always the safe fallback, but it's expensive.
 
-Architectural context delivered passively is far more reliably absorbed and far cheaper. `openlore analyze` generates `.openlore/analysis/CODEBASE.md` for exactly this purpose: a compact, ~100-line digest that costs a fraction of what reading the equivalent source files would — and it's already pre-digested into what the agent actually needs.
+Architectural context delivered passively is far more reliably absorbed and far cheaper. The passive part is kept small: the prompt hook prints the slim digest (`CODEBASE.slim.md`, below) once per session, and the managed block `openlore install` writes is six lines. `openlore analyze` also writes `.openlore/analysis/CODEBASE.md`, a ~100-line digest the agent reads when a task needs it, instead of loading it on every turn.
 
 When passive context isn't enough, the MCP tools replace expensive multi-file reads with a single targeted call. `orient` — the main entry point — returns relevant functions, their call neighbours, matching spec sections, and insertion-point candidates in **one round-trip** instead of a dozen `Read` calls.
 
@@ -49,9 +49,11 @@ live (only when the repository has them), and a pointer to `orient`. The prompt 
 names changed (a count alone does not count) or after a compaction. It is not printed when the hook payload has no `session_id`, when
 `contextInjection.mode` is `"off"`, when there is no index on this machine or the index was
 imported, or when it does not fit in `contextInjection.tokenBudget` beside the task briefing (the
-task briefing is kept; the summary waits for a later prompt). A `CLAUDE.md` that `openlore install`
-generated still `@`-imports the full `CODEBASE.md`; the change `trim-standing-agent-instructions`
-replaces that import.
+task briefing is kept; the summary waits for a later prompt). A `CLAUDE.md` that
+`openlore analyze --ai-configs` generates names the full `CODEBASE.md` in one line instead of
+`@`-importing it, but only when the prompt hook delivers the slim digest; otherwise it keeps the
+import. An older generated `CLAUDE.md` keeps its import line; `openlore status` names it while the
+slim digest reaches the agent, and never edits the file.
 
 The Claude Code plugin ships five short skills: `openlore-orient`, `openlore-debug`,
 `openlore-review-changes`, `openlore-write-tests`, and `openlore-implement-story`.
@@ -96,39 +98,13 @@ GSD           ->  .claude/commands/gsd/openlore-{name}.md     (2 commands)
 BMAD          ->  _bmad/openlore/{agents,tasks}/               (2 agents, 4 tasks)
 ```
 
-Wire the generated digest into your agent's context:
+Wire OpenLore into your agent's context:
 
-**Claude Code** — add to `CLAUDE.md`:
-
-```markdown
-@.openlore/analysis/CODEBASE.md
-@openspec/specs/overview/spec.md
-
-## openlore MCP workflow
-
-| Situation | Tool |
-|-----------|------|
-| Starting any new task | `orient` — returns functions, files, specs, call paths, and insertion points in one call |
-| Don't know which file/function handles a concept | `search_code` |
-| Need call topology across many files | `get_subgraph` / `analyze_impact` |
-| Planning where to add a feature | `suggest_insertion_points` |
-| Reading a spec before writing code | `get_spec` |
-| Checking if code still matches spec | `check_spec_drift` |
-| Finding spec requirements by meaning | `search_specs` |
-| Checking spec coverage before starting a feature | `audit_spec_coverage` |
-
-**Follow this sequence for every task:**
-
-1. **`orient "<task description>"`** — always start here. Returns relevant functions, files, spec domains, call paths, and insertion points in one call.
-2. **If the task involves data models, APIs, or config** — call the relevant inventory tool:
-   `get_schema_inventory` · `get_route_inventory` · `get_env_vars` · `get_ui_component_inventory` · `get_middleware_inventory`
-3. **If debugging a call flow** ("how does X reach Y?") — `trace_execution_path`
-4. **Before modifying a function** — `get_subgraph` to understand blast radius
-5. **Before opening a PR** — `check_spec_drift`
-
-**On-demand** (when orient's results aren't enough):
-`search_code` · `suggest_insertion_points` · `get_spec <domain>` · `search_specs` · `analyze_impact` · `get_function_body` · `get_function_skeleton`
-```
+**Claude Code** — run `openlore install`. It writes a six-line managed block into `CLAUDE.md` and
+wires the hooks that push evidence while the agent works. Do not `@`-import
+`.openlore/analysis/CODEBASE.md`: it would load on every turn, and the prompt hook already gives the
+agent the slim digest. A task that needs the full digest reads the file. Each MCP tool's description
+says when to use it, so no tool table is needed.
 
 **Claude Code — MCP config (token-efficient two-server setup)**
 
@@ -162,39 +138,9 @@ If you only need one server entry and want every tool searchable, use `alwaysLoa
 
 The full surface stays navigable despite its size because every tool declares one of six **capability families** — `navigate` · `change` · `remember` · `verify` · `coordinate` · `federate` — carried in its MCP `annotations.family`, so a client (or Tool Search) can group rather than face a flat list. Inspect any surface grouped by family with `openlore mcp --preset full --list-tools`.
 
-**Cline / Roo Code / Kilocode** — create `.clinerules/openlore.md`:
-
-```markdown
-# openlore
-
-openlore provides static analysis artifacts and MCP tools to help you navigate this codebase.
-Always use these before writing or modifying code.
-
-## Before starting any task
-
-- Read `.openlore/analysis/CODEBASE.md` — architectural digest: entry points, critical hubs,
-  god functions, most-coupled files, and available spec domains. Generated locally by `openlore analyze`.
-- Read `openspec/specs/overview/spec.md` — functional domain map: what the system does,
-  which domains exist, data-flow requirements.
-
-## openlore MCP workflow
-
-**Follow this sequence for every task:**
-
-1. **`orient "<task description>"`** — always start here. Returns relevant functions, files, spec domains, call paths, and insertion points in one call.
-2. **If the task involves data models, APIs, or config** — call the relevant inventory tool:
-   `get_schema_inventory` · `get_route_inventory` · `get_env_vars` · `get_ui_component_inventory` · `get_middleware_inventory`
-3. **If debugging a call flow** ("how does X reach Y?") — `trace_execution_path`
-4. **Before modifying a function** — `get_subgraph` to understand blast radius
-5. **Before opening a PR** — `check_spec_drift`
-
-**On-demand** (when orient's results aren't enough):
-`search_code` · `suggest_insertion_points` · `get_spec <domain>` · `search_specs` · `analyze_impact` · `get_function_body` · `get_function_skeleton`
-```
-
-`CODEBASE.md` gives the agent passive architectural context. `overview/spec.md` gives the functional domain map. The workflow tells it exactly what to call and when, without requiring the agent to choose from a menu.
-
-> **Tip:** `openlore analyze` prints these snippets after every run as a reminder.
+**Cline / Roo Code / Kilocode** — run `openlore install --agent cline`. It writes the same short
+managed block into `.clinerules/openlore.md`. These hosts run no OpenLore hooks, so the agent calls
+`openlore orient "<task>"` itself and reads `.openlore/analysis/CODEBASE.md` when a task needs it.
 
 > **Note:** `.openlore/analysis/` is git-ignored — each developer generates it locally. Re-run `openlore analyze` after significant structural changes to keep the digest current.
 

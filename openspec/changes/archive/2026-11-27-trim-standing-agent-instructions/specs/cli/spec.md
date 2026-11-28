@@ -4,10 +4,11 @@
 
 ### Requirement: StandingInstructionsStayShort
 
-The block `openlore install` manages SHALL be 8 lines and 700 bytes or fewer and SHALL name no
-OpenLore tool the wired preset does not expose. A generated `CLAUDE.md` SHALL NOT `@`-import the full
-`CODEBASE.md` when the prompt hook delivers the slim digest; it SHALL name the path in one line. Its workflow
-section SHALL be 10 lines or fewer. Every MCP tool description SHALL be 800 characters or fewer.
+The text between the markers of the block `openlore install` manages SHALL be 8 lines and 700 bytes
+or fewer, and SHALL name no OpenLore tool the wired preset does not expose. A generated `CLAUDE.md`
+SHALL NOT `@`-import the full `CODEBASE.md` when the prompt hook delivers the slim digest; it SHALL
+name the path in one line. Its workflow section SHALL be 10 lines or fewer. Every MCP tool
+description SHALL be 800 characters or fewer.
 
 #### Scenario: A fresh install loads little text
 

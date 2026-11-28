@@ -15,12 +15,16 @@ let root = '';
 let home = '';
 const analysis = () => join(root, '.openlore', 'analysis');
 
-function wirePromptHook(dir: string): void {
+function wirePromptHook(dir: string, command = 'npx --yes openlore orient --inject', extra: Record<string, unknown> = {}): void {
   mkdirSync(join(dir, '.claude'), { recursive: true });
   writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify({
-    hooks: { UserPromptSubmit: [{ _openlore: true, hooks: [{ type: 'command', command: 'npx --yes openlore orient --inject' }] }] },
+    ...extra,
+    hooks: { UserPromptSubmit: [{ _openlore: true, hooks: [{ type: 'command', command }] }] },
   }));
 }
+/** The guarded absolute-path form install writes, pointing at a CLI entry that does not exist. */
+const goneEntry = '/nonexistent/openlore/dist/cli/index.js';
+const brokenCommand = (scope = '') => `[ -f ${goneEntry} ] && [ -f ${process.execPath} ] || exit 0; ${process.execPath} ${goneEntry} orient --inject${scope}`;
 function writeConfig(extra: Record<string, unknown>): void {
   writeFileSync(join(root, '.openlore', 'config.json'), JSON.stringify({
     version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
@@ -87,6 +91,31 @@ describe('slimDigestReachesAgent', () => {
     writeFileSync(join(analysis(), 'CODEBASE.slim.md'), '# hand-written digest\n');
     expect(await slimDigestReachesAgent(root, home)).toBe(false);
     rmSync(join(analysis(), 'CODEBASE.slim.md'));
+    expect(await slimDigestReachesAgent(root, home)).toBe(false);
+  });
+
+  it('is false when the wired hook names a program that no longer exists', async () => {
+    wirePromptHook(root, brokenCommand());
+    expect(await slimDigestReachesAgent(root, home)).toBe(false);
+  });
+
+  it('is false when a broken repository hook makes a healthy user-scope hook stand down', async () => {
+    wirePromptHook(home, 'npx --yes openlore orient --inject --scope user');
+    expect(await slimDigestReachesAgent(root, home)).toBe(true);
+    wirePromptHook(root, brokenCommand());
+    expect(await slimDigestReachesAgent(root, home)).toBe(false);
+  });
+
+  it('is false when Claude Code hooks are disabled', async () => {
+    wirePromptHook(root, undefined, { disableAllHooks: true });
+    expect(await slimDigestReachesAgent(root, home)).toBe(false);
+  });
+
+  it('is false when the digest alone does not fit the injection token budget', async () => {
+    wirePromptHook(root);
+    writeConfig({ contextInjection: { tokenBudget: 68 } });
+    const slim = await readSlimDigest(root);
+    expect(slim?.tokenBudget).toBe(68);
     expect(await slimDigestReachesAgent(root, home)).toBe(false);
   });
 });
