@@ -23,9 +23,20 @@ async function wirePromptHook(): Promise<void> {
   }));
 }
 
+/** What the last analyze run printed through console.log. */
+let printed = '';
+
 async function analyzeAiConfigs(extra: string[] = []): Promise<string> {
   await rm(join(dir, 'CLAUDE.md'), { force: true });
-  await analyzeCommand.parseAsync(['--ai-configs', '--directory', dir, ...extra], { from: 'user' });
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); };
+  try {
+    await analyzeCommand.parseAsync(['--ai-configs', '--directory', dir, ...extra], { from: 'user' });
+  } finally {
+    console.log = log;
+  }
+  printed = lines.join('\n');
   return readFile(join(dir, 'CLAUDE.md'), 'utf8');
 }
 
@@ -64,4 +75,23 @@ describe('analyze --ai-configs and the full-digest import', () => {
       expect(md.split('\n'), `analyze ${extra.join(' ')}`).toContain('@.openlore/analysis/CODEBASE.md');
     }
   }, 120_000);
+
+  it('prints one agent-setup line and no tool table (full run)', async () => {
+    await analyzeAiConfigs(['--force']);
+    const tips = printed.split('\n').filter(line => line.includes('Agent setup'));
+    expect(tips).toEqual(['  Agent setup: run `openlore install`. A task that needs the full repository digest can read .openlore/analysis/CODEBASE.md.']);
+    expect(printed).not.toContain('| Situation');
+    for (const tool of ['search_code', 'get_subgraph', 'suggest_insertion_points', 'check_spec_drift', 'search_specs']) {
+      expect(printed).not.toContain(tool);
+    }
+  }, 120_000);
+
+  it('a fresh install over this index writes the short block and no import anywhere in CLAUDE.md', async () => {
+    await rm(join(dir, 'CLAUDE.md'), { force: true });
+    expect(await runInstall({ cwd: dir, agent: 'claude-code', home, repoOnly: true, analyze: false })).toBe(0);
+    const md = await readFile(join(dir, 'CLAUDE.md'), 'utf8');
+    expect(md).not.toMatch(/^@\.openlore\/analysis\/CODEBASE\.md\s*$/m);
+    expect(md).toContain('BEGIN OPENLORE');
+    expect(md).toContain('the `orient` tool');
+  }, 60_000);
 });

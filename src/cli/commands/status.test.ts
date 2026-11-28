@@ -536,6 +536,17 @@ describe('openlore status — a legacy full-digest import', () => {
     expect(formatLegacyDigestImport(found!)).toContain(`Delete lines 1, ${blockLines + 7} of CLAUDE.md.`);
   });
 
+  it('a fence closes only on the same character, at least as long', async () => {
+    await withDigest();
+    const file = [
+      '````md', '```', '@.openlore/analysis/CODEBASE.md', '````',   // three backticks do not close four
+      '~~~', '```', '@.openlore/analysis/CODEBASE.md', '~~~',       // backticks do not close tildes
+      '@.openlore/analysis/CODEBASE.md',                            // line 9: counted
+    ].join('\n');
+    await writeFile(join(root, 'CLAUDE.md'), file, 'utf-8');
+    expect((await findLegacyDigestImport(root, reaches))?.lines).toEqual([9]);
+  });
+
   it('says nothing without a CLAUDE.md or without the full digest', async () => {
     expect(await findLegacyDigestImport(root, reaches)).toBeNull();
     await writeFile(join(root, 'CLAUDE.md'), '@.openlore/analysis/CODEBASE.md\n', 'utf-8');

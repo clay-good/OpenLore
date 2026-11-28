@@ -48,8 +48,8 @@ agent to do work that OpenLore now does by itself.
 ## Limits we disclose
 
 - A `CLAUDE.md` that an older version created holds the `@`-import outside any marker, so this
-  change does not remove it. `openlore status` names the line and its size once, with the command
-  to delete it; it does not edit the file.
+  change does not remove it. `openlore status` names the line and its size once and says which line to
+  delete; it does not edit the file.
 - A generated `CLAUDE.md` drops the `@`-import only when the slim digest really reaches the agent:
   the prompt hook is wired (user or project Claude settings), the prompt moment and context
   injection are on, and the digest is the one analyze writes at the default path. Otherwise the

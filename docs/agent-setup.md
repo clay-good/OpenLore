@@ -23,7 +23,7 @@ There are two ways an agent acquires codebase knowledge:
 - **Passive (zero friction, low token cost):** files listed in `CLAUDE.md` / `.clinerules` are injected at session start, before the agent processes your first message. No decision required, no tool calls, no extra round-trips.
 - **Active (friction, per-call token cost):** MCP tools must be consciously selected, called, and their output integrated. Even when the information would help, agents often skip this and read files directly — it's always the safe fallback, but it's expensive.
 
-Architectural context delivered passively is far more reliably absorbed and far cheaper. The passive part is kept small: the prompt hook prints the slim digest (`CODEBASE.slim.md`, below) once per session, and the managed block `openlore install` writes is six lines. `openlore analyze` also writes `.openlore/analysis/CODEBASE.md`, a ~100-line digest the agent reads when a task needs it, instead of loading it on every turn.
+Architectural context delivered passively is far more reliably absorbed and far cheaper. The passive part is kept small: the prompt hook prints the slim digest (`CODEBASE.slim.md`, below) once per session, and the managed block `openlore install` writes is 8 lines or fewer. `openlore analyze` also writes `.openlore/analysis/CODEBASE.md`, a ~100-line digest the agent reads when a task needs it, instead of loading it on every turn.
 
 When passive context isn't enough, the MCP tools replace expensive multi-file reads with a single targeted call. `orient` — the main entry point — returns relevant functions, their call neighbours, matching spec sections, and insertion-point candidates in **one round-trip** instead of a dozen `Read` calls.
 
@@ -100,7 +100,7 @@ BMAD          ->  _bmad/openlore/{agents,tasks}/               (2 agents, 4 task
 
 Wire OpenLore into your agent's context:
 
-**Claude Code** — run `openlore install`. It writes a six-line managed block into `CLAUDE.md` and
+**Claude Code** — run `openlore install`. It writes a short managed block (8 lines or fewer) into `CLAUDE.md` and
 wires the hooks that push evidence while the agent works. Do not `@`-import
 `.openlore/analysis/CODEBASE.md`: it would load on every turn, and the prompt hook already gives the
 agent the slim digest. A task that needs the full digest reads the file. Each MCP tool's description
