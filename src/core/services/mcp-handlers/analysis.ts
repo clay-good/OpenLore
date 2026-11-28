@@ -358,13 +358,14 @@ export async function handleGetDuplicateReport(
 /**
  * Return compact function and class signatures for files in the project.
  */
-export async function handleGetSignatures(directory: string, filePattern?: string): Promise<string> {
+export async function handleGetSignatures(directory: string, filePattern?: string): Promise<string | { error: string }> {
   const absDir = await validateDirectory(directory);
   const ctx = await readCachedContext(absDir);
 
-  if (!ctx) return (await diagnoseIndexUnservable(absDir)).error;
+  // No answer is an object, not text, so MCP can mark it isError like every other tool (#810).
+  if (!ctx) return diagnoseIndexUnservable(absDir);
   if (!ctx.signatures || ctx.signatures.length === 0) {
-    return 'No signatures available in cached analysis. Re-run analyze_codebase.';
+    return { error: 'No signatures available in cached analysis. Re-run analyze_codebase.' };
   }
 
   const filtered = filePattern

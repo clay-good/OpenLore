@@ -161,6 +161,10 @@ Rejected arguments are a tool result, not a protocol error. A call with a missin
 wrongly typed parameter returns `isError: true` with text that names the parameter, the expected
 shape, and a corrected example call, so the model can retry. Nothing runs, and nothing is written.
 
+A tool that produced no answer also returns `isError: true`, with its `error` message in the JSON
+text. When the cause is that the repository has no usable index, the text also carries
+`notReady: true`, a `reason`, and the `remedy` command.
+
 The shared input projection is guarded. MCP additionally exposes `orient.rankBy`,
 `search_code.mode`, `blast_radius.depth` / `maxSymbols`, and
 `report_coverage_gaps.directResolvedOnly`. The CLI alone exposes `--allow-base-fallback` for
