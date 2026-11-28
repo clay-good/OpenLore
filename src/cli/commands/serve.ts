@@ -993,6 +993,13 @@ async function runServe(options: ServeCliOptions): Promise<ServeOutcome> {
       res.once('close', abortOnResponseClose);
       try {
         const result = await dispatchTool(name, args, directory, dispatchAbort.signal);
+        // The startup build runs once. If it died (killed, out of memory) the repository stays
+        // index-absent and nothing starts it again (#809). The detached starter is self-limiting:
+        // a live build, or the cooldown after a failed one, makes it a no-op.
+        const notReady = result as { notReady?: unknown; reason?: unknown } | null;
+        if (notReady?.notReady === true && notReady.reason === 'index-absent') {
+          startDetachedIndexBuild(root, 'index-absent');
+        }
         if (!dispatchAbort.signal.aborted) sendJson(res, 200, result ?? null);
       } catch (err) {
         if (dispatchAbort.signal.aborted) return;

@@ -1,6 +1,6 @@
 # Show how the codebase calls a function before the agent writes a new call
 
-> Priority: P3 · Not built
+> Priority: Later · Not built
 > Reaches the agent through: `orient` (and so the prompt-submitted hook), and `blast_radius` when a signature changes
 > Why it helps the agent: it copies the call shape the repository already uses, and sees which callers a signature change breaks.
 

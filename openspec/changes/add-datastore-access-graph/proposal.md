@@ -1,6 +1,6 @@
 # Show which code reads and writes each table, and what a migration breaks
 
-> Priority: P3 · Not built
+> Priority: Later · Not built
 > Reaches the agent through: `blast_radius`, `verify_change` (and so the before-stop moment)
 > Why it helps the agent: before it drops or narrows a column, it sees the functions and tests that still use that column.
 

@@ -187,14 +187,17 @@ describe('superseded-holder safety', () => {
       await utimes(gate, old, old);
 
       const results = await Promise.all(
-        Array.from({ length: 5 }, () => acquireLockAt(dir, '.race.lock', { onContended: 'report', namespaceGateMaxWaitMs: 2_000 })),
+        // The production gate wait (30 s), not a short one: on Windows runners five contenders'
+        // file operations on fresh temp files can stall for seconds (delete-pending files,
+        // antivirus handles). The assertion is about ownership, not speed.
+        Array.from({ length: 5 }, () => acquireLockAt(dir, '.race.lock', { onContended: 'report', namespaceGateMaxWaitMs: 30_000 })),
       );
       const handles = results.filter(result => !isLockHeld(result));
       expect(handles, `round ${round}`).toHaveLength(1);
       await (handles[0] as { release: () => Promise<void> }).release();
       expect((await readdir(dir)).filter(name => /\.(gate|reclaim\.\d+)$/.test(name)), `round ${round}`).toEqual([]);
     }
-  }, 20_000);
+  }, 180_000);
 
   it('retries namespace cleanup after a release is temporarily blocked', async () => {
     const dir = join(root, 'release-retry');
