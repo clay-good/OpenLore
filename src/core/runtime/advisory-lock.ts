@@ -38,7 +38,7 @@
  * It is ADVISORY. It serializes cooperating writers that all take it; it does not
  * constrain a process that ignores it, and it is not a security boundary.
  *
- * Taking the lock (`open` with `wx`) and stealing a stale one (`rename`) are atomic
+ * Taking the lock (`link` of a fully written candidate) and stealing a stale one (`rename`) are atomic
  * namespace operations. Acquire, steal, and release all pass through a short-lived
  * namespace gate. Release compares the path inode with the acquired inode while
  * holding that gate, then unlinks only its own file. A stale or misconfigured
@@ -245,9 +245,66 @@ function isProcessAlive(pid: number): boolean {
 
 const defaultIsStale = (mtimeMs: number, contents: string): boolean => {
   if (Date.now() - mtimeMs <= STALE_MS) return false;
+  // An empty lock is a holder killed between create and write by a version before #808;
+  // a live acquire's write finishes long before the bound.
+  if (contents.length === 0) return true;
   const pid = pidFromDefaultPayload(contents);
   return pid !== null && !isProcessAlive(pid);
 };
+
+/** One read of a gate file: identity, age and owner from the same inode. */
+async function readGate(gatePath: string): Promise<{ ino: number; mtimeMs: number; pid: number | null } | null> {
+  try {
+    const handle = await open(gatePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) return null;
+      return { ino: info.ino, mtimeMs: info.mtimeMs, pid: pidFromDefaultPayload(await readBoundedLockPayload(handle, gatePath)) };
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+/** A gate is held for milliseconds, so one older than the bound whose owner PID is dead is stranded. */
+function isStrandedGate(gate: { ino: number; mtimeMs: number; pid: number | null }): boolean {
+  return gate.ino > 0 && gate.pid !== null
+    && Date.now() - gate.mtimeMs >= NAMESPACE_GATE_MAX_WAIT_MS && !isProcessAlive(gate.pid);
+}
+
+/**
+ * Remove a gate its owner died holding (#808). There is no portable compare-and-delete, so a
+ * plain "PID dead, unlink the path" has an ABA race: a second contender can reclaim the same
+ * gate and take a fresh one before the first unlinks, and the first then deletes the live
+ * successor. An exclusive marker named for the stranded gate's inode admits ONE reclaimer per
+ * stranded file. Its owner is dead and its other possible remover holds that marker, so the
+ * file judged under the marker is still the file the unlink removes. A reclaimer that dies
+ * holding the marker leaves the gate in place: the fail-closed path, never two owners.
+ */
+async function reclaimStrandedGate(gatePath: string): Promise<boolean> {
+  const judged = await readGate(gatePath);
+  if (!judged || !isStrandedGate(judged)) return false;
+  const marker = `${gatePath}.reclaim.${judged.ino}`;
+  let handle: FileHandle;
+  try {
+    handle = await open(marker, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+  } catch {
+    return false; // another contender is reclaiming this gate
+  }
+  try {
+    const current = await readGate(gatePath);
+    if (!current || current.ino !== judged.ino || !isStrandedGate(current)) return false;
+    await unlink(gatePath);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await handle.close().catch(() => {});
+    await unlink(marker).catch(() => {});
+  }
+}
 
 /**
  * Serialize namespace changes for one lock path. Without this tiny gate, a stale
@@ -255,7 +312,8 @@ const defaultIsStale = (mtimeMs: number, contents: string): boolean => {
  * and the first contender's later rename moves that fresh lock. Every acquire and
  * steal attempt passes through the gate, closing that judged-inode/replaced-path
  * race. A stranded gate fails closed with a bounded recovery error: portable
- * filesystems do not provide compare-and-delete, so automatic deletion is unsafe.
+ * filesystems do not provide compare-and-delete, so a gate is deleted only when its owner is
+ * dead and one contender holds the reclaim marker for it (see {@link reclaimStrandedGate}).
  */
 async function acquireNamespaceGate(
   lockPath: string,
@@ -292,11 +350,10 @@ async function acquireNamespaceGate(
     } catch (err) {
       await unlink(candidate).catch(() => {});
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      // There is no portable compare-and-delete filesystem primitive. Deleting a
-      // gate merely because its recorded PID is dead has an ABA race: another
-      // contender can replace it between our read and unlink, after which we delete
-      // the successor's live gate. Never reclaim automatically; a stranded gate is
-      // an explicit, bounded, fail-closed operator-recovery condition.
+      // A gate whose owner died holding it is removed by exactly one contender (#808).
+      // Anything else (a live, unknown, or malformed owner, or a gate younger than
+      // the bound) stays a bounded, fail-closed operator-recovery condition.
+      if (await reclaimStrandedGate(gatePath)) continue;
       if (Date.now() - startedAt >= maxWaitMs) throw new NamespaceGateHeldError(gatePath);
       await sleep(10);
     }
@@ -341,19 +398,24 @@ export async function acquireLockAt(
     try {
       throwIfAborted(signal);
       try {
+        // Write the payload under a unique name, then link it into place: the lock path never
+        // holds an empty file. A holder killed between create and write used to leave one, and
+        // a lock that names no process is never judged stale, so every later acquire waited
+        // forever (#808). `link` fails with EEXIST when the lock is held, like `wx` did.
+        const candidate = `${lockPath}.${process.pid}.${randomUUID()}.candidate`;
         const fh = await open(
-          lockPath,
+          candidate,
           constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
           0o600,
-        ); // exclusive create — fails if held
+        );
         try {
           await fh.writeFile(payloadOf());
+          await link(candidate, lockPath); // exclusive — fails if held
         } catch (err) {
           await tryHandle(() => fh.close());
-          // The gate excludes every successor, so this cleanup cannot delete a
-          // different owner's lock.
-          await unlink(lockPath).catch(() => {});
           throw err;
+        } finally {
+          await unlink(candidate).catch(() => {});
         }
         // The identity of the file we acquired. Everything this handle does later
         // is bound to it, because a holder whose lock was STOLEN keeps running: its

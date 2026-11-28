@@ -3,6 +3,7 @@
  * `decisions --consolidate` processes from clobbering pending.json.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { spawn } from 'node:child_process';
 import { mkdtemp, rm, mkdir, readdir, writeFile, readFile, utimes, stat, access, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -139,7 +140,7 @@ describe('superseded-holder safety', () => {
     await held.release();
   });
 
-  it('fails closed instead of deleting a stranded namespace gate', async () => {
+  it('fails closed on a dead-owner gate younger than the stranded bound', async () => {
     const dir = join(root, 'stranded-gate');
     await mkdir(dir, { recursive: true });
     const gate = join(dir, '.x.lock.gate');
@@ -148,6 +149,52 @@ describe('superseded-holder safety', () => {
       .rejects.toBeInstanceOf(NamespaceGateHeldError);
     expect(await readFile(gate, 'utf8')).toBe('4194303');
   });
+
+  // #808: a killed process can leave the gate behind; every later acquire used to fail.
+  it('reclaims a gate whose owner died and that is older than the bound', async () => {
+    const dir = join(root, 'dead-gate');
+    await mkdir(dir, { recursive: true });
+    const gate = join(dir, '.x.lock.gate');
+    await writeFile(gate, '4194303');
+    const old = (Date.now() - 60_000) / 1000;
+    await utimes(gate, old, old);
+
+    const held = await acquireLockAt(dir, '.x.lock', { namespaceGateMaxWaitMs: 20 });
+    if (isLockHeld(held)) throw new Error('the reclaimed gate must let the acquire own the lock');
+    await held.release();
+    expect((await readdir(dir)).filter(name => /\.(gate|reclaim\.\d+)$/.test(name))).toEqual([]);
+  });
+
+  it('keeps an old gate whose owner is still alive', async () => {
+    const dir = join(root, 'live-gate');
+    await mkdir(dir, { recursive: true });
+    const gate = join(dir, '.x.lock.gate');
+    await writeFile(gate, String(process.pid));
+    const old = (Date.now() - 60_000) / 1000;
+    await utimes(gate, old, old);
+    await expect(acquireLockAt(dir, '.x.lock', { namespaceGateMaxWaitMs: 20 }))
+      .rejects.toBeInstanceOf(NamespaceGateHeldError);
+    expect(await readFile(gate, 'utf8')).toBe(String(process.pid));
+  });
+
+  it('gives the lock to ONE contender when several find the same dead gate', async () => {
+    const dir = join(root, 'dead-gate-race');
+    await mkdir(dir, { recursive: true });
+    const gate = join(dir, '.race.lock.gate');
+    for (let round = 0; round < 25; round++) {
+      await writeFile(gate, '4194303');
+      const old = (Date.now() - 60_000) / 1000;
+      await utimes(gate, old, old);
+
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () => acquireLockAt(dir, '.race.lock', { onContended: 'report', namespaceGateMaxWaitMs: 2_000 })),
+      );
+      const handles = results.filter(result => !isLockHeld(result));
+      expect(handles, `round ${round}`).toHaveLength(1);
+      await (handles[0] as { release: () => Promise<void> }).release();
+      expect((await readdir(dir)).filter(name => /\.(gate|reclaim\.\d+)$/.test(name)), `round ${round}`).toEqual([]);
+    }
+  }, 20_000);
 
   it('retries namespace cleanup after a release is temporarily blocked', async () => {
     const dir = join(root, 'release-retry');
@@ -375,4 +422,45 @@ describe('withAnalysisLock — set-level serialization', () => {
     );
     expect(new Set(contents).size).toBe(1);
   }, 10_000);
+});
+
+// #808: a holder SIGKILLed mid-acquire must not leave a lock no one can reclaim.
+describe('a holder killed while acquiring', () => {
+  it.runIf(process.platform !== 'win32')('leaves no empty lock, and the next acquire recovers', async () => {
+    const dir = join(root, 'killed');
+    await mkdir(dir, { recursive: true });
+    const modulePath = new URL('./advisory-lock.ts', import.meta.url).href;
+    // The payload never returns, so the child is killed while it holds the gate, after
+    // it has created its lock file but before that file holds a payload.
+    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
+      `const m = await import(${JSON.stringify(modulePath)});
+       await m.acquireLockAt(${JSON.stringify(dir)}, '.x.lock', { payload: () => { for (;;) {} } });`],
+    { stdio: 'ignore' });
+    const gate = join(dir, '.x.lock.gate');
+    for (let i = 0; i < 200 && !(await access(gate).then(() => true, () => false)); i++) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    child.kill('SIGKILL');
+    await new Promise(resolve => child.once('exit', resolve));
+
+    await expect(access(join(dir, '.x.lock'))).rejects.toThrow();
+    const old = (Date.now() - 60_000) / 1000;
+    await utimes(gate, old, old);
+    const held = await acquireLockAt(dir, '.x.lock', { namespaceGateMaxWaitMs: 20 });
+    if (isLockHeld(held)) throw new Error('the next acquire must own the lock');
+    await held.release();
+  }, 20_000);
+
+  it('steals an empty lock older than the stale bound', async () => {
+    const dir = join(root, 'empty-lock');
+    await mkdir(dir, { recursive: true });
+    const lockPath = join(dir, '.x.lock');
+    await writeFile(lockPath, '');
+    const old = (Date.now() - 200_000) / 1000;
+    await utimes(lockPath, old, old);
+    const held = await acquireLockAt(dir, '.x.lock', { onContended: 'report' });
+    if (isLockHeld(held)) throw new Error('an old empty lock must be reclaimed');
+    expect(held.reclaimed).toBe(true);
+    await held.release();
+  });
 });
