@@ -46,6 +46,7 @@ trusts the answer.
 | Managed block on Cline and `AGENTS.md` | Says "Wired MCP surface" and names the `orient` tool where those adapters register no MCP server | Write the CLI-only form for a surface with no MCP registration |
 | `openlore analyze --output <dir in the repository>` | Always fails with "Source files changed during analysis publication … Retry analysis": the output is written inside the source tree, so retrying cannot help | Leave the output directory out of the source fingerprint |
 | `install --agent cline` / `claude-code` path refusal | Stops when `.clinerules` is a directory (which `analyze --ai-configs` creates) or `CLAUDE.md` links to `AGENTS.md`, and says a link resolves outside the repository when none does | Name the real cause; write into the `.clinerules` directory form |
+| Claude settings reads (`collectHookMoments`, `readJsonObject` in `wiring-scope.ts`, `readHooks`) | A FIFO at a repository `.claude/settings.json` hangs `openlore status` and `doctor` | Read settings through a regular-file-only, size-bounded, non-blocking reader (as `slimDigestReachesAgent` now does) |
 
 ## Next release (in this order)
 

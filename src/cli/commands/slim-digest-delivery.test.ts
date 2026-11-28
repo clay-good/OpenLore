@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { slimDigestReachesAgent } from './slim-digest-delivery.js';
@@ -138,5 +139,31 @@ describe('slimDigestReachesAgent', () => {
     writeConfig({ contextInjection: { tokenBudget: budget } });
     expect((await readSlimDigest(root))?.tokenBudget).toBe(budget);
     expect(await slimDigestReachesAgent(root, home, managed())).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses a FIFO at a repository settings file without blocking', async () => {
+    wirePromptHook(root);
+    execFileSync('mkfifo', [join(root, '.claude', 'settings.local.json')]);
+    const started = Date.now();
+    expect(await slimDigestReachesAgent(root, home, managed())).toBe(false);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('reads user hooks from CLAUDE_CONFIG_DIR in place of ~/.claude', async () => {
+    wirePromptHook(home, 'npx --yes openlore orient --inject --scope user');
+    const saved = process.env.CLAUDE_CONFIG_DIR;
+    const configDir = join(home, 'elsewhere');
+    mkdirSync(configDir, { recursive: true });
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    try {
+      // The hook in ~/.claude does not run when Claude Code reads its settings from elsewhere.
+      expect(await slimDigestReachesAgent(root, home, managed())).toBe(false);
+      writeFileSync(join(configDir, 'settings.json'), JSON.stringify({
+        hooks: { UserPromptSubmit: [{ _openlore: true, hooks: [{ type: 'command', command: 'npx --yes openlore orient --inject --scope user' }] }] },
+      }));
+      expect(await slimDigestReachesAgent(root, home, managed())).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = saved;
+    }
   });
 });

@@ -18,7 +18,8 @@
  * Any other case keeps the import, so the agent never loses its only repository shape.
  */
 
-import { readFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { open, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readSlimDigest } from './orient-inject.js';
@@ -26,6 +27,31 @@ import { promptSubmittedOff } from './orient.js';
 import { assessHookWiring, claudeSettingsFiles, isUserScopeCommand } from '../install/hook-wiring-health.js';
 import { estimateTokens } from '../../core/services/llm-service.js';
 import { SILENCE_CONTRACT_LINE } from './orient-inject-render.js';
+
+const SETTINGS_MAX_BYTES = 1_048_576;
+
+/**
+ * Whether a settings file is absent, a regular file this check may read, or something it refuses
+ * (a FIFO, a device, a directory, an oversized file). Opened with O_NONBLOCK so a FIFO a hostile
+ * repository ships at `.claude/settings.json` cannot block the command. Symlinks are followed:
+ * `~/.claude` is often a link into a dotfiles repository.
+ */
+async function settingsFileState(path: string): Promise<'absent' | 'ok' | 'refused'> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'refused';
+  }
+  try {
+    const s = await handle.stat();
+    return s.isFile() && s.size <= SETTINGS_MAX_BYTES ? 'ok' : 'refused';
+  } catch {
+    return 'refused';
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
 
 /** Claude Code's managed policy settings, per platform. */
 export function managedSettingsFile(platform: NodeJS.Platform = process.platform): string {
@@ -53,8 +79,11 @@ export async function slimDigestReachesAgent(
   try {
     if (promptSubmittedOff(rootPath)) return false;
     const files = claudeSettingsFiles(rootPath, home);
-    // Claude Code reads user settings from CLAUDE_CONFIG_DIR when it is set.
-    if (process.env.CLAUDE_CONFIG_DIR) files.push(join(process.env.CLAUDE_CONFIG_DIR, 'settings.json'));
+    // Claude Code reads user settings from CLAUDE_CONFIG_DIR, in place of ~/.claude, when it is set.
+    if (process.env.CLAUDE_CONFIG_DIR) files[0] = join(process.env.CLAUDE_CONFIG_DIR, 'settings.json');
+    // A settings file that is not a small regular file is not read; the import stays.
+    const states = await Promise.all([...files, managed].map(settingsFileState));
+    if (states.includes('refused')) return false;
     if (await hooksDisabled(files, managed)) return false;
     const { hooks, missing } = await assessHookWiring(files);
     const inject = hooks.filter(h => h.event === 'UserPromptSubmit' && h.step === 'orient --inject');

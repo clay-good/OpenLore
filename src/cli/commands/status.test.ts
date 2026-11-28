@@ -6,7 +6,7 @@
  * is in flight.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -570,6 +570,20 @@ describe('openlore status — a legacy full-digest import', () => {
     const out = await statusThroughRealCheck(false, [], 'Full repository digest, for a task that needs it: `.openlore/analysis/CODEBASE.md`.');
     expect(out.split('\n').filter(line => line.includes('Digest pointer'))).toHaveLength(1);
     expect(await statusThroughRealCheck(true, [], 'Full repository digest, for a task that needs it: `.openlore/analysis/CODEBASE.md`.')).not.toContain('Digest pointer');
+  });
+
+  it('says nothing when CODEBASE.md is a symlink, and caps a long line list', async () => {
+    await withDigest();
+    await writeFile(join(root, 'CLAUDE.md'), Array.from({ length: 12 }, () => '@.openlore/analysis/CODEBASE.md').join('\n'), 'utf-8');
+    const found = await findLegacyDigestImport(root, reaches);
+    expect(found?.lines).toHaveLength(12);
+    expect(formatLegacyDigestImport(found!)).toContain('CLAUDE.md lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 and 2 more import');
+    if (process.platform !== 'win32') {
+      await rm(join(root, ANALYSIS, 'CODEBASE.md'));
+      await writeFile(join(root, 'outside.md'), 'x'.repeat(777), 'utf-8');
+      await symlink(join(root, 'outside.md'), join(root, ANALYSIS, 'CODEBASE.md'));
+      expect(await findLegacyDigestImport(root, reaches)).toBeNull();
+    }
   });
 
   it('says nothing without a CLAUDE.md or without the full digest', async () => {

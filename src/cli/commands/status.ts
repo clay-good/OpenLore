@@ -13,7 +13,7 @@
 
 import { Command } from 'commander';
 import { formatAge } from '../../utils/command-helpers.js';
-import { readFileSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { OPENLORE_ANALYSIS_SUBDIR, OPENLORE_DIR } from '../../constants.js';
@@ -195,7 +195,8 @@ export async function findDigestNotes(
 ): Promise<DigestNotes> {
   let digestBytes: number;
   try {
-    const digest = statSync(join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DIGEST));
+    // lstat: a CODEBASE.md that links elsewhere is not the digest analyze wrote.
+    const digest = lstatSync(join(rootPath, OPENLORE_DIR, OPENLORE_ANALYSIS_SUBDIR, ARTIFACT_DIGEST));
     if (!digest.isFile()) return {};
     digestBytes = digest.size;
   } catch {
@@ -223,12 +224,15 @@ export async function findLegacyDigestImport(
   return (await findDigestNotes(rootPath, reaches)).legacyDigestImport ?? null;
 }
 
+/** Line numbers for a status line: the first ten, then a count of the rest. */
+const lineList = (lines: number[]): string =>
+  lines.length > 10 ? `${lines.slice(0, 10).join(', ')} and ${lines.length - 10} more` : lines.join(', ');
 const where = (file: string, lines: number[]): string =>
-  lines.length === 1 ? `${file}:${lines[0]}` : `${file} lines ${lines.join(', ')}`;
+  lines.length === 1 ? `${file}:${lines[0]}` : `${file} lines ${lineList(lines)}`;
 
 /** The one status line for a legacy import, naming the lines to delete. */
 export function formatLegacyDigestImport(found: LegacyDigestImport): string {
-  const which = found.lines.length === 1 ? `line ${found.lines[0]}` : `lines ${found.lines.join(', ')}`;
+  const which = found.lines.length === 1 ? `line ${found.lines[0]}` : `lines ${lineList(found.lines)}`;
   return `${where(found.file, found.lines)} ${found.lines.length === 1 ? 'imports' : 'import'} ${LEGACY_DIGEST_IMPORT.slice(1)} ` +
     `(${found.digestBytes.toLocaleString('en-US')} bytes) on every turn; ` +
     `the prompt hook already gives the agent the slim digest once per session. Delete ${which} of ${found.file}.`;
