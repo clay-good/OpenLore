@@ -275,34 +275,77 @@ function isStrandedGate(gate: { ino: number; mtimeMs: number; pid: number | null
 }
 
 /**
+ * Create `path` holding `payload`, only if it does not exist. The payload is written under a
+ * unique name first and linked into place, so `path` never exists empty: a kill leaves either
+ * nothing or a complete file naming its creator.
+ */
+async function linkExclusive(path: string, payload: string): Promise<boolean> {
+  const candidate = `${path}.${process.pid}.${randomUUID()}.candidate`;
+  try {
+    const handle = await open(candidate, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    try {
+      await handle.writeFile(payload);
+    } finally {
+      await handle.close();
+    }
+    await link(candidate, path);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw err;
+  } finally {
+    await unlink(candidate).catch(() => {});
+  }
+}
+
+/** Unlink the gate only if it is still the stranded file with inode `ino`. */
+async function unlinkIfStillStranded(gatePath: string, ino: number): Promise<boolean> {
+  const current = await readGate(gatePath);
+  if (!current || current.ino !== ino || !isStrandedGate(current)) return false;
+  await unlink(gatePath);
+  return true;
+}
+
+/**
  * Remove a gate its owner died holding (#808). There is no portable compare-and-delete, so a
  * plain "PID dead, unlink the path" has an ABA race: a second contender can reclaim the same
  * gate and take a fresh one before the first unlinks, and the first then deletes the live
  * successor. An exclusive marker named for the stranded gate's inode admits ONE reclaimer per
- * stranded file. Its owner is dead and its other possible remover holds that marker, so the
- * file judged under the marker is still the file the unlink removes. A reclaimer that dies
- * holding the marker leaves the gate in place: the fail-closed path, never two owners.
+ * stranded file. The gate's owner is dead and its only other remover holds that marker, so the
+ * file re-judged under the marker is still the file the unlink removes.
+ *
+ * A reclaimer can die holding its marker. Markers name their creator like gates do, so a marker
+ * that is itself stranded is broken under a second marker named for the dead marker's inode:
+ * only that holder removes the dead marker or the gate, so the same argument holds one level
+ * up. Only a third crash inside that millisecond window leaves the fail-closed error.
  */
 async function reclaimStrandedGate(gatePath: string): Promise<boolean> {
-  const judged = await readGate(gatePath);
-  if (!judged || !isStrandedGate(judged)) return false;
-  const marker = `${gatePath}.reclaim.${judged.ino}`;
-  let handle: FileHandle;
   try {
-    handle = await open(marker, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-  } catch {
-    return false; // another contender is reclaiming this gate
-  }
-  try {
-    const current = await readGate(gatePath);
-    if (!current || current.ino !== judged.ino || !isStrandedGate(current)) return false;
-    await unlink(gatePath);
-    return true;
+    const judged = await readGate(gatePath);
+    if (!judged || !isStrandedGate(judged)) return false;
+    const marker = `${gatePath}.reclaim.${judged.ino}`;
+    if (await linkExclusive(marker, String(process.pid))) {
+      try {
+        return await unlinkIfStillStranded(gatePath, judged.ino);
+      } finally {
+        await unlink(marker).catch(() => {});
+      }
+    }
+    const dead = await readGate(marker);
+    if (!dead || !isStrandedGate(dead)) return false; // a live reclaimer is at work
+    const breaker = `${marker}.${dead.ino}`;
+    if (!(await linkExclusive(breaker, String(process.pid)))) return false;
+    try {
+      const again = await readGate(marker);
+      if (!again || again.ino !== dead.ino || !isStrandedGate(again)) return false;
+      const removed = await unlinkIfStillStranded(gatePath, judged.ino);
+      await unlink(marker).catch(() => {});
+      return removed;
+    } finally {
+      await unlink(breaker).catch(() => {});
+    }
   } catch {
     return false;
-  } finally {
-    await handle.close().catch(() => {});
-    await unlink(marker).catch(() => {});
   }
 }
 
@@ -398,8 +441,8 @@ export async function acquireLockAt(
     try {
       throwIfAborted(signal);
       try {
-        // Write the payload under a unique name, then link it into place: the lock path never
-        // holds an empty file. A holder killed between create and write used to leave one, and
+        // Write the payload under a unique name, then link it into place: acquiring never leaves
+        // an empty lock file (and `refresh` rewrites in place without truncating). A holder killed between create and write used to leave one, and
         // a lock that names no process is never judged stale, so every later acquire waited
         // forever (#808). `link` fails with EEXIST when the lock is held, like `wx` did.
         const candidate = `${lockPath}.${process.pid}.${randomUUID()}.candidate`;
@@ -408,8 +451,10 @@ export async function acquireLockAt(
           constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
           0o600,
         );
+        const initialPayload = payloadOf();
+        let payloadBytes = Buffer.byteLength(initialPayload, 'utf8');
         try {
-          await fh.writeFile(payloadOf());
+          await fh.writeFile(initialPayload);
           await link(candidate, lockPath); // exclusive — fails if held
         } catch (err) {
           await tryHandle(() => fh.close());
@@ -434,13 +479,21 @@ export async function acquireLockAt(
           reclaimed,
           refresh: async (payload: string) => {
             if (released) return;
-            // Serialize truncate+write pairs. Heartbeats and explicit stage updates
-            // can overlap in one process; without this chain their writes splice
-            // into malformed JSON and make a later crashed lock unreclaimable.
+            // Serialize rewrites. Heartbeats and explicit stage updates can overlap in one
+            // process; without this chain their writes splice into malformed JSON and make
+            // a later crashed lock unreclaimable.
             const operation = refreshTail.then(async () => {
               if (released) return;
-              await tryHandle(() => fh.truncate(0));
-              await tryHandle(() => fh.write(payload, 0));
+              // One in-place write, padded with spaces to the previous length, instead of
+              // truncate-then-write: a kill between those two left an empty lock, which no
+              // staleness rule can attribute to anyone (#808). Trailing spaces parse as JSON
+              // whitespace and do not change the leading PID.
+              const bytes = Buffer.from(payload, 'utf8');
+              const padded = bytes.length >= payloadBytes
+                ? bytes
+                : Buffer.concat([bytes, Buffer.alloc(payloadBytes - bytes.length, 0x20)]);
+              const written = await tryHandle(() => fh.write(padded, 0, padded.length, 0));
+              if (written) payloadBytes = padded.length;
             });
             refreshTail = operation.catch(() => {});
             await operation;

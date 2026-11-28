@@ -39,6 +39,8 @@ const READ_ONLY_TOOL_MAY_WRITE: Record<string, string> = {
   'acquireLockAt@src/core/runtime/advisory-lock.ts': 'advisory lock file, removed on release',
   'acquireNamespaceGate@src/core/runtime/advisory-lock.ts': 'advisory lock gate, removed on release',
   'reclaimStrandedGate@src/core/runtime/advisory-lock.ts': 'removes a lock gate whose owner died (#808)',
+  'linkExclusive@src/core/runtime/advisory-lock.ts': 'creates a gate reclaim marker, removed in finally (#808)',
+  'unlinkIfStillStranded@src/core/runtime/advisory-lock.ts': 'removes a lock gate whose owner died (#808)',
   'releaseSync@src/core/runtime/analysis-ownership.ts': 'releases an ownership lock',
   'release@src/core/runtime/analysis-ownership.ts': 'releases an ownership lock',
   'restoreGuard@src/utils/path-confinement.ts': 'restores a confinement guard link it created',

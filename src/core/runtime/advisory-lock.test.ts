@@ -437,9 +437,14 @@ describe('a holder killed while acquiring', () => {
        await m.acquireLockAt(${JSON.stringify(dir)}, '.x.lock', { payload: () => { for (;;) {} } });`],
     { stdio: 'ignore' });
     const gate = join(dir, '.x.lock.gate');
-    for (let i = 0; i < 200 && !(await access(gate).then(() => true, () => false)); i++) {
+    // Kill only once the lock file exists in some form (the old code's empty lock, or this code's
+    // candidate), so the kill lands after create and before the payload, every run.
+    const lockCreated = async (): Promise<boolean> => (await readdir(dir))
+      .some(name => name === '.x.lock' || (name.startsWith('.x.lock.') && name.endsWith('.candidate') && !name.startsWith('.x.lock.gate')));
+    for (let i = 0; i < 200 && !(await access(gate).then(() => true, () => false) && await lockCreated()); i++) {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
+    expect(await lockCreated()).toBe(true);
     child.kill('SIGKILL');
     await new Promise(resolve => child.once('exit', resolve));
 
@@ -450,6 +455,49 @@ describe('a holder killed while acquiring', () => {
     if (isLockHeld(held)) throw new Error('the next acquire must own the lock');
     await held.release();
   }, 20_000);
+
+  // The reclaim marker is what keeps two contenders from both deleting a gate (the reviewer's
+  // point: the 5-contender race passes without it, because the lock link is exclusive anyway).
+  it('does not reclaim a stranded gate while a live process holds its reclaim marker', async () => {
+    const dir = join(root, 'marker-live');
+    await mkdir(dir, { recursive: true });
+    const gate = join(dir, '.x.lock.gate');
+    await writeFile(gate, '4194303');
+    const old = (Date.now() - 60_000) / 1000;
+    await utimes(gate, old, old);
+    await writeFile(`${gate}.reclaim.${(await stat(gate)).ino}`, String(process.pid));
+    await expect(acquireLockAt(dir, '.x.lock', { namespaceGateMaxWaitMs: 50 }))
+      .rejects.toBeInstanceOf(NamespaceGateHeldError);
+    expect(await readFile(gate, 'utf8')).toBe('4194303');
+  });
+
+  it('breaks a reclaim marker whose reclaimer died, then reclaims the gate', async () => {
+    const dir = join(root, 'marker-dead');
+    await mkdir(dir, { recursive: true });
+    const gate = join(dir, '.x.lock.gate');
+    await writeFile(gate, '4194303');
+    const marker = `${gate}.reclaim.${(await stat(gate)).ino}`;
+    await writeFile(marker, '4194302');
+    const old = (Date.now() - 60_000) / 1000;
+    await utimes(gate, old, old);
+    await utimes(marker, old, old);
+
+    const held = await acquireLockAt(dir, '.x.lock', { namespaceGateMaxWaitMs: 50 });
+    if (isLockHeld(held)) throw new Error('a dead reclaimer must not strand the gate');
+    await held.release();
+    expect((await readdir(dir)).filter(name => name.includes('.gate') || name.includes('.reclaim'))).toEqual([]);
+  });
+
+  it('a refresh never leaves the lock empty or torn: it rewrites in place, padded', async () => {
+    const dir = join(root, 'refresh');
+    const held = await acquireLockAt(dir, '.x.lock', { payload: () => JSON.stringify({ pid: process.pid, stage: 'starting-a-long-stage-name' }) });
+    if (isLockHeld(held)) throw new Error('setup acquire must own the lock');
+    await held.refresh(JSON.stringify({ pid: process.pid, stage: 'x' }));
+    const text = await readFile(join(dir, '.x.lock'), 'utf8');
+    expect(JSON.parse(text)).toEqual({ pid: process.pid, stage: 'x' });
+    expect(text.length).toBeGreaterThan(JSON.stringify({ pid: process.pid, stage: 'x' }).length);
+    await held.release();
+  });
 
   it('steals an empty lock older than the stale bound', async () => {
     const dir = join(root, 'empty-lock');
