@@ -409,6 +409,17 @@ export function notReadyResult(
   return { error, notReady: true, reason, remedy };
 }
 
+/**
+ * True when a tool produced no answer: a {@link notReadyResult}, or the plain `{ error }` many
+ * handlers return (an unusable index, a bad argument, a failed step). MCP marks such a result
+ * `isError: true` so a client can tell it from an answer (#810).
+ */
+export function isErrorResult(result: unknown): boolean {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
+  const r = result as { notReady?: unknown; error?: unknown };
+  return r.notReady === true || typeof r.error === 'string';
+}
+
 interface ContextCacheEntry {
   ctx: CachedContext;
   mtime: number;

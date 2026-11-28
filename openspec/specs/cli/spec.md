@@ -2035,7 +2035,9 @@ racing through `ensureServeDaemon`) resolve to exactly one daemon: the loser reu
 descriptor instead of binding a second port, running a second watcher on the same analysis
 directory, or orphaning the first daemon by overwriting its descriptor. The lock reuses the
 existing decisions-lock exclusive-create shape. A stale PID-bearing ownership lock SHALL be
-reclaimed. A malformed lock or stranded namespace gate SHALL fail closed with bounded,
+reclaimed. A lock namespace gate whose PID-bearing owner is dead and which is older than the
+namespace-gate bound SHALL be reclaimed by exactly one contender (#808). A malformed lock, or a
+gate whose owner is alive, unknown, or younger than the bound, SHALL fail closed with bounded,
 actionable manual-recovery guidance rather than wait forever or permit a second daemon.
 
 #### Scenario: Two concurrent starts yield one daemon
@@ -2051,6 +2053,12 @@ actionable manual-recovery guidance rather than wait forever or permit a second 
 - **WHEN** a later start finds the stale lockfile
 - **THEN** the stale lock is detected and recovered (the decisions-lock discipline) and startup
   proceeds
+
+#### Scenario: A gate left by a dead process is reclaimed once
+
+- **GIVEN** a lock namespace gate older than the bound whose PID-bearing owner is dead
+- **WHEN** several contenders find it at once
+- **THEN** exactly one removes it, and the lock it guards still has at most one owner
 
 #### Scenario: An ambiguous abandoned lock fails closed
 

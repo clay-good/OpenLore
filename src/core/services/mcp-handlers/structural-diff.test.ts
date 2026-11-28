@@ -77,6 +77,23 @@ describe('handleStructuralDiff', () => {
     expect(r.summary.signatureChanges).toBe(1);
   });
 
+  // #807: a file that does not parse is named with its revision and cause, never silent.
+  it('names each file revision that did not parse, with the error lines', async () => {
+    write(repo, 'src/mod.ts', V2.replace('export function delta', '<<<<<<< HEAD\nexport function delta'));
+    const r = await handleStructuralDiff({ directory: repo, baseRef: 'HEAD' }) as {
+      parseFailures?: Array<{ file: string; revision: string; cause: string }>;
+      soundness: { caveats: string[] };
+    };
+    expect(r.parseFailures).toEqual([{ file: 'src/mod.ts', revision: 'head', cause: expect.stringMatching(/^syntax error at lines? \d/) }]);
+    expect(r.parseFailures![0].cause).toContain('3');
+    expect(r.soundness.caveats.some(c => c.includes('parseFailures'))).toBe(true);
+  });
+
+  it('reports no parseFailures when both revisions parse', async () => {
+    const r = await handleStructuralDiff({ directory: repo, baseRef: 'HEAD' }) as { parseFailures?: unknown };
+    expect(r.parseFailures).toBeUndefined();
+  });
+
   it('applies a file scope before category limits and summary computation', async () => {
     write(repo, 'src/unrelated.ts', 'export function before(): void {}\n');
     git(repo, ['add', 'src/unrelated.ts']);

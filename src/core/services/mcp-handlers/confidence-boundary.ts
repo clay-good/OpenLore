@@ -580,6 +580,11 @@ export const DISCLOSURE_CHANNELS: readonly DisclosureChannel[] = [
     detail: () => 'The index was not ready, so no answer was computed.',
   },
   {
+    path: 'parseFailures',
+    fires: nonEmptyArray,
+    detail: (v) => `${countOf(v)} file revision(s) did not parse cleanly — read \`parseFailures\`; their symbols can be missing from the answer.`,
+  },
+  {
     path: 'notAssessed',
     fires: (v) => countOf(v) > 0,
     detail: (v) => `${countOf(v)} item(s) could not be assessed — read \`notAssessed\`; their absence from the findings is not a clean bill.`,

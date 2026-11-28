@@ -29,6 +29,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     ...actual,
     access:    vi.fn().mockResolvedValue(undefined),
     stat:      vi.fn().mockResolvedValue({ mtime: new Date() }),
+    realpath:  vi.fn(actual.realpath),
     mkdir:     vi.fn().mockResolvedValue(undefined),
     readFile:  vi.fn().mockResolvedValue('{}'),
     writeFile: vi.fn().mockResolvedValue(undefined),
@@ -142,6 +143,7 @@ vi.mock('../../core/analyzer/ai-config-generator.js', () => ({
 
 vi.mock('../../core/services/config-manager.js', () => ({
   readOpenLoreConfig: vi.fn(),
+  retargetPrimaryConfigRoot: vi.fn(() => () => {}),
 }));
 
 vi.mock('../../core/decisions/atomic-store.js', async (orig) => {
@@ -663,6 +665,33 @@ describe('analyze command', () => {
 
       await analyzeCommand.parseAsync([], { from: 'user' });
 
+      expect(process.exitCode).toBe(1);
+    });
+
+    it('--directory analyzes that repository instead of the current directory', async () => {
+      const cfgMod = await import('../../core/services/config-manager.js');
+      const fsMod = await import('node:fs/promises');
+      // The OS-canonical spelling is what a run from inside the repo sees as cwd.
+      const other = resolve('/other/repo');
+      vi.mocked(fsMod.realpath as any).mockImplementationOnce(async () => other);
+      mockStat.mockResolvedValue({ isDirectory: () => true });
+      mockReadOpenLoreConfig.mockResolvedValue(null);
+
+      await analyzeCommand.parseAsync(['--directory', resolve('/link/to/repo')], { from: 'user' });
+
+      expect(mockReadOpenLoreConfig).toHaveBeenCalledWith(other);
+      expect(vi.mocked(cfgMod.retargetPrimaryConfigRoot)).toHaveBeenCalledWith(other);
+    });
+
+    it('--directory that is not a directory fails before reading any config', async () => {
+      const loggerMod = await import('../../utils/logger.js');
+      const fsMod = await import('node:fs/promises');
+      vi.mocked(fsMod.realpath as any).mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+
+      await analyzeCommand.parseAsync(['--directory', resolve('/missing')], { from: 'user' });
+
+      expect(vi.mocked(loggerMod.logger.error)).toHaveBeenCalledWith(expect.stringContaining('--directory is not a directory'));
+      expect(mockReadOpenLoreConfig).not.toHaveBeenCalled();
       expect(process.exitCode).toBe(1);
     });
 

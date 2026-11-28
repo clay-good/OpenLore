@@ -484,6 +484,17 @@ describe('check weakening — review round 1', () => {
     expect(r.notAssessed[0].reason).toContain('syntax error');
   });
 
+  // #807: the reason names the revision that failed and the cause.
+  it('a parse failure names the revision and the first syntax error line', async () => {
+    const broken = JS_BASE.replace("  it('parses spaces'", "<<<<<<< HEAD\n  it('parses spaces'");
+    const newOnly = await detect([jsFile(broken)]);
+    expect(newOnly.notAssessed[0].reason).toBe('the file could not be parsed in the new state (syntax error at line 7)');
+    const baseOnly = await detect([{ path: 'src/config.test.ts', base: broken, current: JS_BASE }]);
+    expect(baseOnly.notAssessed[0].reason).toBe('the file could not be parsed at the baseline (syntax error at line 7)');
+    const both = await detect([{ path: 'src/config.test.ts', base: broken, current: broken }]);
+    expect(both.notAssessed[0].reason).toBe('the file could not be parsed at the baseline (syntax error at line 7) and in the new state (syntax error at line 7)');
+  });
+
   it('a focus finding says to remove the focus, and missing reach is disclosed', async () => {
     const r = await detect([{ path: 'src/z.test.ts', base: JS_BASE, current: JS_BASE.replace("it('parses spaces'", "it.only('parses spaces'") }]);
     expect(r.findings[0].remediation).toContain('remove the focus marker');

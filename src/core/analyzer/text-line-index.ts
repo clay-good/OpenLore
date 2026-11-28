@@ -25,7 +25,8 @@
  */
 
 import { existsSync } from 'node:fs';
-import { readdir, rm, rename } from 'node:fs/promises';
+import { getHeapStatistics } from 'node:v8';
+import { readdir, rm, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { quietNativeLoggingOnce } from './lance-logging.js';
 import { noteUpdateAndMaybeCompact } from './index-compaction.js';
@@ -121,9 +122,44 @@ const _bm25Cache = new Map<
   { corpus: Bm25Corpus; rows: TextLineRecord[] }
 >();
 
+/**
+ * The in-memory corpus costs ~0.7 KB per line on real code (measured) and more with
+ * short-token lines, so 1 KB is the planning figure. An index whose corpus would take more
+ * than a quarter of the heap is searched by streaming instead: loading 5.5M lines needed a
+ * 7.4 GB heap and crashed smaller ones (#806).
+ */
+const CACHED_BYTES_PER_LINE = 1024;
+const CACHE_HEAP_SHARE = 0.25;
+let cacheLineLimitOverride: number | null = null;
+
+/** The budget covers every index cached in this process (several repositories can be open). */
+function corpusFitsInMemory(lines: number): boolean {
+  const limit = cacheLineLimitOverride
+    ?? (getHeapStatistics().heap_size_limit * CACHE_HEAP_SHARE) / CACHED_BYTES_PER_LINE;
+  let cached = 0;
+  for (const entry of _bm25Cache.values()) cached += entry.rows.length;
+  return cached + lines <= limit;
+}
+
+/** Test-only: force the streaming path above `n` lines (`null` restores the heap-derived limit). */
+export function _setCacheLineLimitForTesting(n: number | null): void {
+  cacheLineLimitOverride = n;
+}
+
+// Corpus-wide line count and token total for the streaming path. Keyed by the dataset's
+// identity, not its version alone: a rebuild writes a NEW dataset whose version restarts at 1,
+// so a same-size rebuild by any process would otherwise reuse the old totals.
+const _streamStats = new Map<string, { identity: string; N: number; totalLen: number }>();
+
+/** Test-only: is this output directory's text index held in the in-memory cache? */
+export function _isTextIndexCachedForTesting(outputDir: string): boolean {
+  return _bm25Cache.has(join(outputDir, DB_FOLDER));
+}
+
 /** Test-only: clear the in-memory BM25 cache to force the cold path. */
 export function _resetTextLineIndexCachesForTesting(): void {
   _bm25Cache.clear();
+  _streamStats.clear();
 }
 
 // ============================================================================
@@ -299,6 +335,7 @@ export class TextLineIndex {
         await rm(stagePath, { recursive: true, force: true });
         await rm(dbPath, { recursive: true, force: true });
         _bm25Cache.delete(dbPath);
+        _streamStats.delete(dbPath);
         return { lines: 0, files: 0 };
       }
 
@@ -307,6 +344,7 @@ export class TextLineIndex {
       await rm(dbPath, { recursive: true, force: true });
       await rename(stagePath, dbPath);
       _bm25Cache.delete(dbPath);
+      _streamStats.delete(dbPath);
       return { lines: total, files: indexedFiles };
     } catch (err) {
       await rm(stagePath, { recursive: true, force: true }).catch(() => { /* best effort */ });
@@ -394,6 +432,10 @@ export class TextLineIndex {
       } catch {
         return [];
       }
+      const lineCount = (await table.countRows()) as number;
+      if (!corpusFitsInMemory(lineCount)) {
+        return streamSearchText(table, dbPath, outputDir, query, lineCount, { limit, filePath, traceCandidates, vocabularyExpansion });
+      }
       const rows = (await table.query().toArray()) as Record<string, unknown>[];
       const records: TextLineRecord[] = rows.map((r) => ({
         id: r.id as string,
@@ -467,4 +509,116 @@ export class TextLineIndex {
       rows: kept,
     });
   }
+}
+
+// ============================================================================
+// STREAMING SEARCH (#806)
+// ============================================================================
+
+/** A one-document corpus view: BM25 over it reads only `df`, `N` and `avgLength` of the corpus. */
+function docView(
+  doc: { id: string; tfMap: Map<string, number>; length: number },
+  df: Map<string, number>,
+  N: number,
+  avgLength: number,
+): Bm25Corpus {
+  return { docs: [doc], df, N, avgLength };
+}
+
+/**
+ * Search the text index without loading it: memory is one Arrow batch plus the result list.
+ * Scores, ties and evidence are the in-memory path's exactly. Pass 1 counts each query term's
+ * document frequency (and, once per dataset state, the corpus line and token totals); pass 2
+ * scores the lines that contain a query term and keeps the best ones. A token is a lowercase
+ * substring of its line, so `includes` skips lines that cannot match without tokenizing them.
+ */
+async function streamSearchText(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  table: any,
+  dbPath: string,
+  outputDir: string,
+  query: string,
+  lineCount: number,
+  opts: { limit: number; filePath?: string; traceCandidates: boolean; vocabularyExpansion: boolean },
+): Promise<TextSearchResult[]> {
+  const queryTokens = tokenize(query);
+  const keep = opts.traceCandidates ? opts.limit * 3 : opts.limit;
+  if (queryTokens.length === 0 || !(keep > 0)) return [];
+  const { expansionTokens } = expandVocabularyQuery(outputDir, queryTokens, opts.vocabularyExpansion);
+  const terms = [...new Set([...queryTokens, ...expansionTokens])];
+  const mayContain = (text: string): boolean => {
+    const lower = text.toLowerCase();
+    return terms.some((t) => lower.includes(t));
+  };
+  const termFrequencies = (tokens: string[]): Map<string, number> => {
+    const tf = new Map<string, number>();
+    for (const t of tokens) if (terms.includes(t)) tf.set(t, (tf.get(t) ?? 0) + 1);
+    return tf;
+  };
+
+  // Pass 1: document frequencies, plus the corpus totals when this table version lacks them.
+  const dataset = await stat(join(dbPath, `${TABLE_NAME}.lance`)).then((st) => `${st.ino}:${st.birthtimeMs}`, () => '');
+  const identity = `${dataset}:${(await table.version()) as number}:${lineCount}`;
+  let stats = _streamStats.get(dbPath);
+  if (stats?.identity !== identity) stats = undefined;
+  const df = new Map<string, number>();
+  let N = 0;
+  let totalLen = 0;
+  for await (const batch of table.query().select(['text'])) {
+    const text = batch.getChild('text');
+    for (let i = 0; i < batch.numRows; i++) {
+      const line = text.get(i) as string;
+      if (stats && !mayContain(line)) continue;
+      const tokens = tokenize(line);
+      N++;
+      totalLen += tokens.length;
+      for (const t of termFrequencies(tokens).keys()) df.set(t, (df.get(t) ?? 0) + 1);
+    }
+  }
+  if (!stats) {
+    stats = { identity, N, totalLen };
+    _streamStats.set(dbPath, stats);
+  }
+  const avgLength = stats.N > 0 ? stats.totalLen / stats.N : 1;
+
+  // Pass 2: score the lines that contain a query term; keep the best `keep`.
+  type Hit = { rec: TextLineRecord; doc: { id: string; tfMap: Map<string, number>; length: number }; id: string; score: number; expansionScore: number };
+  const best: Hit[] = [];
+  for await (const batch of table.query().select(['id', 'filePath', 'lineNumber', 'text'])) {
+    const ids = batch.getChild('id');
+    const paths = batch.getChild('filePath');
+    const lineNumbers = batch.getChild('lineNumber');
+    const text = batch.getChild('text');
+    for (let i = 0; i < batch.numRows; i++) {
+      const line = text.get(i) as string;
+      if (!mayContain(line)) continue;
+      const path = paths.get(i) as string;
+      if (opts.filePath && path !== opts.filePath) continue;
+      const tokens = tokenize(line);
+      const doc = { id: ids.get(i) as string, tfMap: termFrequencies(tokens), length: tokens.length };
+      const view = docView(doc, df, stats.N, avgLength);
+      const score = bm25Score(view, queryTokens, 0);
+      const expansionScore = bm25Score(view, expansionTokens, 0);
+      if (score <= 0 && expansionScore <= 0) continue;
+      const hit: Hit = { rec: { id: doc.id, filePath: path, lineNumber: Number(lineNumbers.get(i)), text: line }, doc, id: doc.id, score, expansionScore };
+      if (best.length === keep && compareVocabularyRank(hit, best[best.length - 1]) >= 0) continue;
+      let at = best.length;
+      while (at > 0 && compareVocabularyRank(hit, best[at - 1]) < 0) at--;
+      best.splice(at, 0, hit);
+      if (best.length > keep) best.pop();
+    }
+  }
+
+  return best.map(({ rec, doc, score, expansionScore }) => {
+    const view = docView(doc, df, stats.N, avgLength);
+    const terms = scoredExpansionTerms(expansionTokens, doc.tfMap);
+    return {
+      filePath: rec.filePath,
+      lineNumber: rec.lineNumber,
+      text: rec.text,
+      score: score > 0 ? score : expansionScore,
+      matchEvidence: bm25MatchEvidence(view, score > 0 ? queryTokens : expansionTokens, 0, { body: rec.text }, score > 0 ? 1 : 2),
+      ...(terms.length > 0 ? { expansionTerms: terms } : {}),
+    };
+  });
 }

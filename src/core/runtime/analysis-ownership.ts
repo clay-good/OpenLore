@@ -142,9 +142,11 @@ export function isOwnershipStale(mtimeMs: number, contents: string, repository: 
   const silentMs = Date.now() - mtimeMs;
   if (silentMs <= OWNERSHIP_HEARTBEAT_STALE_MS) return false;
 
+  // An EMPTY lock whose heartbeat is stale is an owner killed mid-refresh by a version that
+  // truncated before writing (#808): a live owner refreshes well inside the window.
+  if (contents.trim().length === 0) return true;
   const payload = parsePayload(contents);
-  // A refresh can be observed between truncate and write, and hand-edited lock
-  // files exist. Ambiguous ownership fails closed rather than minting two owners.
+  // Hand-edited lock files exist. Ambiguous ownership fails closed rather than minting two owners.
   if (!payload) return false;
   // A lock naming a different repository is not ours to interpret; leave it.
   if (payload.repository !== repository) return false;

@@ -38,7 +38,7 @@ import {
   classifyToolError,
 } from '../../core/services/mcp-handlers/tool-guard.js';
 
-import { sanitizeMcpError, validateDirectory } from '../../core/services/mcp-handlers/utils.js';
+import { isErrorResult, sanitizeMcpError, validateDirectory } from '../../core/services/mcp-handlers/utils.js';
 import { setActiveToolSurface } from '../../core/services/mcp-handlers/active-surface.js';
 import { createTracker, updateTracker, updatePanic, resetPanicOnOrient, getFreshnessSignal, trackerToPanicState } from '../../core/services/mcp-handlers/epistemic-lease.js';
 import type { EpistemicTracker } from '../../core/services/mcp-handlers/epistemic-lease.js';
@@ -3452,7 +3452,12 @@ async function startMcpServer(options: McpServerOptions = {}): Promise<void> {
       // repository text (a file name, a memory, a decision title), and a forged line in the note
       // beside a verdict is the same attack as one inside it. Idempotent with the screening
       // `capStructuredResult` already did on the body.
-      return { content: content.map((c) => ({ ...c, text: sanitizeForTerminal(c.text, { keepNewlines: true }) })) };
+      // A tool that produced no answer (no usable index, or any `{ error }`) is a tool execution
+      // error: MCP clients detect it from `isError`; the JSON body is unchanged (#810).
+      return {
+        content: content.map((c) => ({ ...c, text: sanitizeForTerminal(c.text, { keepNewlines: true }) })),
+        ...(isErrorResult(result) ? { isError: true } : {}),
+      };
     } catch (err) {
       // A thrown McpError is a protocol-level error — let the SDK serialize it as a JSON-RPC
       // error response. Argument validation no longer throws one (it returns an `isError` result).
