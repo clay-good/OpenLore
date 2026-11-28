@@ -52,8 +52,10 @@ imported, or when it does not fit in `contextInjection.tokenBudget` beside the t
 task briefing is kept; the summary waits for a later prompt). A `CLAUDE.md` that
 `openlore analyze --ai-configs` generates names the full `CODEBASE.md` in one line instead of
 `@`-importing it, but only when the prompt hook delivers the slim digest; otherwise it keeps the
-import. An older generated `CLAUDE.md` keeps its import line; `openlore status` names it while the
-slim digest reaches the agent, and never edits the file.
+import. The check runs on the machine that generates the file: a committed `CLAUDE.md` without the
+import gives a teammate with no prompt hook only the path line. An older generated `CLAUDE.md`
+keeps its import line; `openlore status` names it while the slim digest reaches the agent, names a
+path line while a setting stops the slim digest, and never edits the file.
 
 The Claude Code plugin ships five short skills: `openlore-orient`, `openlore-debug`,
 `openlore-review-changes`, `openlore-write-tests`, and `openlore-implement-story`.
@@ -102,8 +104,8 @@ Wire OpenLore into your agent's context:
 
 **Claude Code** — run `openlore install`. It writes a short managed block (8 lines or fewer) into `CLAUDE.md` and
 wires the hooks that push evidence while the agent works. Do not `@`-import
-`.openlore/analysis/CODEBASE.md`: it would load on every turn, and the prompt hook already gives the
-agent the slim digest. A task that needs the full digest reads the file. Each MCP tool's description
+`.openlore/analysis/CODEBASE.md`: it would load on every turn, and the prompt hook gives the agent the
+slim digest once per session (unless `contextInjection.mode` is `"off"`). A task that needs the full digest reads the file. Each MCP tool's description
 says when to use it, so no tool table is needed.
 
 **Claude Code — MCP config (token-efficient two-server setup)**

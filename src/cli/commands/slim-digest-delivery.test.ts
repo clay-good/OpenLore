@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { slimDigestReachesAgent } from './slim-digest-delivery.js';
+import { managedSettingsFile, slimDigestReachesAgent } from './slim-digest-delivery.js';
 import { readSlimDigest } from './orient-inject.js';
 import { renderSlimDigest } from '../../core/analyzer/codebase-digest.js';
 import { estimateTokens } from '../../core/services/llm-service.js';
@@ -37,7 +37,9 @@ function writeConfig(extra: Record<string, unknown>): void {
   }));
 }
 
+const savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
 beforeEach(() => {
+  delete process.env.CLAUDE_CONFIG_DIR;
   root = realpathSync(mkdtempSync(join(tmpdir(), 'olslimreach-')));
   home = realpathSync(mkdtempSync(join(tmpdir(), 'olslimreach-home-')));
   mkdirSync(analysis(), { recursive: true });
@@ -50,6 +52,7 @@ beforeEach(() => {
   }));
 });
 afterEach(() => {
+  if (savedConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
   rmSync(root, { recursive: true, force: true });
   rmSync(home, { recursive: true, force: true });
 });
@@ -165,5 +168,20 @@ describe('slimDigestReachesAgent', () => {
     } finally {
       if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = saved;
     }
+  });
+
+  it('reads a managed-settings.d drop-in beside the managed file', async () => {
+    wirePromptHook(root);
+    mkdirSync(join(home, 'managed-settings.d'), { recursive: true });
+    writeFileSync(join(home, 'managed-settings.d', '10-policy.json'), JSON.stringify({ allowManagedHooksOnly: true }));
+    expect(await slimDigestReachesAgent(root, home, managed())).toBe(false);
+  });
+});
+
+describe('managedSettingsFile', () => {
+  it('names the managed settings file Claude Code reads on each platform', () => {
+    expect(managedSettingsFile('darwin')).toBe('/Library/Application Support/ClaudeCode/managed-settings.json');
+    expect(managedSettingsFile('linux')).toBe('/etc/claude-code/managed-settings.json');
+    expect(managedSettingsFile('win32')).toBe('C:\\Program Files\\ClaudeCode\\managed-settings.json');
   });
 });

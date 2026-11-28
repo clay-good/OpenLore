@@ -53,7 +53,10 @@ agent to do work that OpenLore now does by itself.
 - A generated `CLAUDE.md` drops the `@`-import only when the slim digest really reaches the agent:
   the prompt hook is wired (user or project Claude settings), the prompt moment and context
   injection are on, and the digest is the one analyze writes at the default path. Otherwise the
-  import stays. `openlore status` uses the same check.
+  import stays. `openlore status` uses the same check. The check runs where the file is generated:
+  a committed `CLAUDE.md` without the import gives a teammate with no prompt hook only the path line.
+  MDM, registry and server-managed Claude policy, and plugin hooks, are not read; each gap keeps the
+  import.
 - Found in review, left for their own PRs (ROADMAP "Fix first"): the decisions-gate block adds about
   2.2 KB in a git repository, and the block on Cline and `AGENTS.md` names an MCP surface those
   adapters do not register.

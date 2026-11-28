@@ -34,8 +34,9 @@ description SHALL be 800 characters or fewer.
 #### Scenario: A pointer with no digest behind it
 
 - **GIVEN** a generated `CLAUDE.md` that names the full digest instead of importing it
-- **WHEN** the slim digest no longer reaches the agent (for example, injection was turned off)
-- **THEN** `openlore status` names the line and says to restore the import
+- **WHEN** a setting the user chose stops the slim digest (`contextInjection.mode` is `"off"` or
+  `hooks.prompt-submitted` is false), and no line imports the digest
+- **THEN** `openlore status` names the line and that setting, and says to restore the import
 
 #### Scenario: A preset without orient
 

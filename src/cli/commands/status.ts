@@ -119,6 +119,8 @@ export interface UnservedDigestPointer {
   file: 'CLAUDE.md';
   /** 1-based line numbers of each generated pointer line outside the managed block. */
   lines: number[];
+  /** The configured setting that keeps the prompt hook from printing the slim digest. */
+  reason: string;
 }
 
 export interface LegacyDigestImport {
@@ -139,7 +141,9 @@ const CLAUDE_MD_MAX_BYTES = 1_048_576;
  * Lines of the repository's `CLAUDE.md` that the agent loads (outside the managed block, code
  * fences, and HTML comments) and that are exactly the legacy import or the generated pointer.
  */
-function scanClaudeMd(text: string): { imports: number[]; pointers: number[] } {
+function scanClaudeMd(text: string): { imports: number[]; pointers: number[]; anyImport: boolean } {
+  // Any import of the digest, in any spelling or place, means the agent may already load it.
+  const anyImport = /@\S*CODEBASE\.md/.test(text);
   const imports: number[] = [];
   const pointers: number[] = [];
   const pointer = digestPointerLine(`${OPENLORE_DIR}/${OPENLORE_ANALYSIS_SUBDIR}`);
@@ -173,7 +177,7 @@ function scanClaudeMd(text: string): { imports: number[]; pointers: number[] } {
     }
     if (line.includes(OPENLORE_BLOCK_END)) inBlock = false;
   });
-  return { imports, pointers };
+  return { imports, pointers, anyImport };
 }
 
 export interface DigestNotes {
@@ -182,16 +186,18 @@ export interface DigestNotes {
 }
 
 /**
- * The two `CLAUDE.md` notes `openlore status` gives about the full digest, both decided by whether
- * the slim digest reaches the agent (`reaches`):
- * - a legacy `@`-import while the slim digest reaches the agent: dead weight on every turn;
- * - a generated pointer line while it does not: the agent gets neither digest by itself.
+ * The two `CLAUDE.md` notes `openlore status` gives about the full digest:
+ * - a legacy `@`-import while the slim digest reaches the agent (`reaches`): dead weight on
+ *   every turn;
+ * - a generated pointer line, with no import of the digest anywhere in the file, while a setting
+ *   the user chose (`withheld`) stops the prompt hook from printing the slim digest.
  * Read-only and fail-soft: no full digest, or an unreadable or oversized file, gives no note.
  */
 export async function findDigestNotes(
   rootPath: string,
   // Loaded lazily: the status line imports this module on every render and never needs it.
   reaches: (rootPath: string) => Promise<boolean> = async root => (await import('./slim-digest-delivery.js')).slimDigestReachesAgent(root),
+  withheld: (rootPath: string) => Promise<string | null> = async root => (await import('./slim-digest-delivery.js')).slimDigestWithheldByConfig(root),
 ): Promise<DigestNotes> {
   let digestBytes: number;
   try {
@@ -208,11 +214,14 @@ export async function findDigestNotes(
   } catch {
     return {};
   }
-  const { imports, pointers } = scanClaudeMd(text);
-  if (!imports.length && !pointers.length) return {};
-  const delivered = await reaches(rootPath);
-  if (delivered && imports.length) return { legacyDigestImport: { file: 'CLAUDE.md', lines: imports, digestBytes } };
-  if (!delivered && pointers.length && !imports.length) return { unservedDigestPointer: { file: 'CLAUDE.md', lines: pointers } };
+  const { imports, pointers, anyImport } = scanClaudeMd(text);
+  if (imports.length) {
+    return (await reaches(rootPath)) ? { legacyDigestImport: { file: 'CLAUDE.md', lines: imports, digestBytes } } : {};
+  }
+  if (pointers.length && !anyImport) {
+    const reason = await withheld(rootPath);
+    if (reason) return { unservedDigestPointer: { file: 'CLAUDE.md', lines: pointers, reason } };
+  }
   return {};
 }
 
@@ -221,7 +230,7 @@ export async function findLegacyDigestImport(
   rootPath: string,
   reaches?: (rootPath: string) => Promise<boolean>,
 ): Promise<LegacyDigestImport | null> {
-  return (await findDigestNotes(rootPath, reaches)).legacyDigestImport ?? null;
+  return (await findDigestNotes(rootPath, reaches, async () => null)).legacyDigestImport ?? null;
 }
 
 /** Line numbers for a status line: the first ten, then a count of the rest. */
@@ -240,9 +249,8 @@ export function formatLegacyDigestImport(found: LegacyDigestImport): string {
 
 /** The one status line for a pointer the slim digest does not back up. */
 export function formatUnservedDigestPointer(found: UnservedDigestPointer): string {
-  return `${where(found.file, found.lines)} names ${LEGACY_DIGEST_IMPORT.slice(1)} instead of importing it, but the prompt hook ` +
-    `does not give the agent the slim digest here, so neither digest reaches it by itself. ` +
-    `Replace the line with ${LEGACY_DIGEST_IMPORT}, or wire the prompt hook with \`openlore install\`.`;
+  return `${where(found.file, found.lines)} names ${LEGACY_DIGEST_IMPORT.slice(1)} instead of importing it, and ${found.reason}, ` +
+    `so the prompt hook does not print the slim digest either. Replace the line with ${LEGACY_DIGEST_IMPORT}, or undo that setting.`;
 }
 
 export type SessionStatus =

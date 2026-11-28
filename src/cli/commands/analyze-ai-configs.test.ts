@@ -15,6 +15,7 @@ import { analyzeCommand } from './analyze.js';
 let dir = '';
 let home = '';
 const savedHome = process.env.OPENLORE_HOME;
+const savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
 
 async function wirePromptHook(): Promise<void> {
   await mkdir(join(dir, '.claude'), { recursive: true });
@@ -44,6 +45,7 @@ beforeEach(async () => {
   dir = realpathSync(await mkdtemp(join(tmpdir(), 'openlore-analyze-ai-configs-')));
   home = realpathSync(await mkdtemp(join(tmpdir(), 'openlore-analyze-ai-configs-home-')));
   process.env.OPENLORE_HOME = home;
+  delete process.env.CLAUDE_CONFIG_DIR;
   await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'tmp', version: '1.0.0' }));
   await mkdir(join(dir, 'src'), { recursive: true });
   await writeFile(join(dir, 'src', 'a.ts'), 'export function parse(t: string): string { return t.trim(); }\nexport function load(p: string): string { return parse(p); }\n');
@@ -55,6 +57,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   if (savedHome === undefined) delete process.env.OPENLORE_HOME; else process.env.OPENLORE_HOME = savedHome;
+  if (savedConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
   await rm(dir, { recursive: true, force: true });
   await rm(home, { recursive: true, force: true });
 });

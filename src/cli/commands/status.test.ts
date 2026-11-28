@@ -479,7 +479,9 @@ describe('openlore status — a legacy full-digest import', () => {
     const lines: string[] = [];
     const log = console.log;
     const home = process.env.OPENLORE_HOME;
+    const configDir = process.env.CLAUDE_CONFIG_DIR;
     process.env.OPENLORE_HOME = join(root, 'no-home');
+    delete process.env.CLAUDE_CONFIG_DIR;
     console.log = (...a: unknown[]) => { lines.push(a.map(String).join(' ')); };
     try {
       process.chdir(root);
@@ -488,6 +490,7 @@ describe('openlore status — a legacy full-digest import', () => {
       console.log = log;
       process.chdir(cwd);
       if (home === undefined) delete process.env.OPENLORE_HOME; else process.env.OPENLORE_HOME = home;
+      if (configDir !== undefined) process.env.CLAUDE_CONFIG_DIR = configDir;
     }
     return lines.join('\n');
   }
@@ -554,22 +557,41 @@ describe('openlore status — a legacy full-digest import', () => {
     expect((await findLegacyDigestImport(root, reaches))?.lines).toEqual([4]);
   });
 
-  it('names a generated pointer line when the slim digest does not reach the agent', async () => {
+  const POINTER = 'Full repository digest, for a task that needs it: `.openlore/analysis/CODEBASE.md`.';
+  const injectionOff = async () => '`contextInjection.mode` is "off" in .openlore/config.json';
+  const noSetting = async () => null;
+
+  it('names a generated pointer line when a setting stops the slim digest, with that setting', async () => {
     await withDigest();
-    await writeFile(join(root, 'CLAUDE.md'), '# demo\n\nFull repository digest, for a task that needs it: `.openlore/analysis/CODEBASE.md`.\n', 'utf-8');
-    const notes = await findDigestNotes(root, doesNotReach);
-    expect(notes).toEqual({ unservedDigestPointer: { file: 'CLAUDE.md', lines: [3] } });
+    await writeFile(join(root, 'CLAUDE.md'), `# demo\n\n${POINTER}\n`, 'utf-8');
+    const notes = await findDigestNotes(root, doesNotReach, injectionOff);
+    expect(notes).toEqual({ unservedDigestPointer: { file: 'CLAUDE.md', lines: [3], reason: '`contextInjection.mode` is "off" in .openlore/config.json' } });
     const line = formatUnservedDigestPointer(notes.unservedDigestPointer!);
-    expect(line).toContain('CLAUDE.md:3 names .openlore/analysis/CODEBASE.md instead of importing it');
-    expect(line).toContain('Replace the line with @.openlore/analysis/CODEBASE.md');
-    // While the digest reaches the agent, the pointer is right and nothing is said.
-    expect(await findDigestNotes(root, reaches)).toEqual({});
+    expect(line).toContain('CLAUDE.md:3 names .openlore/analysis/CODEBASE.md instead of importing it, and `contextInjection.mode` is "off"');
+    expect(line).toContain('Replace the line with @.openlore/analysis/CODEBASE.md, or undo that setting.');
+    expect(line).not.toContain('openlore install');
   });
 
-  it('prints the pointer note through the real delivery check when no hook is wired', async () => {
-    const out = await statusThroughRealCheck(false, [], 'Full repository digest, for a task that needs it: `.openlore/analysis/CODEBASE.md`.');
+  it('says nothing about a pointer without a definite setting, or when the digest is imported another way', async () => {
+    await withDigest();
+    await writeFile(join(root, 'CLAUDE.md'), `# demo\n\n${POINTER}\n`, 'utf-8');
+    // "Not delivered" alone may be a plugin hook or a policy this check cannot read: no note.
+    expect(await findDigestNotes(root, doesNotReach, noSetting)).toEqual({});
+    await writeFile(join(root, 'CLAUDE.md'), `@./.openlore/analysis/CODEBASE.md\n${POINTER}\n`, 'utf-8');
+    expect(await findDigestNotes(root, doesNotReach, injectionOff)).toEqual({});
+  });
+
+  it('prints the pointer note through the real settings check only when injection is off', async () => {
+    expect(await statusThroughRealCheck(false, [], POINTER)).not.toContain('Digest pointer');
+    await writeFile(join(root, '.openlore', 'config.json'), JSON.stringify({
+      version: '1.0.0', projectType: 'nodejs', openspecPath: 'openspec',
+      analysis: { maxFiles: 100, includePatterns: [], excludePatterns: [] },
+      generation: { domains: 'auto' }, createdAt: '2026-01-01T00:00:00Z', lastRun: null,
+      contextInjection: { mode: 'off' },
+    }), 'utf-8');
+    const out = await statusThroughRealCheck(true, [], POINTER);
     expect(out.split('\n').filter(line => line.includes('Digest pointer'))).toHaveLength(1);
-    expect(await statusThroughRealCheck(true, [], 'Full repository digest, for a task that needs it: `.openlore/analysis/CODEBASE.md`.')).not.toContain('Digest pointer');
+    expect(JSON.parse(await statusThroughRealCheck(true, ['--json'], POINTER)).unservedDigestPointer?.lines).toEqual([3]);
   });
 
   it('says nothing when CODEBASE.md is a symlink, and caps a long line list', async () => {
