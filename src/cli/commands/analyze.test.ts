@@ -29,6 +29,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     ...actual,
     access:    vi.fn().mockResolvedValue(undefined),
     stat:      vi.fn().mockResolvedValue({ mtime: new Date() }),
+    realpath:  vi.fn(actual.realpath),
     mkdir:     vi.fn().mockResolvedValue(undefined),
     readFile:  vi.fn().mockResolvedValue('{}'),
     writeFile: vi.fn().mockResolvedValue(undefined),
@@ -669,11 +670,14 @@ describe('analyze command', () => {
 
     it('--directory analyzes that repository instead of the current directory', async () => {
       const cfgMod = await import('../../core/services/config-manager.js');
+      const fsMod = await import('node:fs/promises');
+      // The OS-canonical spelling is what a run from inside the repo sees as cwd.
+      const other = resolve('/other/repo');
+      vi.mocked(fsMod.realpath as any).mockImplementationOnce(async () => other);
       mockStat.mockResolvedValue({ isDirectory: () => true });
       mockReadOpenLoreConfig.mockResolvedValue(null);
-      const other = resolve('/other/repo');
 
-      await analyzeCommand.parseAsync(['--directory', other], { from: 'user' });
+      await analyzeCommand.parseAsync(['--directory', resolve('/link/to/repo')], { from: 'user' });
 
       expect(mockReadOpenLoreConfig).toHaveBeenCalledWith(other);
       expect(vi.mocked(cfgMod.retargetPrimaryConfigRoot)).toHaveBeenCalledWith(other);
@@ -681,7 +685,8 @@ describe('analyze command', () => {
 
     it('--directory that is not a directory fails before reading any config', async () => {
       const loggerMod = await import('../../utils/logger.js');
-      mockStat.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      const fsMod = await import('node:fs/promises');
+      vi.mocked(fsMod.realpath as any).mockRejectedValueOnce(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
 
       await analyzeCommand.parseAsync(['--directory', resolve('/missing')], { from: 'user' });
 

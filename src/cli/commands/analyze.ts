@@ -17,7 +17,7 @@ import {
   CLONE_MEMBERS_SHOWN,
   INVENTORY_ITEMS_SHOWN,
 } from '../../utils/capped-list.js';
-import { mkdir, readFile, stat, open as openFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, stat, open as openFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { logger } from '../../utils/logger.js';
 import { openBuildProgress, reportBuildPhase, reportFileDone } from '../../core/services/build-progress.js';
@@ -466,9 +466,14 @@ After analysis, agents query the index (openlore orient, or the MCP server). Spe
   )
   .action(async (options: Partial<ExtendedAnalyzeOptions>) => {
     const startTime = Date.now();
-    const rootPath = resolve(options.directory ?? process.cwd());
-    if (options.directory !== undefined && !(await stat(rootPath).then((s) => s.isDirectory(), () => false))) {
-      logger.error(`--directory is not a directory: ${safe(rootPath)}`);
+    // Canonical like `process.cwd()` (which the OS reports resolved, e.g. /private/tmp on macOS),
+    // so `--directory` and a run from inside the repo name it the same way in the ownership lock.
+    const requested = options.directory === undefined ? undefined : resolve(options.directory);
+    const rootPath = requested === undefined
+      ? process.cwd()
+      : await realpath(requested).then(async (p) => ((await stat(p)).isDirectory() ? p : null), () => null);
+    if (rootPath === null) {
+      logger.error(`--directory is not a directory: ${safe(requested ?? '')}`);
       process.exitCode = 1;
       return;
     }
