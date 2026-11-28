@@ -18,8 +18,11 @@ import {
   extractLines,
   _resetTextLineIndexCachesForTesting,
   _setBuildFlushLinesForTesting,
+  _setCacheLineLimitForTesting,
   STAGING_PREFIX,
 } from './text-line-index.js';
+import { VectorIndex } from './vector-index.js';
+import type { FunctionNode } from './call-graph.js';
 
 let outputDir: string;
 
@@ -315,5 +318,70 @@ describe('TextLineIndex.updateFiles — incremental', () => {
     await TextLineIndex.updateFiles(outputDir, [], ['b.html']);
     _resetTextLineIndexCachesForTesting();
     expect(await TextLineIndex.searchText(outputDir, 'beta')).toEqual([]);
+  });
+});
+
+// #806: an index too large for the heap is searched by streaming, with identical answers.
+describe('TextLineIndex — streaming search matches the in-memory search', () => {
+  afterEach(() => { _setCacheLineLimitForTesting(null); });
+
+  const fn = (id: string, name: string, signature = ''): FunctionNode => ({
+    id, name, filePath: id.split('::')[0], isAsync: false, language: 'TypeScript',
+    startIndex: 0, endIndex: 10, fanIn: 0, fanOut: 0, signature, docstring: '',
+  });
+
+  async function both(query: string, opts?: Parameters<typeof TextLineIndex.searchText>[2]) {
+    _setCacheLineLimitForTesting(null);
+    _resetTextLineIndexCachesForTesting();
+    const cached = await TextLineIndex.searchText(outputDir, query, opts);
+    _setCacheLineLimitForTesting(0);
+    _resetTextLineIndexCachesForTesting();
+    const streamed = await TextLineIndex.searchText(outputDir, query, opts);
+    const again = await TextLineIndex.searchText(outputDir, query, opts); // reuses corpus totals
+    return { cached, streamed, again };
+  }
+
+  it('returns the same hits, scores, order and evidence', async () => {
+    // Repository vocabulary maps pmt -> payment, so expansion-only hits are covered too.
+    await VectorIndex.build(outputDir, [
+      fn('src/target.ts::PmtSvc', 'PmtSvc'),
+      fn('src/a.ts::bindPayment', 'bindPayment', 'function bindPayment(pmt: Payment)'),
+      fn('src/b.ts::queuePayment', 'queuePayment', 'function queuePayment(pmt: Payment)'),
+    ], [], new Set(), new Set(), null);
+    const files = Array.from({ length: 40 }, (_, f) => ({
+      filePath: `src/mod${f % 4}/file${f}.ts`,
+      content: Array.from({ length: 30 }, (_, l) =>
+        [`const total${l} = computePayment(order${f}, ${l});`,
+          `// pmt retry for order ${l}`,
+          `export function parseConfig${f}(raw: string) { return raw.trim(); }`,
+          `log.info('processing payment', paymentId);`,
+          `if (!config) throw new Error('missing config');`][(f + l) % 5]).join('\n'),
+    }));
+    await TextLineIndex.build(outputDir, files);
+
+    for (const [query, opts] of [
+      ['payment', undefined],
+      ['parse config', { limit: 25 }],
+      ['missing config error', { limit: 5, traceCandidates: true }],
+      ['payment', { filePath: 'src/mod1/file5.ts' }],
+      ['payment', { vocabularyExpansion: false }],
+      ['payment', { limit: 500 }],
+      ['nothingmatchesthis', undefined],
+    ] as const) {
+      const { cached, streamed, again } = await both(query, opts);
+      expect(streamed, `${query} ${JSON.stringify(opts)}`).toEqual(cached);
+      expect(again).toEqual(cached);
+    }
+    expect((await both('payment', { limit: 500 })).streamed.some(h => h.expansionTerms?.includes('pmt'))).toBe(true);
+  });
+
+  it('sees writes made after the corpus totals were taken', async () => {
+    await TextLineIndex.build(outputDir, [{ filePath: 'a.txt', content: 'alpha beta\ngamma' }]);
+    _setCacheLineLimitForTesting(0);
+    expect(await TextLineIndex.searchText(outputDir, 'delta')).toEqual([]);
+    await TextLineIndex.updateFiles(outputDir, [{ filePath: 'b.txt', content: 'delta epsilon\ndelta' }]);
+    const { cached, streamed } = await both('delta');
+    expect(streamed).toEqual(cached);
+    expect(streamed.map(h => h.filePath)).toEqual(['b.txt', 'b.txt']);
   });
 });
