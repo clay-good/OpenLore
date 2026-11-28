@@ -709,10 +709,18 @@ After analysis, agents query the index (openlore orient, or the MCP server). Spe
       // Repository-scoped single flight. A second analysis — from any frontend —
       // must not duplicate the work already under way; it either reports the live
       // owner and exits, or (with --wait) follows it to completion.
-      const ownership = await acquireAnalysisOwnership(rootPath, outputPath, {
+      let ownership = await acquireAnalysisOwnership(rootPath, outputPath, {
         wait: options.wait === true,
         stage: 'starting',
       });
+      // The previous analysis died before finishing (killed, out of memory). Its lock is
+      // reclaimed once its heartbeat goes stale, so wait for that and start over, instead of
+      // exiting and leaving the restart to whoever runs this command (#809).
+      const deadOwner = ownership.state === 'in-progress' ? ownership.owner : null;
+      if (deadOwner && deadOwner.repository === rootPath && !isProcessAlive(deadOwner.pid)) {
+        logger.info('Analysis', `A previous analysis (pid ${deadOwner.pid}) stopped before finishing; starting over once its lock is released.`);
+        ownership = await acquireAnalysisOwnership(rootPath, outputPath, { wait: true, stage: 'starting' });
+      }
       if (ownership.state === 'in-progress') {
         await reportActiveAnalysis(ownership, outputPath);
         process.exitCode = 1;

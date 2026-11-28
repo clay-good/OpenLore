@@ -68,6 +68,17 @@ export const REPAIR_REASON_DETAIL: Record<RepairReason, string> = {
 /** Directories already repaired (or in flight) this process — build at most once each. */
 const attempted = new Set<string>();
 
+/**
+ * When each directory's last background build failed. A first build that died is started
+ * again by a later call, but not inside this window, so a build that fails the same way every
+ * time is not restarted back to back (the one-shot hook path waits the same 2 minutes).
+ */
+const failedAt = new Map<string, number>();
+export const BOOTSTRAP_RETRY_COOLDOWN_MS = 2 * 60_000;
+
+/** Directories whose first-touch notice was already queued, so a retried first build does not repeat it. */
+const firstTouchQueued = new Set<string>();
+
 /** In-flight repairs, keyed by directory, so a read can disclose "refresh started". */
 const inFlight = new Map<string, {
   reason: RepairReason;
@@ -633,7 +644,10 @@ export function repairInBackground(
   // carry the disclosure. Registered before sizing, the notice is rendered from the
   // in-flight record when it is taken, so it always describes the lane actually
   // chosen (change: unify-onboarding-entrypoint).
-  if (reason === 'index-absent') firstTouchNotices.add(directory);
+  if (reason === 'index-absent' && !firstTouchQueued.has(directory)) {
+    firstTouchQueued.add(directory);
+    firstTouchNotices.add(directory);
+  }
 
   const run = async (): Promise<void> => {
     // Yield before doing ANY work. An async function body runs synchronously up to
@@ -686,6 +700,7 @@ export function repairInBackground(
     } catch (err) {
       // Fail-soft: leave the graceful guidance in place; allow a later retry.
       seen.delete(directory);
+      failedAt.set(directory, now());
       log(`[openlore] Background index repair skipped: ${(err as Error).message}`);
     } finally {
       const record = inFlight.get(directory);
@@ -819,6 +834,8 @@ export function bootstrapAnalysisInBackground(
     seen.add(directory);
     return null;
   }
+  const failed = failedAt.get(directory);
+  if (failed !== undefined && (opts.now ?? Date.now)() - failed < BOOTSTRAP_RETRY_COOLDOWN_MS) return null;
   return repairInBackground(directory, 'index-absent', opts);
 }
 
@@ -827,6 +844,8 @@ export function _resetRepairServiceForTesting(): void {
   attempted.clear();
   inFlight.clear();
   firstTouchNotices.clear();
+  firstTouchQueued.clear();
+  failedAt.clear();
   firstTouchLanes.clear();
   repairHosts.clear();
   registeredBuilder = null;

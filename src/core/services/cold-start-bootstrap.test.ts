@@ -15,6 +15,7 @@ import {
   repairStatusFor,
   repairDisclosureText,
   takeFirstTouchNotice,
+  BOOTSTRAP_RETRY_COOLDOWN_MS,
   isInsideGitWorkTree,
   autoInitSuppression,
   countFilesBounded,
@@ -95,6 +96,29 @@ describe('bootstrapAnalysisInBackground', () => {
     });
     expect(seen.has(dir)).toBe(false); // guard cleared on failure
     expect(logs.some((l) => l.includes('boom'))).toBe(true);
+  });
+
+  // #809: a first build that died is started again by a later call, after the cooldown.
+  it('restarts a failed first build after the cooldown, and discloses the first touch once', async () => {
+    const dir = freshDir(false);
+    const seen = new Set<string>();
+    let clock = 1_000_000;
+    let calls = 0;
+    const opts = {
+      seen,
+      now: () => clock,
+      analyze: async () => { calls++; if (calls === 1) throw new Error('analyze child exited with code null'); },
+      log: () => {},
+    };
+    await bootstrapAnalysisInBackground(dir, opts);
+    expect(takeFirstTouchNotice(dir)).toBeDefined();
+
+    clock += BOOTSTRAP_RETRY_COOLDOWN_MS - 1;
+    expect(bootstrapAnalysisInBackground(dir, opts)).toBeNull();
+    clock += 1;
+    await bootstrapAnalysisInBackground(dir, opts);
+    expect(calls).toBe(2);
+    expect(takeFirstTouchNotice(dir)).toBeUndefined();
   });
 
   it('ignores an empty directory', () => {
