@@ -89,6 +89,19 @@ describe('one-shot index build', () => {
     expect(calls).toHaveLength(0);
   });
 
+  // #809: an analyzer that died leaves its lock until the heartbeat goes stale. That is not a
+  // running build: start one, and its analyze waits for the lock.
+  it('starts a build when the analysis owner died, even before its lock is reclaimable', () => {
+    mkdirSync(join(dir, '.openlore', 'runtime'), { recursive: true });
+    writeFileSync(
+      join(dir, '.openlore', 'runtime', '.analysis-owner.lock'),
+      JSON.stringify({ repository: dir, pid: deadPid(), startedAt: new Date().toISOString() }),
+    );
+    const { calls, spawnProcess } = fakeSpawn(process.pid);
+    expect(startDetachedIndexBuild(dir, 'index-absent', { cliPath: '/cli.js', spawnProcess })).toEqual({ state: 'started' });
+    expect(calls).toHaveLength(1);
+  });
+
   it('leaves an opted-out repository untouched', () => {
     const { calls, spawnProcess } = fakeSpawn(process.pid);
     const opts = { cliPath: '/cli.js', spawnProcess };

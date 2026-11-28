@@ -70,6 +70,16 @@ export interface OneShotBuildOptions {
   now?: () => number;
 }
 
+/** True only when the ownership payload names a process that is not alive. Unreadable: false. */
+function ownerProcessGone(contents: string): boolean {
+  try {
+    const pid = (JSON.parse(contents) as { pid?: unknown }).pid;
+    return typeof pid === 'number' && !isProcessAlive(pid);
+  } catch {
+    return false;
+  }
+}
+
 /** Read a small runtime state file through one descriptor, or undefined when absent. */
 function readState(path: string): { mtimeMs: number; contents: string } | undefined {
   let fd: number;
@@ -110,7 +120,11 @@ export function startDetachedIndexBuild(
 
   const runtimeDir = runtimeDirOf(join(directory, OPENLORE_ANALYSIS_REL_PATH));
   const owner = readState(join(runtimeDir, OWNERSHIP_LOCK_FILE));
-  if (owner && !isOwnershipStale(owner.mtimeMs, owner.contents, directory)) return { state: 'running' };
+  // An owner whose process is gone is not a running build, even before its lock is reclaimable:
+  // the analyze started below waits for that lock and then runs (#809).
+  if (owner && !isOwnershipStale(owner.mtimeMs, owner.contents, directory) && !ownerProcessGone(owner.contents)) {
+    return { state: 'running' };
+  }
 
   const stampPath = join(runtimeDir, ATTEMPT_STAMP_FILE);
   const stamp = readState(stampPath);
