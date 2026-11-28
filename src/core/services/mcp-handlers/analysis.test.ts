@@ -664,6 +664,7 @@ describe('handleGetFunctionBody', () => {
 
     expect(result).toEqual({
       functionName: 'doSomething', filePath: 'util.ts', language: 'TypeScript', className: null,
+      startIndex: 0, endIndex: src.trimEnd().length,
       startLine: 1, endLine: 3, body: src.trimEnd(), lineCount: 3,
       note: 'Not in the analysis index; extracted by parsing the file now. Run analyze_codebase to index it.',
       provenance: expect.stringContaining('Untrusted repository source content'),

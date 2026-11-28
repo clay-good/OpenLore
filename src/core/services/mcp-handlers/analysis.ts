@@ -669,6 +669,9 @@ async function parseDefinitionNow(
     filePath,
     language,
     className: def.className ?? null,
+    // Both position forms, so a parsed answer has the same fields as an indexed one.
+    startIndex: def.startIndex,
+    endIndex: def.endIndex,
     startLine,
     endLine: startLine + lineCount - 1,
     body,
