@@ -159,6 +159,26 @@ describe('spec-12 MCP protocol conformance (via SDK Client over stdio)', () => {
     expect(text).toMatch(/call "get_subgraph" again, for example with: \{.*"functionName":"example"/);
   });
 
+  // #810: a plain \`{ error }\` result (no structured notReady) is an error too.
+  it('returns plain handler errors and text-tool not-ready answers as isError results', async () => {
+    if (guard()) return;
+    const dir = mkdtempSync(join(tmpdir(), 'openlore-plain-error-'));
+    try {
+      // get_spec answers a missing domain with a plain { error }, no notReady field.
+      const spec = await client!.callTool({ name: 'get_spec', arguments: { directory: dir, domain: 'nope' } });
+      const specText = (spec.content as Array<{ text?: string }>).map((b) => b.text ?? '').join('\n');
+      expect(specText).toMatch(/"error":/);
+      expect(specText).not.toMatch(/notReady/);
+      expect(spec.isError).toBe(true);
+      // get_signatures used to answer an unanalyzed repository with bare text.
+      const sigs = await client!.callTool({ name: 'get_signatures', arguments: { directory: dir } });
+      expect((sigs.content as Array<{ text?: string }>)[0]?.text).toMatch(/"notReady":\s*true/);
+      expect(sigs.isError).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('returns an unknown tool as an isError result (documented posture), not a crash', async () => {
     if (guard()) return;
     const res = await client!.callTool({ name: 'definitely_not_a_real_tool', arguments: { directory: REPO_ROOT } });

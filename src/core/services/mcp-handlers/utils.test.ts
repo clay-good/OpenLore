@@ -27,7 +27,7 @@ import {
   specsForFile,
   functionsForDomain,
   notReadyResult,
-  isNotReadyResult,
+  isErrorResult,
 } from './utils.js';
 import { EdgeStore } from '../edge-store.js';
 import { logger } from '../../../utils/logger.js';
@@ -921,11 +921,14 @@ describe('notReadyResult (ReadyOrHonestFirstUse)', () => {
     expect(r.remedy).toBe('openlore analyze');
   });
 
-  it('isNotReadyResult recognizes only a not-ready result (#810)', () => {
-    expect(isNotReadyResult(notReadyResult('No analysis found.', 'index-absent'))).toBe(true);
-    expect(isNotReadyResult({ error: 'File not found: a.ts' })).toBe(false);
-    expect(isNotReadyResult({ notReady: 'yes' })).toBe(false);
-    expect(isNotReadyResult(null)).toBe(false);
-    expect(isNotReadyResult('notReady')).toBe(false);
+  it('isErrorResult recognizes a result that carries no answer (#810)', () => {
+    expect(isErrorResult(notReadyResult('No analysis found.', 'index-absent'))).toBe(true);
+    expect(isErrorResult({ error: 'No analysis found. Run analyze_codebase first.' })).toBe(true);
+    expect(isErrorResult({ results: [], error: undefined })).toBe(false);
+    expect(isErrorResult({ checkWeakening: { error: 'nested is not the result' } })).toBe(false);
+    expect(isErrorResult({ notReady: 'yes' })).toBe(false);
+    expect(isErrorResult([{ error: 'x' }])).toBe(false);
+    expect(isErrorResult(null)).toBe(false);
+    expect(isErrorResult('error')).toBe(false);
   });
 });
