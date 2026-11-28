@@ -31,6 +31,12 @@ description SHALL be 800 characters or fewer.
 - **AND** `openlore status` names the line and its size once, and does not edit the file
 - **AND** it says nothing while the slim digest does not reach the agent
 
+#### Scenario: A pointer with no digest behind it
+
+- **GIVEN** a generated `CLAUDE.md` that names the full digest instead of importing it
+- **WHEN** the slim digest no longer reaches the agent (for example, injection was turned off)
+- **THEN** `openlore status` names the line and says to restore the import
+
 #### Scenario: A preset without orient
 
 - **GIVEN** the wired preset is `configuration`, which has no `orient` tool

@@ -25,7 +25,8 @@
       Done when the printed tip names no tool table.
 - [x] 2.4 `openlore status` names a legacy `@.openlore/analysis/CODEBASE.md` line outside the
       managed markers, with its size, once. Test: `src/cli/commands/status.test.ts`. Done when the
-      line shows for a legacy file and not for a new one.
+      line shows for a legacy file and not for a new one. (Added in review: it also names a generated
+      pointer line while the slim digest does not reach the agent.)
 
 ## 3. Tool descriptions
 
