@@ -38,7 +38,25 @@ Generated from static analysis artifacts, it surfaces what an agent needs before
 - **God functions / oversized orchestrators** — complexity hotspots
 - **Layer violations** — if any
 
-This is structural signal, not prose. It pairs with `openspec/specs/overview/spec.md`, which provides the functional view: what the system does, what domains exist, data-flow requirements. Together they give agents both the architectural topology and the business intent — **at the cost of two small file reads instead of an unbounded exploration loop**.
+### CODEBASE.slim.md: once per session
+
+`openlore analyze` also writes `.openlore/analysis/CODEBASE.slim.md`: 12 lines or fewer with the
+count of functions outside test, generated and vendored files and the distinct resolved
+caller-callee pairs between them, up to three of them with the most callers, the languages with a
+call graph, where specs and ADRs
+live (only when the repository has them), and a pointer to `orient`. The prompt hook
+(`orient --inject`) prints it on the first prompt of a harness session, and again only if what it
+names changed (a count alone does not count) or after a compaction. It is not printed when the hook payload has no `session_id`, when
+`contextInjection.mode` is `"off"`, when there is no index on this machine or the index was
+imported, or when it does not fit in `contextInjection.tokenBudget` beside the task briefing (the
+task briefing is kept; the summary waits for a later prompt). A `CLAUDE.md` that `openlore install`
+generated still `@`-imports the full `CODEBASE.md`; the change `trim-standing-agent-instructions`
+replaces that import.
+
+The Claude Code plugin ships five short skills: `openlore-orient`, `openlore-debug`,
+`openlore-review-changes`, `openlore-write-tests`, and `openlore-implement-story`.
+
+`CODEBASE.md` is structural signal, not prose. It pairs with `openspec/specs/overview/spec.md`, which provides the functional view: what the system does, what domains exist, data-flow requirements. Together they give agents both the architectural topology and the business intent — **at the cost of two small file reads instead of an unbounded exploration loop**.
 
 ### Setup
 

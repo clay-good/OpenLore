@@ -160,6 +160,7 @@ vi.mock('../../core/analyzer/architecture-writer.js', () => ({
 
 vi.mock('../../core/analyzer/codebase-digest.js', () => ({
   generateCodebaseDigest: vi.fn().mockResolvedValue(false),
+  ensureSlimDigestCurrent: vi.fn().mockResolvedValue(false),
 }));
 
 vi.mock('../../core/analyzer/ui-component-extractor.js', () => ({ extractUIComponents: vi.fn().mockResolvedValue([]) }));

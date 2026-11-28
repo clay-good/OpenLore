@@ -50,6 +50,7 @@ the decision store has dates and supersessions, and `recall` knows which memorie
 
 ## Depends on
 
-- `adopt-agent-context-interop` group 2 (the once-per-session delivery in `buildInjection`).
+- `adopt-agent-context-interop` (shipped): the once-per-session delivery in `injectOutput`
+  (`src/cli/commands/orient.ts`), keyed in the per-session record.
 - Shipped: the per-session record, `handleBriefingSince`, the decision store, memory anchor
   verdicts, the peer board.

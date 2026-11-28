@@ -35,7 +35,7 @@ set `"statusLine": { "type": "command", "command": "openlore statusline" }` in
 | Moment | Hook | What the agent sees |
 |--------|------|---------------------|
 | Session start | `SessionStart` | A short primer for the repository. After a compaction, a handoff briefing. |
-| Prompt submitted | `UserPromptSubmit` | The functions, callers, specs, and insertion points relevant to the prompt. |
+| Prompt submitted | `UserPromptSubmit` | On the first prompt of a session, a repository summary of 12 lines or fewer (`CODEBASE.slim.md`; with an OpenLore runtime newer than 3.8.0). When the prompt names code exactly, the functions, callers, specs, and insertion points for it. |
 | After an edit or a shell command | `PostToolUse`, `PostToolUseFailure` | Findings about the edit, and a record of test runs. |
 | Before stop | `Stop` | One receipt: what the session changed, which tests reach it, and what drifted. |
 
@@ -43,6 +43,11 @@ The MCP server (`openlore`) exposes 15 read-only tools, such as `orient`, `searc
 `blast_radius`, `recall`, and `verify_claim`.
 
 Every hook fails open: if OpenLore cannot answer, the agent continues without it.
+
+Five skills ship with the plugin, each 80 lines or fewer and naming only tools the plugin exposes:
+`openlore-orient`, `openlore-debug`, `openlore-review-changes`, `openlore-write-tests`, and
+`openlore-implement-story`. Each ends with one action per finding: fix it, record a decision with
+the proof, or raise it to a human when the evidence warrants it.
 
 ## What it runs, writes, and sends
 

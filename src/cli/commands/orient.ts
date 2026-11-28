@@ -23,9 +23,9 @@ import { withQuietStdout } from '../../utils/quiet-stdout.js';
 import { jsonOutput } from '../output.js';
 import { dispatchTool } from '../../core/services/tool-dispatch.js';
 import { estimateTokens } from '../../core/services/llm-service.js';
-import { OPENLORE_ANALYSIS_REL_PATH, OPENLORE_DIR } from '../../constants.js';
+import { ARTIFACT_SLIM_DIGEST, OPENLORE_ANALYSIS_REL_PATH, OPENLORE_DIR } from '../../constants.js';
 import { DECISIONS_REVIEW_COMMAND, takeAutoAcceptsSinceLastSession } from '../../core/decisions/autopilot.js';
-import { buildInjection, buildProposalOnlyInjection, extractPrompt, pointerLineFor } from './orient-inject.js';
+import { buildInjection, buildProposalOnlyInjection, extractPrompt, pointerLineFor, readSlimDigest } from './orient-inject.js';
 import { SILENCE_CONTRACT_LINE } from './orient-inject-render.js';
 import {
   oneShotBuildNote,
@@ -35,7 +35,7 @@ import {
   type OneShotBuild,
 } from '../../core/services/one-shot-index-build.js';
 import { readStdin } from '../../utils/stdin.js';
-import { findingIdentity, markShown, readSession, wasShown, writeSession } from '../../core/services/hook-session.js';
+import { findingIdentity, markFixed, markShown, readSession, wasShown, writeSession } from '../../core/services/hook-session.js';
 import { errorReason, recordHookRun, type HookOutcome } from '../../core/services/hook-health.js';
 import { autoInitSuppression, isInsideGitWorkTree, recordDetachedRepair } from '../../core/services/cold-start-bootstrap.js';
 import { seedFromSiblingCheckout, servingSeededIndex } from '../../core/runtime/seed-from-sibling.js';
@@ -135,6 +135,26 @@ export async function injectOutput(
     if (!out && withheld && ['no-anchor', 'management-intent', 'empty-prompt'].includes(withheld)
       && await firstTimeThisSession(directory, sessionId, 'silence-contract')) {
       out = SILENCE_CONTRACT_LINE;
+    }
+    // The slim digest, once per harness session and again after it changes (change:
+    // adopt-agent-context-interop). It needs a session id to be "once"; without one it is not
+    // printed at all. A harness-written prompt is not a turn. The task block keeps the budget: when
+    // both do not fit, the digest waits for a later prompt and is not marked delivered.
+    if (sessionId && withheld !== 'harness-event' && !silentWithoutIndex && existsSync(join(directory, OPENLORE_DIR))) {
+      // Quiet like the lookup above: a config warning must not reach the hook's stderr.
+      const slim = await withQuietStdout(() => withLoggerOptions({ quiet: true }, () => readSlimDigest(directory)));
+      if (slim) {
+        const combined = [slim.text, out].filter(Boolean).join('\n\n');
+        const session = readSession(directory, sessionId);
+        const { identity } = findingIdentity('notice', `slim-digest:${slim.hash}`);
+        if (!wasShown(session, identity, 'agent') && estimateTokens(combined) <= slim.tokenBudget) {
+          // Earlier versions count as replaced, so content that changes back is printed again.
+          markFixed(session, 'slim-digest', [ARTIFACT_SLIM_DIGEST], new Set([identity]));
+          markShown(session, identity, { code: 'notice', subject: 'slim-digest', check: 'slim-digest', file: ARTIFACT_SLIM_DIGEST }, 'prompt-submitted', 'agent');
+          await writeSession(directory, sessionId, session);
+          out = combined;
+        }
+      }
     }
     // Screened on the way out, whole-block: the framed part is already screened by
     // frameServedContent, but the pointer line and the build note are assembled here, and this is

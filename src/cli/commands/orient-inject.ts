@@ -19,8 +19,12 @@
  */
 
 import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
+import { ARTIFACT_LLM_CONTEXT, ARTIFACT_SLIM_DIGEST, OPENLORE_ANALYSIS_REL_PATH } from '../../constants.js';
+import { isWellFormedSlimDigest } from '../../core/analyzer/codebase-digest.js';
+import { readAnalysisContentProvenance } from '../../core/services/served-content.js';
+import { readFileConfined } from '../../utils/path-confinement.js';
 import { handleOrient } from '../../core/services/mcp-handlers/orient.js';
 import { presetToolNames, resolveUserScopePreset, resolveWiredPreset } from '../../core/services/wired-preset.js';
 import { readOpenLoreConfig } from '../../core/services/config-manager.js';
@@ -104,6 +108,39 @@ export async function buildProposalOnlyInjection(directory: string, prompt: stri
     // An unreadable config falls back to the defaults, as buildInjection does.
   }
   return proposalContextForPrompt(prompt) ?? '';
+}
+
+export { isWellFormedSlimDigest };
+
+/**
+ * The slim digest to print at the prompt-submitted moment, with its content hash and the injection
+ * token budget it must share with the task block; `undefined` when injection is off, there is no
+ * index, or the file is absent, unreadable, a symlink, or not in the shape `openlore analyze`
+ * writes. Never throws.
+ */
+export async function readSlimDigest(directory: string): Promise<{ text: string; hash: string; tokenBudget: number } | undefined> {
+  try {
+    // The same fallback as `buildInjection`: an unreadable config means the defaults.
+    let cfg: ReturnType<typeof resolveInjectionConfig>;
+    try { cfg = resolveInjectionConfig((await readOpenLoreConfig(directory))?.contextInjection); } catch { cfg = INJECTION_DEFAULTS; }
+    if (cfg.mode === 'off') return undefined;
+    const analysisDir = join(directory, OPENLORE_ANALYSIS_REL_PATH);
+    // No index on this machine, no digest: its facts would be stated as current while nothing here
+    // computed them (a committed file, or one left after the index was removed).
+    if (!existsSync(join(analysisDir, ARTIFACT_LLM_CONTEXT)) || !existsSync(join(analysisDir, ARTIFACT_SLIM_DIGEST))) return undefined;
+    // An index imported from a bundle was not computed here; its digest is not stated as source-derived.
+    if (await readAnalysisContentProvenance(directory) !== 'source-derived') return undefined;
+    const raw = await readFileConfined(analysisDir, ARTIFACT_SLIM_DIGEST, 16_384, true, true);
+    if (!isWellFormedSlimDigest(raw)) return undefined;
+    const text = raw.replace(/\n$/, '');
+    // Keyed on what it names, not its numbers: the agent's own edits change the counts, and that
+    // is not news worth reprinting the digest for. A new top function, language, or intent is.
+    const named = text.replace(/<<<OPENLORE_DATA_[0-9a-f]{8}>>>/g, '<<<FRAME>>>').replace(/[0-9]+/g, '#');
+    const hash = createHash('sha256').update(named).digest('hex').slice(0, 16);
+    return { text, hash, tokenBudget: cfg.tokenBudget };
+  } catch {
+    return undefined;
+  }
 }
 
 /**

@@ -31,7 +31,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { readStdin } from '../../utils/stdin.js';
 import { withLoggerOptions } from '../../utils/logger.js';
-import { OPENLORE_DIR } from '../../constants.js';
+import { ARTIFACT_SLIM_DIGEST, OPENLORE_DIR } from '../../constants.js';
 import { openloreProjectRoot } from '../../utils/project-root.js';
 import { errorReason, recordHookRun, type HookOutcome } from '../../core/services/hook-health.js';
 import { HOOK_MOMENTS, findingIdentity, markFixed, markOpen, markShown, readSession, wasShown, writeSession, type FindingProof, type HookMoment } from '../../core/services/hook-session.js';
@@ -794,7 +794,17 @@ async function runHookUnscreened(moment: HookMoment, raw: string, opts: { cwd?: 
   report.root = root;
   if (momentDisabled(root, moment)) return silent;
   if (moment === 'before-stop' && payload.stopHookActive) return silent;
-  if (moment === 'after-compact') return afterCompact(root, opts.timeoutMs ?? TIMEOUT_MS[moment], report);
+  if (moment === 'after-compact') {
+    // A compaction drops the slim digest and the silence contract from the agent's context: the
+    // next prompt states them again (change: adopt-agent-context-interop). Best-effort.
+    if (payload.sessionId) {
+      const session = readSession(root, payload.sessionId);
+      markFixed(session, 'slim-digest', [ARTIFACT_SLIM_DIGEST], new Set());
+      for (const f of Object.values(session.findings)) if (f.code === 'notice' && f.subject === 'silence-contract') f.state = 'fixed';
+      await writeSession(root, payload.sessionId, session);
+    }
+    return afterCompact(root, opts.timeoutMs ?? TIMEOUT_MS[moment], report);
+  }
   if (moment === 'before-subagent') {
     // Nothing reads the queue when sub-agent briefings or task injection are off: nothing is stored.
     if ((payload.toolName === 'Agent' || payload.toolName === 'Task') && payload.agentPrompt && !momentDisabled(root, 'subagent-start') && !injectionOff(root)) {

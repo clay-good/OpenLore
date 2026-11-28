@@ -27,30 +27,32 @@ they work.**
 
 Shipped work is in `CHANGELOG.md` and `openspec/changes/archive/`.
 
-## Fix first: open issues (trust bar, ADR-0038 item 1)
+## Fix first (trust bar, ADR-0038 item 1)
 
-Bug PRs, one per issue, before new evidence kinds ship. Ordered by harm to an agent that trusts the answer.
+The seven issues listed here before (#805-#811) are closed. These were found in older code while
+`adopt-agent-context-interop` was reviewed; each is a small bug PR. Ordered by harm to an agent that
+trusts the answer.
 
-| Issue | Harm | Fix |
+| Where | Harm | Fix |
 |-------|------|-----|
-| [#805](https://github.com/clay-good/OpenLore/issues/805) `get_function_body` with an unanalyzed `ref` | Returns a call site as the definition: a silent wrong answer | Say "not assessed: ref not analyzed", never a line-scan guess |
-| [#807](https://github.com/clay-good/OpenLore/issues/807) `structural_diff` parse failures | Files are skipped from check-weakening without a signal | Name the revision and cause; list skipped files as not assessed |
-| [#810](https://github.com/clay-good/OpenLore/issues/810) "not ready" answers | Clients cannot tell "no analysis" from an answer | Use MCP `isError`, or document the not-ready shape in each tool's schema |
-| [#806](https://github.com/clay-good/OpenLore/issues/806) `search_code` text mode on a large monorepo | Crashes the analyzer daemon, again on retry | Bounded memory, or a clean error |
-| [#808](https://github.com/clay-good/OpenLore/issues/808) stale artifact lock | A dead analyzer's lock blocks the next build | Check the holder is alive before honoring the lock |
-| [#809](https://github.com/clay-good/OpenLore/issues/809) interrupted background build | The index stays half-built | The next run detects it and restarts the build |
-| [#811](https://github.com/clay-good/OpenLore/issues/811) `analyze --directory` | Drivers must `cd` into each repository | Add the flag, as other commands have |
+| Prompt briefing `names()` (`orient-inject-render.ts`) | Shows 3 callers of a function with 5, with no "+2 more", and unqualified names | Say how many were left out; qualify class methods |
+| Handoff briefing (`handoff.ts`) | Says "the index is behind the working tree" right after a fresh analyze, whenever any part is not assessed | Print the staleness line only when the index is stale; name the parts not assessed |
+| Silence contract (`orient-inject.ts`) | A backticked name that does not resolve because the index is behind looks like "no such code" | Say the index is behind when an anchor does not resolve and the index is stale |
+| `CODEBASE.md` workflow section and `orient` "Next steps" | Name tools the wired preset does not expose | Filter by the wired preset, as the prompt briefing does (`trim-standing-agent-instructions` covers the digest) |
+| Prompt briefing `keepExactAnchors` | Drops the spec domain that an exact `Implementation` anchor links | Keep linked spec domains for the resolved symbol |
+| `sanitizeForTerminal` (`misc.ts`) | Unicode tag characters and other invisible format characters survive every served frame | Strip them; the slim digest already refuses them |
+| `openlore doctor` / `status --json` | Doctor warns about an LLM key on every fresh repository; `status --json` says no hook moment is wired while doctor counts 9 | Treat the optional LLM as optional; report wiring the same way in both |
 
 ## Next release (in this order)
 
 | # | Change | What it does for the agent | Needs |
 |---|--------|----------------------------|-------|
-| 1 | [`adopt-agent-context-interop`](openspec/changes/adopt-agent-context-interop) groups 1-2 | A 12-line digest once per session replaces an 11 KB file on every turn | — |
-| 2 | [`trim-standing-agent-instructions`](openspec/changes/trim-standing-agent-instructions) | Standing instructions are a few lines; tool descriptions are 800 characters or fewer | 1 |
+| 1 | `adopt-agent-context-interop` (shipped; [archived](openspec/changes/archive/2026-11-27-adopt-agent-context-interop)) | A 9-line digest once per session, and five short plugin skills | — |
+| 2 | [`trim-standing-agent-instructions`](openspec/changes/trim-standing-agent-instructions) | Standing instructions are a few lines; tool descriptions are 800 characters or fewer; the full-digest `@`-import goes | 1 (shipped) |
 | 3 | [`add-incremental-early-cutoff`](openspec/changes/add-incremental-early-cutoff) | A comment or format edit no longer marks answers stale, so "stale" can be trusted | — |
 | 4 | [`add-pushed-evidence-yield`](openspec/changes/add-pushed-evidence-yield) | We see which pushed lines the agent uses, so dead weight is cut | — |
 | 5 | [`add-first-touch-file-briefing`](openspec/changes/add-first-touch-file-briefing) | The first read of a file shows its callers elsewhere, its decisions, its contracts, and its tests | 4 to measure it |
-| 6 | [`add-session-catch-up-briefing`](openspec/changes/add-session-catch-up-briefing) | A new session starts with what changed since the last one, only when it matters | 1 |
+| 6 | [`add-session-catch-up-briefing`](openspec/changes/add-session-catch-up-briefing) | A new session starts with what changed since the last one, only when it matters | 1 (shipped) |
 | 7 | [`add-verification-feedback-loop`](openspec/changes/add-verification-feedback-loop) group 4 and fold-ins | New breaks are handed back to the agent at stop, once, with proof; breaking exports, contract breaks, and still-set env keys join the receipt | — |
 | 8 | [`add-log-anchor-conclusions`](openspec/changes/add-log-anchor-conclusions) | A failed command's error points at the line that emitted it | — |
 | 9 | [`ship-claude-code-plugin`](openspec/changes/ship-claude-code-plugin) (finish) | One install, no setup: a week of daily use on three OS, the `doctor` double-wiring check, the directory submission | — |
@@ -60,7 +62,6 @@ Bug PRs, one per issue, before new evidence kinds ship. Ordered by harm to an ag
 | Change | What it does for the agent |
 |--------|----------------------------|
 | [`add-verification-feedback-loop`](openspec/changes/add-verification-feedback-loop) new findings and `patch` input | New architecture violations, added secrets, and new import cycles; grading an edit before it is written |
-| [`adopt-agent-context-interop`](openspec/changes/adopt-agent-context-interop) group 3 | Five short skills that name only tools the plugin exposes |
 | [`curate-product-surface`](openspec/changes/curate-product-surface) | No stale skill is offered to the agent; fewer docs and a short README for people |
 | [`spec-framework-neutrality`](openspec/changes/spec-framework-neutrality) groups 6-11 | Written intent from ADR folders first, then Spec Kit, BMAD, plain requirements, and tests |
 

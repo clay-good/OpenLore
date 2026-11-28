@@ -6,7 +6,7 @@
  * already been told, and the commit it started from.
  */
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteFile } from '../decisions/atomic-store.js';
 import { OPENLORE_DIR } from '../../constants.js';
@@ -23,6 +23,27 @@ const MAX_DELIVERED = 2000;
 
 export function deliveredDir(root: string): string {
   return join(root, OPENLORE_DIR, 'session-ledger', 'hook-delivered');
+}
+
+/** File names `deliveredPath` produces, and the atomic writer's temp files for them. */
+const RECORD_NAME = /^(?:[0-9a-f]{24}\.json|\.[0-9a-f]{24}\.json\.tmp-\d+-\d+)$/;
+
+/**
+ * True when `.openlore`, `session-ledger` and `hook-delivered` under `root` are each absent or a
+ * real directory, never a symlink. An absent component is plain: the atomic writer creates it.
+ */
+function recordDirIsPlain(root: string): boolean {
+  let dir = root;
+  for (const part of [OPENLORE_DIR, 'session-ledger', 'hook-delivered']) {
+    dir = join(dir, part);
+    try {
+      const st = lstatSync(dir);
+      if (st.isSymbolicLink() || !st.isDirectory()) return false;
+    } catch {
+      return true;
+    }
+  }
+  return true;
 }
 
 export function deliveredPath(root: string, sessionId: string): string {
@@ -165,6 +186,10 @@ export function markOpen(rec: SessionRecord, reported: ReadonlySet<string>): voi
  */
 export async function writeSession(root: string, sessionId: string | undefined, rec: SessionRecord): Promise<void> {
   if (!sessionId) return;
+  // A repository can commit `.openlore/session-ledger/hook-delivered` (or a parent) as a symlink.
+  // Writing and pruning through it would create and DELETE files outside the repository, so a
+  // symlinked component means no record at all (dedupe is best-effort).
+  if (!recordDirIsPlain(root)) return;
   try {
     const now = readSession(root, sessionId);
     const keys = [...new Set([...now.keys, ...rec.keys])].slice(-MAX_DELIVERED);
@@ -180,7 +205,9 @@ export async function writeSession(root: string, sessionId: string | undefined, 
     await atomicWriteFile(deliveredPath(root, sessionId), JSON.stringify({ startHead: now.startHead ?? rec.startHead, keys, findings: Object.fromEntries(kept) }));
     const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
     for (const n of readdirSync(deliveredDir(root))) {
-      try { if (statSync(join(deliveredDir(root), n)).mtimeMs < cutoff) unlinkSync(join(deliveredDir(root), n)); } catch { /* raced */ }
+      // Only the records this module writes are pruned, never another file that sits there.
+      if (!RECORD_NAME.test(n)) continue;
+      try { if (lstatSync(join(deliveredDir(root), n)).mtimeMs < cutoff) unlinkSync(join(deliveredDir(root), n)); } catch { /* raced */ }
     }
   } catch { /* dedupe is best-effort: at worst a fact is said twice */ }
 }
