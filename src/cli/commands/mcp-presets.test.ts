@@ -701,7 +701,7 @@ describe('tools/list payload budget (spec-28)', () => {
     // A description on each of the 47 inputs that had none (mcp-quality Complete Input
     // Schemas): 112,000 → 115,500 B (measured 114,718 B). The wording was kept short first.
     // The 15 descriptions over 800 characters were cut (change: trim-standing-agent-instructions):
-    // 115,500 → 111,000 B (measured 110,499 B), so the saving cannot silently grow back.
+    // 115,500 → 111,000 B (measured 110,513 B), so the saving cannot silently grow back.
     expect(payloadBytes({ preset: 'full' })).toBeLessThan(111_000);
   });
 
@@ -733,7 +733,7 @@ describe('tools/list payload budget (spec-28)', () => {
   // the full surface (governance reads only, no inventories/specs/coordination), so
   // an out-of-box agent on the default surface still pays only a small prefix.
   it('substrate preset (navigation + spec workflows + governance reads) stays well under the full surface', () => {
-    expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(21_100);
+    expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(20_900);
     expect(payloadBytes({ preset: 'substrate' })).toBeLessThan(payloadBytes({ preset: 'full' }));
     expect(payloadBytes({ preset: 'substrate' })).toBeGreaterThan(payloadBytes({ preset: 'navigation' }));
   });

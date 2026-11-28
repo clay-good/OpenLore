@@ -1958,9 +1958,9 @@ export function piActivatorDescription(): string {
  * raising a budget changes both a number and its rationale (the STANDING_CONTEXT_BUDGETS pattern).
  */
 export const PI_STANDING_CONTEXT_BUDGETS: Record<PiSessionToolSurface, { baselineTokens: number; maxTokens: number; rationale: string }> = {
-  lean: { baselineTokens: 3_006, maxTokens: 3_180, rationale: 'Includes the configuration workflow actions on openlore_configure (188 tokens, loosely typed arguments); re-measured at 3,006 (change: trim-standing-agent-instructions), plus 5.8% headroom.' },
+  lean: { baselineTokens: 3_006, maxTokens: 3_180, rationale: 'Includes the configuration workflow actions on openlore_configure (188 tokens, loosely typed arguments); re-measured at 3,006, an earlier drift that trim-standing-agent-instructions (MCP descriptions only) does not move; plus 5.8% headroom.' },
   search: { baselineTokens: 240, maxTokens: 300, rationale: 'Measured budget for orient and search_code; Pi tool_search loads specialized tools only when requested.' },
-  all: { baselineTokens: 9_039, maxTokens: 9_400, rationale: 'Grew with verify_change, certify_provenance, certify_merge, and fleet_status (the moat/interop features); re-measured at 9,039 (change: trim-standing-agent-instructions), plus 4.0% headroom.' },
+  all: { baselineTokens: 9_039, maxTokens: 9_400, rationale: 'Grew with verify_change, certify_provenance, certify_merge, and fleet_status (the moat/interop features); re-measured at 9,039, an earlier drift that trim-standing-agent-instructions (MCP descriptions only) does not move; plus 4.0% headroom.' },
 };
 
 /** Deterministic estimate (characters / 4) of what the given registered tools add to the prompt. */

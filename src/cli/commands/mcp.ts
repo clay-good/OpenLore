@@ -1930,16 +1930,16 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'certify_public_surface',
     description:
-      'USE THIS WHEN: you are about to ship a library change — "did I break my consumers\' ' +
-      'contract?" (removed/renamed export, new required param, narrowed types, reduced visibility). ' +
-      'No base ref: the PUBLIC SURFACE (exports + signatures). With a base ref: a breaking-change ' +
-      'VERDICT for the working-tree diff, each changed export breaking | non-breaking | ' +
+      'USE THIS WHEN: shipping a library change — "did I break my consumers\' contract?" ' +
+      '(removed/renamed export, new required param, narrowed types, reduced visibility). No base ' +
+      'ref: the PUBLIC SURFACE (exports + signatures). With a base ref: a breaking-change VERDICT ' +
+      'for the working-tree diff, each changed export breaking | non-breaking | ' +
       'potentially-breaking; a breaking one is breaking-consumed (with consumers) or ' +
       'breaking-unconsumed-in-index (never "safe"); federation also counts indexed sibling repos. ' +
       'Breakages accepted in .openlore/public-surface-baseline.jsonl are listed as accepted. ' +
-      'Unprovable = potentially-breaking. Renames are reported as renames. Distinct from ' +
+      'Unprovable = potentially-breaking. Renames stay renames. Distinct from ' +
       'change_impact_certificate (paths into a surface). Signatures: TS/JS/Python; others ' +
-      'fail-soft.',
+      'fail-soft. Run analyze_codebase first.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -2020,13 +2020,13 @@ export const TOOL_DEFINITIONS = [
   {
     name: 'briefing_since',
     description:
-      'USE THIS WHEN: a lot changed since you last looked (a large PR to review, time away, ' +
-      'onboarding) and you want the changes that STRUCTURALLY MATTER. Unlike blast_radius / ' +
-      'change_impact_certificate (YOUR pending diff), this briefs everything SINCE a base ref. ' +
-      'Changed production symbols are ranked in a fixed tier order, surprising-change (a hub whose ' +
-      'file rarely changed) > hub-change > chokepoint-change > ordinary-change, from existing ' +
-      'labels, NOT a weighted score; each carries raw evidence (fan-in, fan-out, prior churn), ' +
-      'grouped by region, with the tests to run. Renames are listed under carried; ' +
+      'USE THIS WHEN: a lot changed since you last looked and you want the changes that ' +
+      'STRUCTURALLY MATTER. Unlike blast_radius / change_impact_certificate (YOUR pending diff), ' +
+      'this briefs everything SINCE a base ref. Changed production symbols are ranked in a fixed ' +
+      'tier order, surprising-change (a hub whose file rarely changed) > hub-change > ' +
+      'chokepoint-change > ordinary-change, from existing labels, NOT a weighted score; each ' +
+      'carries raw evidence (fan-in, fan-out, prior churn), grouped by region, with the tests to ' +
+      'run. Renames are listed under carried, and a file kept whole says why in changeGranularity; ' +
       'surprising-change is withheld when history is too shallow; a bounded briefing carries a ' +
       'truncation receipt and never drops a higher tier for a lower one. Run analyze_codebase ' +
       'first.',
@@ -2092,12 +2092,12 @@ export const TOOL_DEFINITIONS = [
       'USE THIS WHEN: you are about to call a function ("what can it throw, and is any of it ' +
       'handled?") or you made one throw ("who is exposed, and where is it caught?"). The error ' +
       'analogue of analyze_impact: for a `symbol` (name or name::path), returns `escapes` ' +
-      '(exception types that propagate OUT to callers, each with origin file/line and call path) ' +
-      'and `handledInternally` (caught within this function). SCOPE: TS/JS/Python/Java/C# ' +
-      'exceptions, plus a Go returned-error and panic/recover model (`errorModel: go-value`); any ' +
-      'other language returns `unsupported`, never an empty escape set. A SOUND LOWER BOUND: an ' +
-      'un-analyzable callee is disclosed in `boundaries`, never assumed exception-free; an ' +
-      'unknowable throw type is `<dynamic>`; Python `except` matches exact names. Run ' +
+      '(exception types that propagate OUT to callers, each with origin and call path) and ' +
+      '`handledInternally` (caught here). SCOPE: TS/JS/Python/Java/C# exceptions, plus a Go ' +
+      'returned-error and panic/recover model (`errorModel: go-value`); any other language returns ' +
+      '`unsupported`, never an empty escape set. A SOUND LOWER BOUND: an un-analyzable callee is ' +
+      'disclosed in `boundaries`, never assumed exception-free; an unknowable throw type is ' +
+      '`<dynamic>`; typed catch/except matches exact type names only (no subclasses). Run ' +
       'analyze_codebase first.',
     inputSchema: {
       type: 'object',
@@ -2691,11 +2691,11 @@ export const STANDING_CONTEXT_BUDGETS: Record<string, {
   navigation: { baselineTokens: 3_533, maxTokens: 3_800, rationale: 'Exact v1 wire baseline plus 7.6% headroom.' },
   memory: { baselineTokens: 1_510, maxTokens: 1_610, rationale: 'Re-baselined from 1,216 for remember\'s trigger and pinned inputs (change: add-memory-trigger-predicates), then from 1,399 for its bounded claims input (change: add-memory-claim-verdicts), plus 6.6% headroom.' },
   verify: { baselineTokens: 2_075, maxTokens: 2_220, rationale: 'Grew with verify_change then certify_provenance (add-verification-feedback-loop, add-change-provenance-certificate); exact measured baseline plus 7.0% headroom.' },
-  federation: { baselineTokens: 3_918, maxTokens: 4_100, rationale: 'Re-baselined at 3,918 measured after map_in_flight_conflicts and briefing_since were cut to 800 characters (change: trim-standing-agent-instructions); plus 4.6% headroom.' },
+  federation: { baselineTokens: 3_918, maxTokens: 4_100, rationale: 'Re-baselined at 3,918 measured after select_tests and map_in_flight_conflicts were cut to 800 characters (change: trim-standing-agent-instructions); plus 4.6% headroom.' },
   coordination: { baselineTokens: 3_630, maxTokens: 3_880, rationale: 'Grew with certify_merge, fleet_status, then declare_footprint (add-merge-semantic-certificate, add-fleet-coordination-arc, add-peer-footprint-board), then a description on every input (mcp-quality Complete Input Schemas); re-baselined at 3,630 after its long descriptions were cut to 800 characters (change: trim-standing-agent-instructions), plus 6.9% headroom.' },
-  plugin: { baselineTokens: 4_190, maxTokens: 4_450, rationale: 'The Claude Code plugin set (change: reframe-governance-as-agent-evidence); re-baselined at 4,190 after blast_radius and select_tests were cut to 800 characters (change: trim-standing-agent-instructions), plus 6.2% headroom.' },
+  plugin: { baselineTokens: 4_190, maxTokens: 4_450, rationale: 'The Claude Code plugin set (change: reframe-governance-as-agent-evidence); re-baselined at 4,190 after blast_radius was cut to 800 characters (change: trim-standing-agent-instructions), plus 6.2% headroom.' },
   substrate: { baselineTokens: 5_214, maxTokens: 5_500, rationale: 'Re-baselined at 5,214 measured after blast_radius was cut to 800 characters (change: trim-standing-agent-instructions); plus 5.5% headroom.' },
-  full: { baselineTokens: 27_625, maxTokens: 29_000, rationale: 'Grew with verify_change, certify_provenance, certify_merge, get_handoff_briefing, certify_service_contract, and declare_footprint, then a description on each of the 47 inputs that had none (mcp-quality Complete Input Schemas); re-baselined at 27,625 measured after the 15 descriptions over 800 characters were cut (change: trim-standing-agent-instructions), plus 5.0% headroom.' },
+  full: { baselineTokens: 27_629, maxTokens: 29_000, rationale: 'Grew with verify_change, certify_provenance, certify_merge, get_handoff_briefing, certify_service_contract, and declare_footprint, then a description on each of the 47 inputs that had none (mcp-quality Complete Input Schemas); re-baselined at 27,629 measured after the 15 descriptions over 800 characters were cut (change: trim-standing-agent-instructions), plus 5.0% headroom.' },
 };
 
 /**
