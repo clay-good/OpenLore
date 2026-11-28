@@ -743,7 +743,8 @@ describe('the managed instruction block stays short', () => {
   });
 
   it('writes the same LF block from a CRLF checkout', async () => {
-    const tpl = await template();
+    // A Windows checkout already reads the template as CRLF: start from LF either way.
+    const tpl = (await template()).replace(/\r\n/g, '\n');
     const crlf = tpl.split('\n').join('\r\n');
     expect(crlf).toContain('\r\n');
     const block = renderInstructionBlock(crlf, 'substrate', TOOL_PRESETS.substrate);
