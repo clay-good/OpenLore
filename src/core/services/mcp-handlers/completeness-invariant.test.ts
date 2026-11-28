@@ -249,6 +249,7 @@ describe('every incomplete answer names WHICH part is incomplete', () => {
       unsupported: true,
       notReady: true,
       notAssessed: ['openapi.yaml'],
+      parseFailures: [{ file: 'a.ts', revision: 'head', cause: 'syntax error at line 3' }],
       boundaries: ['an external callee was not analyzed'],
       truncated: 7,
       'truncation.bounded': true,
